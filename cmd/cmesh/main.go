@@ -93,8 +93,8 @@ func runManager(args []string) error {
 			JoinToken: *joinToken,
 		}, state)
 		fmt.Println("starting CMesh manager in single-node bootstrap mode")
-		fmt.Printf("manager API: http://127.0.0.1%s\n", *addr)
-		fmt.Printf("dashboard:   http://127.0.0.1%s\n", *addr)
+		fmt.Printf("manager API: %s\n", localHTTPURL(*addr))
+		fmt.Printf("dashboard:   %s\n", localHTTPURL(*addr))
 		if *joinToken == "" {
 			fmt.Println("warning: manager join token is not set; any worker can join")
 		}
@@ -108,6 +108,16 @@ func runManager(args []string) error {
 	}
 
 	return nil
+}
+
+func localHTTPURL(addr string) string {
+	if strings.HasPrefix(addr, ":") {
+		return "http://127.0.0.1" + addr
+	}
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		return addr
+	}
+	return "http://" + addr
 }
 
 func runWorker(args []string) error {

@@ -15,3 +15,17 @@ func TestLocalWorkerProfiles(t *testing.T) {
 		t.Fatalf("expected repeated profile names to be made unique")
 	}
 }
+
+func TestLocalHTTPURL(t *testing.T) {
+	tests := map[string]string{
+		":8080":          "http://127.0.0.1:8080",
+		"127.0.0.1:8080": "http://127.0.0.1:8080",
+		"0.0.0.0:8080":   "http://0.0.0.0:8080",
+	}
+
+	for input, want := range tests {
+		if got := localHTTPURL(input); got != want {
+			t.Fatalf("localHTTPURL(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
