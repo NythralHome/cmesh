@@ -47,6 +47,16 @@ export CMESH_JOIN_TOKEN="replace-with-generated-token"
 ./cmesh-linux-amd64 manager start --addr :8080
 ```
 
+Or install the manager as a Linux systemd service in one step:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-manager-linux.sh | \
+  sudo env DATABASE_URL="postgres://user:password@host:5432/cmesh_alpha?sslmode=require" \
+  sh
+```
+
+If `CMESH_JOIN_TOKEN` is omitted, the installer generates one and stores it in `/etc/cmesh/manager.env`.
+
 For internet alpha tests, use Postgres so manager restarts do not erase workers, jobs, and benchmark history:
 
 ```sh
@@ -95,6 +105,15 @@ https://cmesh.example.com
 macOS/Linux:
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | \
+  CMESH_MANAGER_URL="https://cmesh.example.com" \
+  CMESH_JOIN_TOKEN="replace-with-generated-token" \
+  sh
+```
+
+Manual macOS/Linux run:
+
+```sh
 chmod +x ./cmesh
 ./cmesh worker run \
   --manager https://cmesh.example.com \
@@ -107,6 +126,14 @@ chmod +x ./cmesh
 ```
 
 Windows PowerShell:
+
+```powershell
+$env:CMESH_MANAGER_URL="https://cmesh.example.com"
+$env:CMESH_JOIN_TOKEN="replace-with-generated-token"
+iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.ps1 -UseB | iex
+```
+
+Manual Windows PowerShell run:
 
 ```powershell
 .\cmesh.exe worker run `

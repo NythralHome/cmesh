@@ -111,6 +111,15 @@ go run ./cmd/cmesh job list
 
 For testing workers across the internet, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
+Install a macOS/Linux worker from a release in one step:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | \
+  CMESH_MANAGER_URL="https://cmesh.nythral.com" \
+  CMESH_JOIN_TOKEN="replace-with-join-token" \
+  sh
+```
+
 For a one-shot registration without a heartbeat loop:
 
 ```sh
