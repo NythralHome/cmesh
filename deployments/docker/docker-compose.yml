@@ -6,7 +6,7 @@ services:
     command: ["manager", "start", "--addr", ":8080"]
     environment:
       CMESH_JOIN_TOKEN: "${CMESH_JOIN_TOKEN:?set CMESH_JOIN_TOKEN}"
+      DATABASE_URL: "${DATABASE_URL:-}"
     ports:
       - "8080:8080"
     restart: unless-stopped
-

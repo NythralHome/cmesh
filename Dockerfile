@@ -1,7 +1,7 @@
 FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY cmd ./cmd
 COPY internal ./internal
 
@@ -24,4 +24,3 @@ EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/cmesh"]
 CMD ["manager", "start", "--addr", ":8080"]
-

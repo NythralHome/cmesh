@@ -47,11 +47,22 @@ export CMESH_JOIN_TOKEN="replace-with-generated-token"
 ./cmesh-linux-amd64 manager start --addr :8080
 ```
 
+For internet alpha tests, use Postgres so manager restarts do not erase workers, jobs, and benchmark history:
+
+```sh
+export CMESH_JOIN_TOKEN="replace-with-generated-token"
+export DATABASE_URL="postgres://user:password@host:5432/cmesh_alpha?sslmode=require"
+./cmesh-linux-amd64 manager start --addr :8080
+```
+
+CMesh runs the required schema migrations on startup. If `DATABASE_URL` is not set, the manager uses in-memory state for local development.
+
 Run with Docker Compose:
 
 ```sh
 cd deployments/docker
 export CMESH_JOIN_TOKEN="replace-with-generated-token"
+export DATABASE_URL="postgres://user:password@host:5432/cmesh_alpha?sslmode=require"
 docker compose up -d --build
 ```
 
@@ -131,9 +142,8 @@ https://cmesh.example.com
 
 ## Current Alpha Limits
 
-- Manager state is in-memory. Restarting manager clears nodes, jobs, and benchmark history.
+- Manager state is durable when `DATABASE_URL` points to Postgres. Without `DATABASE_URL`, local development uses in-memory state and restart clears nodes, jobs, and benchmark history.
 - Join token protects worker registration, but there is no user auth for dashboard/API yet.
 - Transport security depends on your reverse proxy. Use HTTPS for internet tests.
 - Workers execute only supported CMesh job types. Current executor: `echo`.
 - This is a trusted private alpha, not a public compute marketplace.
-

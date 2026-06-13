@@ -16,7 +16,7 @@ import (
 
 type Server struct {
 	addr      string
-	state     *State
+	state     Store
 	joinToken string
 	mux       *http.ServeMux
 	server    *http.Server
@@ -27,11 +27,11 @@ type ServerOptions struct {
 	JoinToken string
 }
 
-func NewServer(addr string, state *State) *Server {
+func NewServer(addr string, state Store) *Server {
 	return NewServerWithOptions(ServerOptions{Addr: addr}, state)
 }
 
-func NewServerWithOptions(options ServerOptions, state *State) *Server {
+func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
 		addr:      options.Addr,

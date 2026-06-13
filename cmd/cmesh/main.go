@@ -67,6 +67,7 @@ func runManager(args []string) error {
 		fs := flag.NewFlagSet("manager start", flag.ContinueOnError)
 		addr := fs.String("addr", ":8080", "HTTP listen address")
 		joinToken := fs.String("join-token", os.Getenv("CMESH_JOIN_TOKEN"), "worker join token")
+		databaseURL := fs.String("database-url", os.Getenv("DATABASE_URL"), "Postgres database URL")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -74,7 +75,19 @@ func runManager(args []string) error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
-		state := manager.NewState()
+		var state manager.Store
+		state = manager.NewState()
+		if *databaseURL != "" {
+			postgresStore, err := manager.NewPostgresStore(ctx, *databaseURL)
+			if err != nil {
+				return err
+			}
+			defer postgresStore.Close()
+			state = postgresStore
+			fmt.Println("manager storage: postgres")
+		} else {
+			fmt.Println("manager storage: in-memory")
+		}
 		server := manager.NewServerWithOptions(manager.ServerOptions{
 			Addr:      *addr,
 			JoinToken: *joinToken,
