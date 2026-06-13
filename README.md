@@ -100,6 +100,13 @@ Register multiple local test workers:
 go run ./cmd/cmesh dev local-cluster --workers 3
 ```
 
+Submit a first echo job:
+
+```sh
+go run ./cmd/cmesh job submit --type echo --input "hello cluster"
+go run ./cmd/cmesh job list
+```
+
 For a one-shot registration without a heartbeat loop:
 
 ```sh

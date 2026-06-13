@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
 	"github.com/cmesh/cmesh/internal/resources"
 )
@@ -32,6 +34,9 @@ func NewServer(addr string, state *State) *Server {
 	mux.HandleFunc("/v1/cluster", s.handleCluster)
 	mux.HandleFunc("/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
+	mux.HandleFunc("/v1/jobs", s.handleJobs)
+	mux.HandleFunc("/v1/jobs/", s.handleJob)
+	mux.HandleFunc("/v1/workers/", s.handleWorkerRoutes)
 	mux.HandleFunc("/v1/workers/join", s.handleWorkerJoin)
 	mux.HandleFunc("/v1/workers/heartbeat", s.handleWorkerHeartbeat)
 
@@ -136,6 +141,106 @@ func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"jobs": s.state.Jobs()})
+	case http.MethodPost:
+		var req jobs.CreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Type == "" {
+			http.Error(w, "type is required", http.StatusBadRequest)
+			return
+		}
+		job, err := s.state.CreateJob(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusCreated, job)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/v1/jobs/")
+	if path == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	parts := strings.Split(path, "/")
+	jobID := parts[0]
+	if len(parts) == 2 && parts[1] == "complete" {
+		s.handleJobComplete(w, r, jobID)
+		return
+	}
+	if len(parts) != 1 || r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
+
+	job, ok := s.state.Job(jobID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req jobs.CompleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+
+	job, ok := s.state.CompleteJob(jobID, req)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleWorkerRoutes(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/v1/workers/")
+	parts := strings.Split(path, "/")
+	if len(parts) == 3 && parts[1] == "jobs" && parts[2] == "next" {
+		s.handleWorkerNextJob(w, r, parts[0])
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleWorkerNextJob(w http.ResponseWriter, r *http.Request, nodeID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	job, ok := s.state.NextJobForWorker(nodeID)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"job": nil})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 
 func (s *Server) handleWorkerJoin(w http.ResponseWriter, r *http.Request) {
@@ -382,6 +487,13 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       {{else}}
       <div class="empty">No workers have joined this cluster yet.</div>
       {{end}}
+    </section>
+    <section style="margin-top: 20px;">
+      <div class="section-head">
+        <h2>Jobs</h2>
+        <code>POST /v1/jobs</code>
+      </div>
+      <div class="empty">Job execution is available through the API and CLI. Dashboard job tables will be expanded next.</div>
     </section>
   </main>
 </body>

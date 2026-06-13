@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cmesh/cmesh/internal/cluster"
+	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
 	"github.com/cmesh/cmesh/internal/resources"
 )
@@ -216,6 +217,115 @@ func TestBenchmarkSubmissionUpdatesClusterScore(t *testing.T) {
 	if listRec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", listRec.Code)
 	}
+}
+
+func TestJobLifecycle(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+
+	worker := joinWorkerForTest(t, srv, "job-worker")
+	state.PutBenchmark(resources.BenchmarkResult{
+		NodeID: worker.NodeID,
+		Kind:   resources.BenchmarkCPU,
+		Score:  10,
+		Unit:   "score",
+	})
+
+	createReq := jobs.CreateRequest{
+		Type:  "echo",
+		Input: "hello cluster",
+	}
+	body, err := json.Marshal(createReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createHTTPReq := httptest.NewRequest(http.MethodPost, "/v1/jobs", bytes.NewReader(body))
+	createRec := httptest.NewRecorder()
+	srv.ServeHTTP(createRec, createHTTPReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+
+	var created jobs.Job
+	if err := json.NewDecoder(createRec.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != jobs.StatusScheduled {
+		t.Fatalf("expected scheduled job, got %s", created.Status)
+	}
+	if created.AssignedTo != worker.NodeID {
+		t.Fatalf("expected job assigned to %s, got %s", worker.NodeID, created.AssignedTo)
+	}
+
+	nextReq := httptest.NewRequest(http.MethodGet, "/v1/workers/"+worker.NodeID+"/jobs/next", nil)
+	nextRec := httptest.NewRecorder()
+	srv.ServeHTTP(nextRec, nextReq)
+	if nextRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", nextRec.Code)
+	}
+
+	var nextResp struct {
+		Job *jobs.Job `json:"job"`
+	}
+	if err := json.NewDecoder(nextRec.Body).Decode(&nextResp); err != nil {
+		t.Fatal(err)
+	}
+	if nextResp.Job == nil || nextResp.Job.Status != jobs.StatusRunning {
+		t.Fatalf("expected running next job, got %#v", nextResp.Job)
+	}
+
+	completeReq := jobs.CompleteRequest{
+		NodeID: worker.NodeID,
+		Result: "hello cluster",
+	}
+	completeBody, err := json.Marshal(completeReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeHTTPReq := httptest.NewRequest(http.MethodPost, "/v1/jobs/"+created.ID+"/complete", bytes.NewReader(completeBody))
+	completeRec := httptest.NewRecorder()
+	srv.ServeHTTP(completeRec, completeHTTPReq)
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", completeRec.Code, completeRec.Body.String())
+	}
+
+	var completed jobs.Job
+	if err := json.NewDecoder(completeRec.Body).Decode(&completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != jobs.StatusSucceeded {
+		t.Fatalf("expected succeeded job, got %s", completed.Status)
+	}
+	if completed.Result != "hello cluster" {
+		t.Fatalf("unexpected result %q", completed.Result)
+	}
+}
+
+func joinWorkerForTest(t *testing.T, srv *Server, name string) membership.JoinResponse {
+	t.Helper()
+
+	joinReq := membership.JoinRequest{
+		NodeName: name,
+		Role:     cluster.NodeRoleWorker,
+	}
+	body, err := json.Marshal(joinReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/workers/join", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp membership.JoinResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }
 
 const gb = 1024 * 1024 * 1024

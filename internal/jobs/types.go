@@ -14,11 +14,28 @@ const (
 )
 
 type Job struct {
-	ID          string
-	Type        string
-	Status      Status
-	RequestedBy string
-	AssignedTo  string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID          string    `json:"id"`
+	Type        string    `json:"type"`
+	Status      Status    `json:"status"`
+	RequestedBy string    `json:"requested_by"`
+	AssignedTo  string    `json:"assigned_to"`
+	Input       string    `json:"input"`
+	Result      string    `json:"result"`
+	Error       string    `json:"error"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	FinishedAt  time.Time `json:"finished_at,omitempty"`
+}
+
+type CreateRequest struct {
+	Type        string `json:"type"`
+	Input       string `json:"input"`
+	RequestedBy string `json:"requested_by"`
+}
+
+type CompleteRequest struct {
+	NodeID string `json:"node_id"`
+	Result string `json:"result"`
+	Error  string `json:"error"`
 }

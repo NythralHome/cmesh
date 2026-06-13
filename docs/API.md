@@ -97,3 +97,47 @@ Content-Type: application/json
 Workers use this endpoint to refresh liveness and resource state after joining.
 
 The manager currently marks workers offline when no heartbeat has been observed for the configured timeout window.
+
+## Jobs
+
+```http
+POST /v1/jobs
+Content-Type: application/json
+```
+
+Example:
+
+```json
+{
+  "type": "echo",
+  "input": "hello cluster",
+  "requested_by": "developer"
+}
+```
+
+```http
+GET /v1/jobs
+GET /v1/jobs/{job_id}
+```
+
+Workers poll assigned jobs:
+
+```http
+GET /v1/workers/{node_id}/jobs/next
+```
+
+Workers complete jobs:
+
+```http
+POST /v1/jobs/{job_id}/complete
+Content-Type: application/json
+```
+
+Example:
+
+```json
+{
+  "node_id": "node-abc123",
+  "result": "hello cluster"
+}
+```

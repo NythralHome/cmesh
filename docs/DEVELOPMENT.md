@@ -67,6 +67,37 @@ Expected dashboard signals:
 - allowed CPU, memory, and storage increase;
 - benchmark score increases after each worker benchmark is submitted.
 
+## Run An Echo Job
+
+Terminal 1:
+
+```sh
+go run ./cmd/cmesh manager start
+```
+
+Terminal 2:
+
+```sh
+go run ./cmd/cmesh worker run \
+  --name local-live-worker \
+  --cpu 4 \
+  --memory-gb 5 \
+  --disk-gb 50 \
+  --benchmark
+```
+
+Terminal 3:
+
+```sh
+go run ./cmd/cmesh job submit --type echo --input "hello cluster"
+```
+
+The worker polls for assigned jobs after startup and after each heartbeat. To inspect jobs:
+
+```sh
+go run ./cmd/cmesh job list
+```
+
 ## Test
 
 ```sh
