@@ -42,6 +42,8 @@ func run(args []string) error {
 		return runManager(args[1:])
 	case "worker":
 		return runWorker(args[1:])
+	case "dev":
+		return runDev(args[1:])
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -133,6 +135,7 @@ Usage:
   cmesh worker join         Join a cluster as a worker
   cmesh worker run          Join and keep a worker heartbeat running
   cmesh worker benchmark    Run worker benchmarks
+  cmesh dev local-cluster   Register multiple local test workers
   cmesh version             Print version
 
 Use "cmesh <command> help" for command-specific help.`)
@@ -158,6 +161,7 @@ type workerOptions struct {
 	cacheDir     string
 	limits       config.ResourceLimits
 	runBenchmark bool
+	runOnce      bool
 }
 
 func parseWorkerOptions(name string, args []string) (workerOptions, error) {
@@ -172,6 +176,7 @@ func parseWorkerOptions(name string, args []string) (workerOptions, error) {
 	gpu := fs.Bool("gpu", true, "allow GPU discovery and use")
 	vramGB := fs.Uint64("vram-gb", 0, "allowed VRAM in GB")
 	benchmark := fs.Bool("benchmark", false, "run benchmarks after joining")
+	once := fs.Bool("once", false, "join, send one heartbeat, optionally benchmark, then exit")
 	if err := fs.Parse(args); err != nil {
 		return workerOptions{}, err
 	}
@@ -182,6 +187,7 @@ func parseWorkerOptions(name string, args []string) (workerOptions, error) {
 		token:        *token,
 		cacheDir:     *cacheDir,
 		runBenchmark: *benchmark,
+		runOnce:      *once,
 		limits: config.ResourceLimits{
 			CPUCores:    *cpuAllowed,
 			MemoryBytes: gbToBytes(*memoryGB),
@@ -227,6 +233,10 @@ func workerRun(ctx context.Context, options workerOptions) error {
 		if err := runAndSubmitBenchmarks(options.managerURL, resp.NodeID, options.cacheDir); err != nil {
 			return err
 		}
+	}
+	if options.runOnce {
+		fmt.Printf("worker %s completed one-shot run\n", resp.NodeID)
+		return nil
 	}
 
 	for {

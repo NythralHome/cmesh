@@ -94,6 +94,12 @@ Open the dashboard:
 http://localhost:8080
 ```
 
+Register multiple local test workers:
+
+```sh
+go run ./cmd/cmesh dev local-cluster --workers 3
+```
+
 For a one-shot registration without a heartbeat loop:
 
 ```sh
