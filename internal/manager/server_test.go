@@ -10,6 +10,7 @@ import (
 
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/membership"
+	"github.com/cmesh/cmesh/internal/resources"
 )
 
 func TestHealth(t *testing.T) {
@@ -158,6 +159,62 @@ func TestWorkerHeartbeatUpdatesNodeAndOfflineStatus(t *testing.T) {
 	}
 	if nodes[0].Resources.CPU.CoresAllowed != 4 {
 		t.Fatalf("expected heartbeat resource update")
+	}
+}
+
+func TestBenchmarkSubmissionUpdatesClusterScore(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+
+	joinReq := membership.JoinRequest{
+		NodeName: "worker-benchmark",
+		Role:     cluster.NodeRoleWorker,
+	}
+	body, err := json.Marshal(joinReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	joinHTTPReq := httptest.NewRequest(http.MethodPost, "/v1/workers/join", bytes.NewReader(body))
+	joinRec := httptest.NewRecorder()
+	srv.ServeHTTP(joinRec, joinHTTPReq)
+	if joinRec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d", joinRec.Code)
+	}
+
+	var joinResp membership.JoinResponse
+	if err := json.NewDecoder(joinRec.Body).Decode(&joinResp); err != nil {
+		t.Fatal(err)
+	}
+
+	benchmark := resources.BenchmarkResult{
+		NodeID: joinResp.NodeID,
+		Kind:   resources.BenchmarkCPU,
+		Score:  42,
+		Unit:   "score",
+	}
+	benchmarkBody, err := json.Marshal(benchmark)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	benchmarkReq := httptest.NewRequest(http.MethodPost, "/v1/benchmarks", bytes.NewReader(benchmarkBody))
+	benchmarkRec := httptest.NewRecorder()
+	srv.ServeHTTP(benchmarkRec, benchmarkReq)
+	if benchmarkRec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", benchmarkRec.Code, benchmarkRec.Body.String())
+	}
+
+	summary := state.ClusterSummary()
+	if summary.BenchmarkScore != 42 {
+		t.Fatalf("expected benchmark score 42, got %f", summary.BenchmarkScore)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/benchmarks", nil)
+	listRec := httptest.NewRecorder()
+	srv.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", listRec.Code)
 	}
 }
 

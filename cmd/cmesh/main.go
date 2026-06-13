@@ -108,8 +108,14 @@ func runWorker(args []string) error {
 		defer stop()
 		return workerRun(ctx, options)
 	case "benchmark":
-		fmt.Println("running local worker benchmarks")
-		fmt.Println("benchmark execution will be implemented in the resources package")
+		fs := flag.NewFlagSet("worker benchmark", flag.ContinueOnError)
+		managerURL := fs.String("manager", "http://127.0.0.1:8080", "manager API URL")
+		nodeID := fs.String("node-id", "", "existing worker node ID for manager submission")
+		cacheDir := fs.String("cache-dir", defaultCacheDir(), "worker artifact cache directory")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		return workerBenchmark(strings.TrimRight(*managerURL, "/"), *nodeID, *cacheDir)
 	case "help", "--help", "-h":
 		printWorkerUsage()
 	default:
@@ -146,11 +152,12 @@ func printWorkerUsage() {
 }
 
 type workerOptions struct {
-	managerURL string
-	name       string
-	token      string
-	cacheDir   string
-	limits     config.ResourceLimits
+	managerURL   string
+	name         string
+	token        string
+	cacheDir     string
+	limits       config.ResourceLimits
+	runBenchmark bool
 }
 
 func parseWorkerOptions(name string, args []string) (workerOptions, error) {
@@ -164,15 +171,17 @@ func parseWorkerOptions(name string, args []string) (workerOptions, error) {
 	diskGB := fs.Uint64("disk-gb", 10, "allowed disk in GB")
 	gpu := fs.Bool("gpu", true, "allow GPU discovery and use")
 	vramGB := fs.Uint64("vram-gb", 0, "allowed VRAM in GB")
+	benchmark := fs.Bool("benchmark", false, "run benchmarks after joining")
 	if err := fs.Parse(args); err != nil {
 		return workerOptions{}, err
 	}
 
 	return workerOptions{
-		managerURL: strings.TrimRight(*managerURL, "/"),
-		name:       *nodeName,
-		token:      *token,
-		cacheDir:   *cacheDir,
+		managerURL:   strings.TrimRight(*managerURL, "/"),
+		name:         *nodeName,
+		token:        *token,
+		cacheDir:     *cacheDir,
+		runBenchmark: *benchmark,
 		limits: config.ResourceLimits{
 			CPUCores:    *cpuAllowed,
 			MemoryBytes: gbToBytes(*memoryGB),
@@ -214,6 +223,11 @@ func workerRun(ctx context.Context, options workerOptions) error {
 	if err := sendHeartbeat(options.managerURL, resp.NodeID, discoverWorkerResources(options)); err != nil {
 		return err
 	}
+	if options.runBenchmark {
+		if err := runAndSubmitBenchmarks(options.managerURL, resp.NodeID, options.cacheDir); err != nil {
+			return err
+		}
+	}
 
 	for {
 		select {
@@ -226,6 +240,53 @@ func workerRun(ctx context.Context, options workerOptions) error {
 			fmt.Printf("heartbeat sent for %s\n", resp.NodeID)
 		}
 	}
+}
+
+func workerBenchmark(managerURL string, nodeID string, cacheDir string) error {
+	results, err := resources.RunLocalBenchmarks(resources.BenchmarkOptions{
+		NodeID:   nodeID,
+		CacheDir: cacheDir,
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, result := range results {
+		fmt.Printf("%s: %.2f %s (%s)\n", result.Kind, result.Score, result.Unit, result.Duration)
+	}
+
+	if nodeID == "" {
+		fmt.Println("not submitted: pass --node-id to attach results to a registered worker")
+		return nil
+	}
+
+	for _, result := range results {
+		if err := submitBenchmark(managerURL, result); err != nil {
+			return err
+		}
+	}
+
+	fmt.Printf("submitted %d benchmark results for %s\n", len(results), nodeID)
+	return nil
+}
+
+func runAndSubmitBenchmarks(managerURL string, nodeID string, cacheDir string) error {
+	results, err := resources.RunLocalBenchmarks(resources.BenchmarkOptions{
+		NodeID:   nodeID,
+		CacheDir: cacheDir,
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, result := range results {
+		fmt.Printf("%s benchmark: %.2f %s\n", result.Kind, result.Score, result.Unit)
+		if err := submitBenchmark(managerURL, result); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func workerJoinRequest(options workerOptions) membership.JoinRequest {
@@ -279,6 +340,25 @@ func sendHeartbeat(managerURL string, nodeID string, snapshot cluster.ResourceSn
 	}
 
 	httpResp, err := http.Post(managerURL+"/v1/workers/heartbeat", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return fmt.Errorf("manager returned %s", httpResp.Status)
+	}
+
+	return nil
+}
+
+func submitBenchmark(managerURL string, result resources.BenchmarkResult) error {
+	body, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+
+	httpResp, err := http.Post(managerURL+"/v1/benchmarks", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

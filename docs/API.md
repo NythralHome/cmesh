@@ -26,6 +26,34 @@ GET /v1/nodes
 
 Returns registered manager and worker nodes.
 
+## Benchmarks
+
+```http
+GET /v1/benchmarks
+```
+
+Returns latest benchmark results grouped by node.
+
+```http
+POST /v1/benchmarks
+Content-Type: application/json
+```
+
+Example:
+
+```json
+{
+  "node_id": "node-abc123",
+  "kind": "cpu",
+  "score": 128.4,
+  "unit": "million_ops_per_second",
+  "duration": 750000000,
+  "metadata": {
+    "threads": "8"
+  }
+}
+```
+
 ## Worker Join
 
 ```http
@@ -69,4 +97,3 @@ Content-Type: application/json
 Workers use this endpoint to refresh liveness and resource state after joining.
 
 The manager currently marks workers offline when no heartbeat has been observed for the configured timeout window.
-

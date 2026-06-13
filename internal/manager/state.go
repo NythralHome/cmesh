@@ -8,6 +8,7 @@ import (
 
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/membership"
+	"github.com/cmesh/cmesh/internal/resources"
 )
 
 type State struct {
@@ -15,6 +16,7 @@ type State struct {
 	startedAt        time.Time
 	heartbeatTimeout time.Duration
 	nodes            map[string]cluster.Node
+	benchmarks       map[string]map[resources.BenchmarkKind]resources.BenchmarkResult
 }
 
 func NewState() *State {
@@ -22,6 +24,7 @@ func NewState() *State {
 		startedAt:        time.Now().UTC(),
 		heartbeatTimeout: 30 * time.Second,
 		nodes:            make(map[string]cluster.Node),
+		benchmarks:       make(map[string]map[resources.BenchmarkKind]resources.BenchmarkResult),
 	}
 }
 
@@ -67,6 +70,59 @@ func (s *State) Heartbeat(hb membership.Heartbeat) bool {
 	return true
 }
 
+func (s *State) PutBenchmark(result resources.BenchmarkResult) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.nodes[result.NodeID]; !ok {
+		return false
+	}
+
+	if result.CreatedAt.IsZero() {
+		result.CreatedAt = time.Now().UTC()
+	}
+
+	if s.benchmarks[result.NodeID] == nil {
+		s.benchmarks[result.NodeID] = make(map[resources.BenchmarkKind]resources.BenchmarkResult)
+	}
+	s.benchmarks[result.NodeID][result.Kind] = result
+	return true
+}
+
+func (s *State) Benchmarks() []resources.BenchmarkResult {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	results := make([]resources.BenchmarkResult, 0)
+	for _, byKind := range s.benchmarks {
+		for _, result := range byKind {
+			results = append(results, result)
+		}
+	}
+
+	return results
+}
+
+func (s *State) BenchmarkSummaryByNode() map[string]NodeBenchmarkSummary {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	summaries := make(map[string]NodeBenchmarkSummary, len(s.benchmarks))
+	for nodeID, byKind := range s.benchmarks {
+		summary := NodeBenchmarkSummary{
+			NodeID:  nodeID,
+			Results: make(map[resources.BenchmarkKind]resources.BenchmarkResult, len(byKind)),
+		}
+		for kind, result := range byKind {
+			summary.Results[kind] = result
+			summary.TotalScore += result.Score
+		}
+		summaries[nodeID] = summary
+	}
+
+	return summaries
+}
+
 func (s *State) Nodes() []cluster.Node {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -92,6 +148,7 @@ func (s *State) deriveNodeStatus(node cluster.Node, now time.Time) cluster.Node 
 
 func (s *State) ClusterSummary() ClusterSummary {
 	nodes := s.Nodes()
+	benchmarkSummary := s.BenchmarkSummaryByNode()
 	summary := ClusterSummary{
 		StartedAt: s.startedAt,
 	}
@@ -116,6 +173,7 @@ func (s *State) ClusterSummary() ClusterSummary {
 			summary.VRAMTotalBytes += gpu.TotalVRAMBytes
 			summary.VRAMAllowedBytes += gpu.AllowedVRAMBytes
 		}
+		summary.BenchmarkScore += benchmarkSummary[node.ID].TotalScore
 	}
 
 	return summary
@@ -136,5 +194,12 @@ type ClusterSummary struct {
 	GPUs             int                      `json:"gpus"`
 	VRAMTotalBytes   uint64                   `json:"vram_total_bytes"`
 	VRAMAllowedBytes uint64                   `json:"vram_allowed_bytes"`
+	BenchmarkScore   float64                  `json:"benchmark_score"`
 	Resources        cluster.ResourceSnapshot `json:"resources"`
+}
+
+type NodeBenchmarkSummary struct {
+	NodeID     string                                                `json:"node_id"`
+	TotalScore float64                                               `json:"total_score"`
+	Results    map[resources.BenchmarkKind]resources.BenchmarkResult `json:"results"`
 }

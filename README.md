@@ -82,6 +82,12 @@ Join the local machine as a worker:
 go run ./cmd/cmesh worker run --name local-dev-worker --cpu 4 --memory-gb 5 --disk-gb 50
 ```
 
+Run the worker and submit initial benchmarks:
+
+```sh
+go run ./cmd/cmesh worker run --name local-dev-worker --cpu 4 --memory-gb 5 --disk-gb 50 --benchmark
+```
+
 Open the dashboard:
 
 ```text

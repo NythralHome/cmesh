@@ -13,11 +13,11 @@ const (
 )
 
 type BenchmarkResult struct {
-	NodeID    string
-	Kind      BenchmarkKind
-	Score     float64
-	Unit      string
-	Duration  time.Duration
-	CreatedAt time.Time
-	Metadata  map[string]string
+	NodeID    string            `json:"node_id"`
+	Kind      BenchmarkKind     `json:"kind"`
+	Score     float64           `json:"score"`
+	Unit      string            `json:"unit"`
+	Duration  time.Duration     `json:"duration"`
+	CreatedAt time.Time         `json:"created_at"`
+	Metadata  map[string]string `json:"metadata"`
 }

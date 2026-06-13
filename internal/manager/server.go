@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cmesh/cmesh/internal/membership"
+	"github.com/cmesh/cmesh/internal/resources"
 )
 
 type Server struct {
@@ -30,6 +31,7 @@ func NewServer(addr string, state *State) *Server {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/cluster", s.handleCluster)
 	mux.HandleFunc("/v1/nodes", s.handleNodes)
+	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/v1/workers/join", s.handleWorkerJoin)
 	mux.HandleFunc("/v1/workers/heartbeat", s.handleWorkerHeartbeat)
 
@@ -72,11 +74,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		Summary ClusterSummary
-		Nodes   any
+		Summary    ClusterSummary
+		Nodes      any
+		Benchmarks map[string]NodeBenchmarkSummary
 	}{
-		Summary: s.state.ClusterSummary(),
-		Nodes:   s.state.Nodes(),
+		Summary:    s.state.ClusterSummary(),
+		Nodes:      s.state.Nodes(),
+		Benchmarks: s.state.BenchmarkSummaryByNode(),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -101,6 +105,37 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"nodes": s.state.Nodes(),
 	})
+}
+
+func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"benchmarks": s.state.Benchmarks(),
+			"by_node":    s.state.BenchmarkSummaryByNode(),
+		})
+	case http.MethodPost:
+		var result resources.BenchmarkResult
+		if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if result.NodeID == "" {
+			http.Error(w, "node_id is required", http.StatusBadRequest)
+			return
+		}
+		if result.Kind == "" {
+			http.Error(w, "kind is required", http.StatusBadRequest)
+			return
+		}
+		if !s.state.PutBenchmark(result) {
+			http.Error(w, "unknown node", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusCreated, result)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleWorkerJoin(w http.ResponseWriter, r *http.Request) {
@@ -308,6 +343,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <div class="metric"><span>GPUs</span><strong>{{.Summary.GPUs}}</strong></div>
       <div class="metric"><span>Allowed VRAM</span><strong>{{printf "%.1f" (gb .Summary.VRAMAllowedBytes)}} GB</strong></div>
       <div class="metric"><span>Allowed storage</span><strong>{{printf "%.1f" (gb .Summary.Resources.Storage.AllowedBytes)}} GB</strong></div>
+      <div class="metric"><span>Benchmark score</span><strong>{{printf "%.0f" .Summary.BenchmarkScore}}</strong></div>
     </div>
     <section>
       <div class="section-head">
@@ -324,6 +360,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <th>Memory</th>
             <th>Storage</th>
             <th>GPU</th>
+            <th>Benchmark</th>
             <th>Last seen</th>
           </tr>
         </thead>
@@ -336,6 +373,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <td>{{printf "%.1f" (gb .Resources.Memory.AllowedBytes)}} / {{printf "%.1f" (gb .Resources.Memory.TotalBytes)}} GB</td>
             <td>{{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed</td>
             <td>{{range .Resources.GPU}}<div>{{.Name}}</div>{{else}}0{{end}}</td>
+            <td>{{with index $.Benchmarks .ID}}{{printf "%.0f" .TotalScore}}{{else}}Not run{{end}}</td>
             <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
           </tr>
         {{end}}
