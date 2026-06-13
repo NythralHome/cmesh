@@ -1,0 +1,26 @@
+# Build outputs
+bin/
+dist/
+coverage/
+
+# Local config and state
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Go
+*.test
+*.out
+
+# Node/web
+node_modules/
+.vite/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+

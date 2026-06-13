@@ -1,0 +1,19 @@
+node:
+  name: "mac-ultra-worker"
+
+managers:
+  - "http://127.0.0.1:8080"
+
+join:
+  token: "replace-me"
+
+limits:
+  cpu_cores: 4
+  memory_mb: 5120
+  disk_mb: 51200
+  gpu_enabled: true
+  vram_mb: 0
+
+storage:
+  cache_dir: "./data/cache"
+
