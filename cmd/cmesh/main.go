@@ -67,6 +67,8 @@ func runManager(args []string) error {
 		fs := flag.NewFlagSet("manager start", flag.ContinueOnError)
 		addr := fs.String("addr", ":8080", "HTTP listen address")
 		joinToken := fs.String("join-token", os.Getenv("CMESH_JOIN_TOKEN"), "worker join token")
+		operatorToken := fs.String("operator-token", os.Getenv("CMESH_OPERATOR_TOKEN"), "operator token for protected dashboard actions")
+		publicURL := fs.String("public-url", os.Getenv("CMESH_PUBLIC_URL"), "public manager URL used in generated worker invites")
 		databaseURL := fs.String("database-url", os.Getenv("DATABASE_URL"), "Postgres database URL")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -89,8 +91,10 @@ func runManager(args []string) error {
 			fmt.Println("manager storage: in-memory")
 		}
 		server := manager.NewServerWithOptions(manager.ServerOptions{
-			Addr:      *addr,
-			JoinToken: *joinToken,
+			Addr:          *addr,
+			JoinToken:     *joinToken,
+			OperatorToken: *operatorToken,
+			PublicURL:     *publicURL,
 		}, state)
 		fmt.Println("starting CMesh manager in single-node bootstrap mode")
 		fmt.Printf("manager API: %s\n", localHTTPURL(*addr))

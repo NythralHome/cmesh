@@ -1,9 +1,11 @@
 #!/usr/bin/env sh
 set -eu
 
-CMESH_VERSION="${CMESH_VERSION:-v0.1.0-alpha.4}"
+CMESH_VERSION="${CMESH_VERSION:-v0.1.0-alpha.5}"
 CMESH_ADDR="${CMESH_ADDR:-127.0.0.1:8080}"
 CMESH_JOIN_TOKEN="${CMESH_JOIN_TOKEN:-}"
+CMESH_OPERATOR_TOKEN="${CMESH_OPERATOR_TOKEN:-}"
+CMESH_PUBLIC_URL="${CMESH_PUBLIC_URL:-}"
 DATABASE_URL="${DATABASE_URL:-}"
 CMESH_BIN_DIR="${CMESH_BIN_DIR:-/usr/local/bin}"
 
@@ -66,6 +68,9 @@ if [ -z "$CMESH_JOIN_TOKEN" ]; then
     prompt_if_empty CMESH_JOIN_TOKEN "Join token"
   fi
 fi
+if [ -z "$CMESH_OPERATOR_TOKEN" ] && command -v openssl >/dev/null 2>&1; then
+  CMESH_OPERATOR_TOKEN="$(openssl rand -hex 32)"
+fi
 
 asset="$(detect_asset)"
 url="https://github.com/NythralHome/cmesh/releases/download/$CMESH_VERSION/$asset"
@@ -80,6 +85,8 @@ install -d -m 0755 /etc/cmesh /var/lib/cmesh
 
 cat > /etc/cmesh/manager.env <<EOF
 CMESH_JOIN_TOKEN="$CMESH_JOIN_TOKEN"
+CMESH_OPERATOR_TOKEN="$CMESH_OPERATOR_TOKEN"
+CMESH_PUBLIC_URL="$CMESH_PUBLIC_URL"
 DATABASE_URL="$DATABASE_URL"
 EOF
 chmod 600 /etc/cmesh/manager.env
@@ -109,4 +116,4 @@ systemctl enable --now cmesh.service
 
 echo "installed $($CMESH_BIN_DIR/cmesh version)"
 echo "CMesh manager service is active: $(systemctl is-active cmesh.service)"
-echo "join token is stored in /etc/cmesh/manager.env"
+echo "manager tokens are stored in /etc/cmesh/manager.env"

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,6 +128,36 @@ func TestWorkerJoinRequiresTokenWhenConfigured(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInvitePageRequiresOperatorToken(t *testing.T) {
+	srv := NewServerWithOptions(ServerOptions{
+		Addr:          ":0",
+		JoinToken:     "join-secret",
+		OperatorToken: "operator-secret",
+		PublicURL:     "https://cmesh.example.com",
+	}, NewState())
+
+	req := httptest.NewRequest(http.MethodGet, "/invite", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/invite?token=operator-secret", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "https://cmesh.example.com") {
+		t.Fatalf("expected invite page to contain public URL")
+	}
+	if !strings.Contains(body, "join-secret") {
+		t.Fatalf("expected invite page to contain join token")
 	}
 }
 

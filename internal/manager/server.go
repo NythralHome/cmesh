@@ -15,16 +15,20 @@ import (
 )
 
 type Server struct {
-	addr      string
-	state     Store
-	joinToken string
-	mux       *http.ServeMux
-	server    *http.Server
+	addr          string
+	state         Store
+	joinToken     string
+	operatorToken string
+	publicURL     string
+	mux           *http.ServeMux
+	server        *http.Server
 }
 
 type ServerOptions struct {
-	Addr      string
-	JoinToken string
+	Addr          string
+	JoinToken     string
+	OperatorToken string
+	PublicURL     string
 }
 
 func NewServer(addr string, state Store) *Server {
@@ -34,13 +38,16 @@ func NewServer(addr string, state Store) *Server {
 func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
-		addr:      options.Addr,
-		state:     state,
-		joinToken: options.JoinToken,
-		mux:       mux,
+		addr:          options.Addr,
+		state:         state,
+		joinToken:     options.JoinToken,
+		operatorToken: options.OperatorToken,
+		publicURL:     strings.TrimRight(options.PublicURL, "/"),
+		mux:           mux,
 	}
 
 	mux.HandleFunc("/", s.handleDashboard)
+	mux.HandleFunc("/invite", s.handleInvite)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/cluster", s.handleCluster)
 	mux.HandleFunc("/v1/nodes", s.handleNodes)
@@ -93,16 +100,64 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Summary    ClusterSummary
 		Nodes      any
 		Benchmarks map[string]NodeBenchmarkSummary
+		InviteURL  string
 	}{
 		Summary:    s.state.ClusterSummary(),
 		Nodes:      s.state.Nodes(),
 		Benchmarks: s.state.BenchmarkSummaryByNode(),
+		InviteURL:  "/invite",
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := dashboardTemplate.Execute(w, data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.operatorToken == "" || r.URL.Query().Get("token") != s.operatorToken {
+		http.Error(w, "operator token required", http.StatusUnauthorized)
+		return
+	}
+	if s.joinToken == "" {
+		http.Error(w, "worker join token is not configured", http.StatusConflict)
+		return
+	}
+
+	managerURL := s.publicURL
+	if managerURL == "" {
+		managerURL = localManagerURL(r)
+	}
+	data := InvitePageData{
+		ManagerURL: managerURL,
+		JoinToken:  s.joinToken,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := inviteTemplate.Execute(w, data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func localManagerURL(r *http.Request) string {
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "" {
+		proto = "http"
+	}
+	host := r.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return proto + "://" + host
+}
+
+type InvitePageData struct {
+	ManagerURL string
+	JoinToken  string
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -440,6 +495,27 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       font-weight: 600;
       font-size: 12px;
     }
+    .actions {
+      margin-top: 18px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .button, button.button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 36px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 13px;
@@ -456,6 +532,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     <p class="sub">Decentralized-ready AI compute cluster manager</p>
   </header>
   <main>
+    <div class="actions">
+      <button class="button" type="button" data-invite-url="{{.InviteURL}}">Invite worker</button>
+    </div>
     <div class="grid">
       <div class="metric"><span>Workers online</span><strong>{{.Summary.WorkersOnline}} / {{.Summary.WorkersTotal}}</strong></div>
       <div class="metric"><span>Allowed CPU cores</span><strong>{{.Summary.Resources.CPU.CoresAllowed}}</strong></div>
@@ -511,5 +590,156 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <div class="empty">Job execution is available through the API and CLI. Dashboard job tables will be expanded next.</div>
     </section>
   </main>
+  <script>
+    var inviteButton = document.querySelector("[data-invite-url]");
+    if (inviteButton) {
+      inviteButton.addEventListener("click", function() {
+        var token = window.prompt("Operator token");
+        if (!token) return;
+        window.location.href = inviteButton.getAttribute("data-invite-url") + "?token=" + encodeURIComponent(token);
+      });
+    }
+  </script>
+</body>
+</html>`))
+
+var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invite Worker - CMesh</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #17202a;
+      --muted: #657282;
+      --line: #d9dee5;
+      --accent: #0f766e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 28px 32px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    main {
+      padding: 24px 32px 40px;
+      max-width: 980px;
+    }
+    h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: 0; }
+    h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
+    .sub { margin: 0; color: var(--muted); font-size: 14px; }
+    section {
+      margin-top: 16px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .section-head {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    pre {
+      margin: 0;
+      padding: 16px;
+      overflow-x: auto;
+      background: #101820;
+      color: #f7fbff;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    button, a.button {
+      min-height: 34px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    @media (max-width: 640px) {
+      header, main { padding-left: 18px; padding-right: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Invite Worker</h1>
+    <p class="sub">Copy one command and run it on the machine that should join this cluster.</p>
+  </header>
+  <main>
+    <div class="toolbar">
+      <a class="button" href="/">Dashboard</a>
+    </div>
+
+    <section>
+      <div class="section-head">
+        <h2>macOS / Linux</h2>
+        <button type="button" data-copy="mac-linux">Copy</button>
+      </div>
+      <pre><code id="mac-linux">curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | \
+  CMESH_MANAGER_URL="{{.ManagerURL}}" \
+  CMESH_JOIN_TOKEN="{{.JoinToken}}" \
+  sh</code></pre>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Linux service</h2>
+        <button type="button" data-copy="linux-service">Copy</button>
+      </div>
+      <pre><code id="linux-service">curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | \
+  sudo env CMESH_MANAGER_URL="{{.ManagerURL}}" \
+  CMESH_JOIN_TOKEN="{{.JoinToken}}" \
+  CMESH_INSTALL_SERVICE=true \
+  sh</code></pre>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Windows PowerShell</h2>
+        <button type="button" data-copy="windows">Copy</button>
+      </div>
+      <pre><code id="windows">$env:CMESH_MANAGER_URL="{{.ManagerURL}}"
+$env:CMESH_JOIN_TOKEN="{{.JoinToken}}"
+iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.ps1 -UseB | iex</code></pre>
+    </section>
+  </main>
+  <script>
+    document.querySelectorAll("[data-copy]").forEach(function(button) {
+      button.addEventListener("click", function() {
+        var target = document.getElementById(button.getAttribute("data-copy"));
+        navigator.clipboard.writeText(target.innerText).then(function() {
+          button.innerText = "Copied";
+          setTimeout(function() { button.innerText = "Copy"; }, 1200);
+        });
+      });
+    });
+  </script>
 </body>
 </html>`))

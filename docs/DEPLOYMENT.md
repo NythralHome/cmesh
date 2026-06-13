@@ -44,6 +44,8 @@ Run directly:
 
 ```sh
 export CMESH_JOIN_TOKEN="replace-with-generated-token"
+export CMESH_OPERATOR_TOKEN="replace-with-operator-token"
+export CMESH_PUBLIC_URL="https://cmesh.example.com"
 ./cmesh-linux-amd64 manager start --addr :8080
 ```
 
@@ -61,17 +63,21 @@ For internet alpha tests, use Postgres so manager restarts do not erase workers,
 
 ```sh
 export CMESH_JOIN_TOKEN="replace-with-generated-token"
+export CMESH_OPERATOR_TOKEN="replace-with-operator-token"
+export CMESH_PUBLIC_URL="https://cmesh.example.com"
 export DATABASE_URL="postgres://user:password@host:5432/cmesh_alpha?sslmode=require"
 ./cmesh-linux-amd64 manager start --addr :8080
 ```
 
-CMesh runs the required schema migrations on startup. If `DATABASE_URL` is not set, the manager uses in-memory state for local development.
+CMesh runs the required schema migrations on startup. If `DATABASE_URL` is not set, the manager uses in-memory state for local development. `CMESH_OPERATOR_TOKEN` protects `/invite`, where the dashboard generates worker install commands.
 
 Run with Docker Compose:
 
 ```sh
 cd deployments/docker
 export CMESH_JOIN_TOKEN="replace-with-generated-token"
+export CMESH_OPERATOR_TOKEN="replace-with-operator-token"
+export CMESH_PUBLIC_URL="https://cmesh.example.com"
 export DATABASE_URL="postgres://user:password@host:5432/cmesh_alpha?sslmode=require"
 docker compose up -d --build
 ```
@@ -166,6 +172,14 @@ Dashboard:
 ```text
 https://cmesh.example.com
 ```
+
+Invite page:
+
+```text
+https://cmesh.example.com/invite
+```
+
+The page prompts for `CMESH_OPERATOR_TOKEN` before showing worker install commands.
 
 ## Current Alpha Limits
 
