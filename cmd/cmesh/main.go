@@ -66,6 +66,7 @@ func runManager(args []string) error {
 	case "start":
 		fs := flag.NewFlagSet("manager start", flag.ContinueOnError)
 		addr := fs.String("addr", ":8080", "HTTP listen address")
+		joinToken := fs.String("join-token", os.Getenv("CMESH_JOIN_TOKEN"), "worker join token")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -74,10 +75,16 @@ func runManager(args []string) error {
 		defer stop()
 
 		state := manager.NewState()
-		server := manager.NewServer(*addr, state)
+		server := manager.NewServerWithOptions(manager.ServerOptions{
+			Addr:      *addr,
+			JoinToken: *joinToken,
+		}, state)
 		fmt.Println("starting CMesh manager in single-node bootstrap mode")
 		fmt.Printf("manager API: http://127.0.0.1%s\n", *addr)
 		fmt.Printf("dashboard:   http://127.0.0.1%s\n", *addr)
+		if *joinToken == "" {
+			fmt.Println("warning: manager join token is not set; any worker can join")
+		}
 		return server.Start(ctx)
 	case "join":
 		fmt.Println("manager join is reserved for the future multi-manager consensus flow")

@@ -15,18 +15,29 @@ import (
 )
 
 type Server struct {
-	addr   string
-	state  *State
-	mux    *http.ServeMux
-	server *http.Server
+	addr      string
+	state     *State
+	joinToken string
+	mux       *http.ServeMux
+	server    *http.Server
+}
+
+type ServerOptions struct {
+	Addr      string
+	JoinToken string
 }
 
 func NewServer(addr string, state *State) *Server {
+	return NewServerWithOptions(ServerOptions{Addr: addr}, state)
+}
+
+func NewServerWithOptions(options ServerOptions, state *State) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
-		addr:  addr,
-		state: state,
-		mux:   mux,
+		addr:      options.Addr,
+		state:     state,
+		joinToken: options.JoinToken,
+		mux:       mux,
 	}
 
 	mux.HandleFunc("/", s.handleDashboard)
@@ -41,7 +52,7 @@ func NewServer(addr string, state *State) *Server {
 	mux.HandleFunc("/v1/workers/heartbeat", s.handleWorkerHeartbeat)
 
 	s.server = &http.Server{
-		Addr:              addr,
+		Addr:              options.Addr,
 		Handler:           requestLogger(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -257,6 +268,10 @@ func (s *Server) handleWorkerJoin(w http.ResponseWriter, r *http.Request) {
 
 	if req.NodeName == "" {
 		http.Error(w, "node_name is required", http.StatusBadRequest)
+		return
+	}
+	if s.joinToken != "" && req.JoinToken != s.joinToken {
+		http.Error(w, "invalid join token", http.StatusUnauthorized)
 		return
 	}
 

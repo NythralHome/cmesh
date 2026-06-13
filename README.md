@@ -107,6 +107,10 @@ go run ./cmd/cmesh job submit --type echo --input "hello cluster"
 go run ./cmd/cmesh job list
 ```
 
+## Alpha Deployment
+
+For testing workers across the internet, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 For a one-shot registration without a heartbeat loop:
 
 ```sh

@@ -1,0 +1,7 @@
+.git
+bin
+dist
+data
+.DS_Store
+node_modules
+

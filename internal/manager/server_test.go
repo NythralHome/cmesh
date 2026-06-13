@@ -94,6 +94,42 @@ func TestWorkerJoinAndClusterSummary(t *testing.T) {
 	}
 }
 
+func TestWorkerJoinRequiresTokenWhenConfigured(t *testing.T) {
+	srv := NewServerWithOptions(ServerOptions{
+		Addr:      ":0",
+		JoinToken: "secret",
+	}, NewState())
+
+	joinReq := membership.JoinRequest{
+		NodeName:  "worker-token",
+		Role:      cluster.NodeRoleWorker,
+		JoinToken: "wrong",
+	}
+	body, err := json.Marshal(joinReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/workers/join", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rec.Code)
+	}
+
+	joinReq.JoinToken = "secret"
+	body, err = json.Marshal(joinReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/workers/join", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestWorkerHeartbeatUpdatesNodeAndOfflineStatus(t *testing.T) {
 	state := NewState()
 	state.heartbeatTimeout = time.Nanosecond
