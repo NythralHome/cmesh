@@ -10,11 +10,15 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/cmesh/cmesh/internal/cluster"
+	"github.com/cmesh/cmesh/internal/config"
 	"github.com/cmesh/cmesh/internal/manager"
 	"github.com/cmesh/cmesh/internal/membership"
+	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/cmesh/cmesh/internal/version"
 )
 
@@ -89,39 +93,20 @@ func runWorker(args []string) error {
 
 	switch args[0] {
 	case "join":
-		fs := flag.NewFlagSet("worker join", flag.ContinueOnError)
-		managerURL := fs.String("manager", "http://127.0.0.1:8080", "manager API URL")
-		name := fs.String("name", defaultNodeName(), "worker display name")
-		token := fs.String("token", "", "cluster join token")
-		cpuAllowed := fs.Int("cpu", runtime.NumCPU(), "allowed CPU cores")
-		memoryGB := fs.Uint64("memory-gb", 2, "allowed memory in GB")
-		diskGB := fs.Uint64("disk-gb", 10, "allowed disk in GB")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-
-		resp, err := joinWorker(*managerURL, membership.JoinRequest{
-			NodeName:  *name,
-			Role:      cluster.NodeRoleWorker,
-			JoinToken: *token,
-			Resources: cluster.ResourceSnapshot{
-				CPU: cluster.CPUResources{
-					CoresTotal:   runtime.NumCPU(),
-					CoresAllowed: *cpuAllowed,
-				},
-				Memory: cluster.MemoryResources{
-					AllowedBytes: gbToBytes(*memoryGB),
-				},
-				Storage: cluster.StorageResources{
-					AllowedBytes: gbToBytes(*diskGB),
-				},
-			},
-		})
+		options, err := parseWorkerOptions("worker join", args[1:])
 		if err != nil {
 			return err
 		}
-		fmt.Printf("joined cluster as %s\n", resp.NodeID)
-		fmt.Printf("manager peers: %v\n", resp.ManagerPeers)
+		return workerJoinOnce(options)
+	case "run":
+		options, err := parseWorkerOptions("worker run", args[1:])
+		if err != nil {
+			return err
+		}
+
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return workerRun(ctx, options)
 	case "benchmark":
 		fmt.Println("running local worker benchmarks")
 		fmt.Println("benchmark execution will be implemented in the resources package")
@@ -140,6 +125,7 @@ func printUsage() {
 Usage:
   cmesh manager start       Start a manager node
   cmesh worker join         Join a cluster as a worker
+  cmesh worker run          Join and keep a worker heartbeat running
   cmesh worker benchmark    Run worker benchmarks
   cmesh version             Print version
 
@@ -155,7 +141,107 @@ func printManagerUsage() {
 func printWorkerUsage() {
 	fmt.Println(`Usage:
   cmesh worker join         Join a cluster as a worker
+  cmesh worker run          Join and keep sending heartbeats
   cmesh worker benchmark    Run CPU, memory, disk, network, and AI benchmarks`)
+}
+
+type workerOptions struct {
+	managerURL string
+	name       string
+	token      string
+	cacheDir   string
+	limits     config.ResourceLimits
+}
+
+func parseWorkerOptions(name string, args []string) (workerOptions, error) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	managerURL := fs.String("manager", "http://127.0.0.1:8080", "manager API URL")
+	nodeName := fs.String("name", defaultNodeName(), "worker display name")
+	token := fs.String("token", "", "cluster join token")
+	cacheDir := fs.String("cache-dir", defaultCacheDir(), "worker artifact cache directory")
+	cpuAllowed := fs.Int("cpu", runtime.NumCPU(), "allowed CPU cores")
+	memoryGB := fs.Uint64("memory-gb", 2, "allowed memory in GB")
+	diskGB := fs.Uint64("disk-gb", 10, "allowed disk in GB")
+	gpu := fs.Bool("gpu", true, "allow GPU discovery and use")
+	vramGB := fs.Uint64("vram-gb", 0, "allowed VRAM in GB")
+	if err := fs.Parse(args); err != nil {
+		return workerOptions{}, err
+	}
+
+	return workerOptions{
+		managerURL: strings.TrimRight(*managerURL, "/"),
+		name:       *nodeName,
+		token:      *token,
+		cacheDir:   *cacheDir,
+		limits: config.ResourceLimits{
+			CPUCores:    *cpuAllowed,
+			MemoryBytes: gbToBytes(*memoryGB),
+			DiskBytes:   gbToBytes(*diskGB),
+			GPUEnabled:  *gpu,
+			VRAMBytes:   gbToBytes(*vramGB),
+		},
+	}, nil
+}
+
+func workerJoinOnce(options workerOptions) error {
+	resp, err := joinWorker(options.managerURL, workerJoinRequest(options))
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("joined cluster as %s\n", resp.NodeID)
+	fmt.Printf("manager peers: %v\n", resp.ManagerPeers)
+	return nil
+}
+
+func workerRun(ctx context.Context, options workerOptions) error {
+	resp, err := joinWorker(options.managerURL, workerJoinRequest(options))
+	if err != nil {
+		return err
+	}
+
+	heartbeatEvery := resp.HeartbeatEvery
+	if heartbeatEvery <= 0 {
+		heartbeatEvery = 10 * time.Second
+	}
+
+	fmt.Printf("worker %s joined as %s\n", options.name, resp.NodeID)
+	fmt.Printf("heartbeat every %s\n", heartbeatEvery)
+
+	ticker := time.NewTicker(heartbeatEvery)
+	defer ticker.Stop()
+
+	if err := sendHeartbeat(options.managerURL, resp.NodeID, discoverWorkerResources(options)); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := sendHeartbeat(options.managerURL, resp.NodeID, discoverWorkerResources(options)); err != nil {
+				return err
+			}
+			fmt.Printf("heartbeat sent for %s\n", resp.NodeID)
+		}
+	}
+}
+
+func workerJoinRequest(options workerOptions) membership.JoinRequest {
+	return membership.JoinRequest{
+		NodeName:  options.name,
+		Role:      cluster.NodeRoleWorker,
+		JoinToken: options.token,
+		Resources: discoverWorkerResources(options),
+	}
+}
+
+func discoverWorkerResources(options workerOptions) cluster.ResourceSnapshot {
+	return resources.DiscoverLocal(resources.DiscoveryOptions{
+		Limits:   options.limits,
+		CacheDir: options.cacheDir,
+	})
 }
 
 func joinWorker(managerURL string, req membership.JoinRequest) (membership.JoinResponse, error) {
@@ -182,12 +268,43 @@ func joinWorker(managerURL string, req membership.JoinRequest) (membership.JoinR
 	return resp, nil
 }
 
+func sendHeartbeat(managerURL string, nodeID string, snapshot cluster.ResourceSnapshot) error {
+	body, err := json.Marshal(membership.Heartbeat{
+		NodeID:    nodeID,
+		At:        time.Now().UTC(),
+		Resources: snapshot,
+	})
+	if err != nil {
+		return err
+	}
+
+	httpResp, err := http.Post(managerURL+"/v1/workers/heartbeat", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return fmt.Errorf("manager returned %s", httpResp.Status)
+	}
+
+	return nil
+}
+
 func defaultNodeName() string {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
 		return "worker"
 	}
 	return host
+}
+
+func defaultCacheDir() string {
+	dir, err := os.UserCacheDir()
+	if err != nil || dir == "" {
+		return "./data/cache"
+	}
+	return dir + "/cmesh/cache"
 }
 
 func gbToBytes(gb uint64) uint64 {

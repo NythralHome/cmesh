@@ -11,15 +11,17 @@ import (
 )
 
 type State struct {
-	mu        sync.RWMutex
-	startedAt time.Time
-	nodes     map[string]cluster.Node
+	mu               sync.RWMutex
+	startedAt        time.Time
+	heartbeatTimeout time.Duration
+	nodes            map[string]cluster.Node
 }
 
 func NewState() *State {
 	return &State{
-		startedAt: time.Now().UTC(),
-		nodes:     make(map[string]cluster.Node),
+		startedAt:        time.Now().UTC(),
+		heartbeatTimeout: 30 * time.Second,
+		nodes:            make(map[string]cluster.Node),
 	}
 }
 
@@ -71,10 +73,21 @@ func (s *State) Nodes() []cluster.Node {
 
 	nodes := make([]cluster.Node, 0, len(s.nodes))
 	for _, node := range s.nodes {
+		node = s.deriveNodeStatus(node, time.Now().UTC())
 		nodes = append(nodes, node)
 	}
 
 	return nodes
+}
+
+func (s *State) deriveNodeStatus(node cluster.Node, now time.Time) cluster.Node {
+	if node.Role == cluster.NodeRoleWorker &&
+		node.Status == cluster.NodeStatusOnline &&
+		now.Sub(node.UpdatedAt) > s.heartbeatTimeout {
+		node.Status = cluster.NodeStatusOffline
+	}
+
+	return node
 }
 
 func (s *State) ClusterSummary() ClusterSummary {

@@ -68,3 +68,5 @@ Content-Type: application/json
 
 Workers use this endpoint to refresh liveness and resource state after joining.
 
+The manager currently marks workers offline when no heartbeat has been observed for the configured timeout window.
+

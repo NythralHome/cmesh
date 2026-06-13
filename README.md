@@ -79,13 +79,19 @@ go run ./cmd/cmesh manager start
 Join the local machine as a worker:
 
 ```sh
-go run ./cmd/cmesh worker join --name local-dev-worker --cpu 4 --memory-gb 5 --disk-gb 50
+go run ./cmd/cmesh worker run --name local-dev-worker --cpu 4 --memory-gb 5 --disk-gb 50
 ```
 
 Open the dashboard:
 
 ```text
 http://localhost:8080
+```
+
+For a one-shot registration without a heartbeat loop:
+
+```sh
+go run ./cmd/cmesh worker join --name local-dev-worker --cpu 4 --memory-gb 5 --disk-gb 50
 ```
 
 ## Development Status

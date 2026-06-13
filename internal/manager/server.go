@@ -172,6 +172,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="5">
   <title>CMesh Dashboard</title>
   <style>
     :root {
@@ -323,6 +324,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <th>Memory</th>
             <th>Storage</th>
             <th>GPU</th>
+            <th>Last seen</th>
           </tr>
         </thead>
         <tbody>
@@ -333,7 +335,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <td>{{.Resources.CPU.CoresAllowed}} / {{.Resources.CPU.CoresTotal}} cores</td>
             <td>{{printf "%.1f" (gb .Resources.Memory.AllowedBytes)}} / {{printf "%.1f" (gb .Resources.Memory.TotalBytes)}} GB</td>
             <td>{{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed</td>
-            <td>{{len .Resources.GPU}}</td>
+            <td>{{range .Resources.GPU}}<div>{{.Name}}</div>{{else}}0{{end}}</td>
+            <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
           </tr>
         {{end}}
         </tbody>
