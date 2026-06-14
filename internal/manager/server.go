@@ -95,6 +95,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if !s.requireOperatorAuth(w, r, true) {
+		return
+	}
 
 	data := struct {
 		Summary    ClusterSummary
@@ -119,8 +122,7 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.operatorToken == "" || r.URL.Query().Get("token") != s.operatorToken {
-		http.Error(w, "operator token required", http.StatusUnauthorized)
+	if !s.requireOperatorAuth(w, r, true) {
 		return
 	}
 	if s.joinToken == "" {
@@ -143,6 +145,53 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) requireOperatorAuth(w http.ResponseWriter, r *http.Request, html bool) bool {
+	if s.operatorToken == "" {
+		return true
+	}
+	if s.hasOperatorAuth(r) {
+		if token := r.URL.Query().Get("token"); token == s.operatorToken {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "cmesh_operator_token",
+				Value:    token,
+				Path:     "/",
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+				Secure:   r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil,
+				MaxAge:   12 * 60 * 60,
+			})
+		}
+		return true
+	}
+	if html {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = operatorLoginTemplate.Execute(w, map[string]string{
+			"Path": r.URL.Path,
+		})
+		return false
+	}
+	http.Error(w, "operator token required", http.StatusUnauthorized)
+	return false
+}
+
+func (s *Server) hasOperatorAuth(r *http.Request) bool {
+	if s.operatorToken == "" {
+		return true
+	}
+	if r.URL.Query().Get("token") == s.operatorToken {
+		return true
+	}
+	if r.Header.Get("X-CMesh-Operator-Token") == s.operatorToken {
+		return true
+	}
+	if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") == s.operatorToken {
+		return true
+	}
+	cookie, err := r.Cookie("cmesh_operator_token")
+	return err == nil && cookie.Value == s.operatorToken
+}
+
 func localManagerURL(r *http.Request) string {
 	proto := r.Header.Get("X-Forwarded-Proto")
 	if proto == "" {
@@ -160,6 +209,75 @@ type InvitePageData struct {
 	JoinToken  string
 }
 
+var operatorLoginTemplate = template.Must(template.New("operator-login").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CMesh Operator Login</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #17202a;
+      --muted: #657282;
+      --line: #d9dee5;
+      --accent: #0f766e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    form {
+      width: min(420px, calc(100vw - 32px));
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 20px;
+    }
+    h1 { margin: 0 0 8px; font-size: 22px; letter-spacing: 0; }
+    p { margin: 0 0 18px; color: var(--muted); font-size: 14px; }
+    label { display: block; margin-bottom: 8px; color: var(--muted); font-size: 13px; font-weight: 600; }
+    input {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 10px;
+      font: inherit;
+    }
+    button {
+      margin-top: 14px;
+      min-height: 38px;
+      padding: 0 14px;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      background: var(--accent);
+      color: #ffffff;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <form method="get" action="{{.Path}}">
+    <h1>CMesh Operator</h1>
+    <p>This cluster dashboard is private.</p>
+    <label for="token">Operator token</label>
+    <input id="token" name="token" type="password" autocomplete="current-password" autofocus>
+    <button type="submit">Open cluster</button>
+  </form>
+</body>
+</html>`))
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "ok",
@@ -169,10 +287,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
 	writeJSON(w, http.StatusOK, s.state.ClusterSummary())
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"nodes": s.state.Nodes(),
 	})
@@ -181,6 +305,9 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !s.requireOperatorAuth(w, r, false) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"benchmarks": s.state.Benchmarks(),
 			"by_node":    s.state.BenchmarkSummaryByNode(),
@@ -210,6 +337,9 @@ func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{"jobs": s.state.Jobs()})
@@ -249,6 +379,9 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) != 1 || r.Method != http.MethodGet {
 		http.NotFound(w, r)
+		return
+	}
+	if !s.requireOperatorAuth(w, r, false) {
 		return
 	}
 
@@ -501,7 +634,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       gap: 10px;
       flex-wrap: wrap;
     }
-    .button, button.button {
+    .button {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -514,7 +647,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       text-decoration: none;
       font-size: 14px;
       font-weight: 600;
-      cursor: pointer;
     }
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -533,7 +665,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
   </header>
   <main>
     <div class="actions">
-      <button class="button" type="button" data-invite-url="{{.InviteURL}}">Invite worker</button>
+      <a class="button" href="{{.InviteURL}}">Invite worker</a>
     </div>
     <div class="grid">
       <div class="metric"><span>Workers online</span><strong>{{.Summary.WorkersOnline}} / {{.Summary.WorkersTotal}}</strong></div>
@@ -590,16 +722,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <div class="empty">Job execution is available through the API and CLI. Dashboard job tables will be expanded next.</div>
     </section>
   </main>
-  <script>
-    var inviteButton = document.querySelector("[data-invite-url]");
-    if (inviteButton) {
-      inviteButton.addEventListener("click", function() {
-        var token = window.prompt("Operator token");
-        if (!token) return;
-        window.location.href = inviteButton.getAttribute("data-invite-url") + "?token=" + encodeURIComponent(token);
-      });
-    }
-  </script>
 </body>
 </html>`))
 

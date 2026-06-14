@@ -161,6 +161,55 @@ func TestInvitePageRequiresOperatorToken(t *testing.T) {
 	}
 }
 
+func TestDashboardRequiresOperatorTokenWhenConfigured(t *testing.T) {
+	srv := NewServerWithOptions(ServerOptions{
+		Addr:          ":0",
+		OperatorToken: "operator-secret",
+	}, NewState())
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "CMesh Operator") {
+		t.Fatalf("expected operator login page")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/?token=operator-secret", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if len(rec.Result().Cookies()) == 0 {
+		t.Fatalf("expected operator auth cookie")
+	}
+}
+
+func TestReadAPIRequiresOperatorTokenWhenConfigured(t *testing.T) {
+	srv := NewServerWithOptions(ServerOptions{
+		Addr:          ":0",
+		OperatorToken: "operator-secret",
+	}, NewState())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/cluster", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/cluster", nil)
+	req.Header.Set("X-CMesh-Operator-Token", "operator-secret")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestWorkerHeartbeatUpdatesNodeAndOfflineStatus(t *testing.T) {
 	state := NewState()
 	state.heartbeatTimeout = time.Nanosecond

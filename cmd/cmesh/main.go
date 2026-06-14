@@ -307,12 +307,13 @@ func runJob(args []string) error {
 	case "submit":
 		fs := flag.NewFlagSet("job submit", flag.ContinueOnError)
 		managerURL := fs.String("manager", "http://127.0.0.1:8080", "manager API URL")
+		operatorToken := fs.String("operator-token", os.Getenv("CMESH_OPERATOR_TOKEN"), "manager operator token")
 		jobType := fs.String("type", "echo", "job type")
 		input := fs.String("input", "", "job input")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		job, err := submitJob(strings.TrimRight(*managerURL, "/"), jobs.CreateRequest{
+		job, err := submitJob(strings.TrimRight(*managerURL, "/"), *operatorToken, jobs.CreateRequest{
 			Type:        *jobType,
 			Input:       *input,
 			RequestedBy: defaultNodeName(),
@@ -324,20 +325,22 @@ func runJob(args []string) error {
 	case "list":
 		fs := flag.NewFlagSet("job list", flag.ContinueOnError)
 		managerURL := fs.String("manager", "http://127.0.0.1:8080", "manager API URL")
+		operatorToken := fs.String("operator-token", os.Getenv("CMESH_OPERATOR_TOKEN"), "manager operator token")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return listJobs(strings.TrimRight(*managerURL, "/"))
+		return listJobs(strings.TrimRight(*managerURL, "/"), *operatorToken)
 	case "get":
 		fs := flag.NewFlagSet("job get", flag.ContinueOnError)
 		managerURL := fs.String("manager", "http://127.0.0.1:8080", "manager API URL")
+		operatorToken := fs.String("operator-token", os.Getenv("CMESH_OPERATOR_TOKEN"), "manager operator token")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
 		if fs.NArg() != 1 {
 			return fmt.Errorf("job id is required")
 		}
-		return getJob(strings.TrimRight(*managerURL, "/"), fs.Arg(0))
+		return getJob(strings.TrimRight(*managerURL, "/"), *operatorToken, fs.Arg(0))
 	case "help", "--help", "-h":
 		printJobUsage()
 	default:
@@ -349,9 +352,9 @@ func runJob(args []string) error {
 
 func printJobUsage() {
 	fmt.Println(`Usage:
-  cmesh job submit --type echo --input "hello"
-  cmesh job list
-  cmesh job get <job-id>`)
+  cmesh job submit --type echo --input "hello" [--operator-token token]
+  cmesh job list [--operator-token token]
+  cmesh job get <job-id> [--operator-token token]`)
 }
 
 func workerBenchmark(managerURL string, nodeID string, cacheDir string) error {
@@ -483,13 +486,19 @@ func submitBenchmark(managerURL string, result resources.BenchmarkResult) error 
 	return nil
 }
 
-func submitJob(managerURL string, req jobs.CreateRequest) (jobs.Job, error) {
+func submitJob(managerURL string, operatorToken string, req jobs.CreateRequest) (jobs.Job, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return jobs.Job{}, err
 	}
 
-	httpResp, err := http.Post(managerURL+"/v1/jobs", "application/json", bytes.NewReader(body))
+	httpReq, err := http.NewRequest(http.MethodPost, managerURL+"/v1/jobs", bytes.NewReader(body))
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	setOperatorToken(httpReq, operatorToken)
+	httpResp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		return jobs.Job{}, err
 	}
@@ -506,8 +515,13 @@ func submitJob(managerURL string, req jobs.CreateRequest) (jobs.Job, error) {
 	return job, nil
 }
 
-func listJobs(managerURL string) error {
-	httpResp, err := http.Get(managerURL + "/v1/jobs")
+func listJobs(managerURL string, operatorToken string) error {
+	httpReq, err := http.NewRequest(http.MethodGet, managerURL+"/v1/jobs", nil)
+	if err != nil {
+		return err
+	}
+	setOperatorToken(httpReq, operatorToken)
+	httpResp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		return err
 	}
@@ -530,8 +544,13 @@ func listJobs(managerURL string) error {
 	return nil
 }
 
-func getJob(managerURL string, jobID string) error {
-	httpResp, err := http.Get(managerURL + "/v1/jobs/" + jobID)
+func getJob(managerURL string, operatorToken string, jobID string) error {
+	httpReq, err := http.NewRequest(http.MethodGet, managerURL+"/v1/jobs/"+jobID, nil)
+	if err != nil {
+		return err
+	}
+	setOperatorToken(httpReq, operatorToken)
+	httpResp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		return err
 	}
@@ -548,6 +567,13 @@ func getJob(managerURL string, jobID string) error {
 
 	fmt.Printf("%s type=%s status=%s assigned_to=%s input=%q result=%q error=%q\n", job.ID, job.Type, job.Status, job.AssignedTo, job.Input, job.Result, job.Error)
 	return nil
+}
+
+func setOperatorToken(req *http.Request, token string) {
+	if token == "" {
+		return
+	}
+	req.Header.Set("X-CMesh-Operator-Token", token)
 }
 
 func pollAndExecuteJob(managerURL string, nodeID string) error {
