@@ -1,8 +1,12 @@
 #!/usr/bin/env sh
 set -eu
 
-CMESH_VERSION="${CMESH_VERSION:-v0.1.0-alpha.7}"
+CMESH_VERSION="${CMESH_VERSION:-v0.1.0-alpha.8}"
 CMESH_ADDR="${CMESH_ADDR:-127.0.0.1:8080}"
+CMESH_DOMAIN="${CMESH_DOMAIN:-}"
+CMESH_ADMIN_EMAIL="${CMESH_ADMIN_EMAIL:-}"
+CMESH_INSTALL_CADDY="${CMESH_INSTALL_CADDY:-}"
+CMESH_NONINTERACTIVE="${CMESH_NONINTERACTIVE:-false}"
 CMESH_JOIN_TOKEN="${CMESH_JOIN_TOKEN:-}"
 CMESH_OPERATOR_TOKEN="${CMESH_OPERATOR_TOKEN:-}"
 CMESH_PUBLIC_URL="${CMESH_PUBLIC_URL:-}"
@@ -17,13 +21,44 @@ prompt_if_empty() {
   if [ -n "$current_value" ]; then
     return
   fi
-  if [ ! -t 0 ]; then
+  if ! can_prompt; then
     echo "missing required $var_name; pass it as an environment variable" >&2
     exit 1
   fi
   printf "%s: " "$prompt" >&2
-  IFS= read -r value
+  IFS= read -r value < /dev/tty
   eval "$var_name=\$value"
+}
+
+can_prompt() {
+  [ "$CMESH_NONINTERACTIVE" != "true" ] && [ -r /dev/tty ]
+}
+
+prompt_default() {
+  var_name="$1"
+  prompt="$2"
+  default_value="$3"
+  current_value="$(eval "printf '%s' \"\${$var_name}\"")"
+  if [ -n "$current_value" ]; then
+    return
+  fi
+  if ! can_prompt; then
+    eval "$var_name=\$default_value"
+    return
+  fi
+  printf "%s [%s]: " "$prompt" "$default_value" >&2
+  IFS= read -r value < /dev/tty
+  if [ -z "$value" ]; then
+    value="$default_value"
+  fi
+  eval "$var_name=\$value"
+}
+
+is_yes() {
+  case "$1" in
+    y|Y|yes|YES|true|TRUE|1) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 detect_asset() {
@@ -49,6 +84,72 @@ download() {
   fi
 }
 
+install_caddy() {
+  if command -v caddy >/dev/null 2>&1; then
+    return
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+    curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" > /etc/apt/sources.list.d/caddy-stable.list
+    apt-get update
+    apt-get install -y caddy
+    return
+  fi
+
+  if command -v dnf >/dev/null 2>&1; then
+    dnf install -y 'dnf-command(copr)' || true
+    dnf copr enable -y @caddy/caddy
+    dnf install -y caddy
+    return
+  fi
+
+  if command -v yum >/dev/null 2>&1; then
+    yum install -y yum-plugin-copr || true
+    yum copr enable -y @caddy/caddy
+    yum install -y caddy
+    return
+  fi
+
+  echo "could not install Caddy automatically on this distribution" >&2
+  exit 1
+}
+
+configure_caddy() {
+  if [ -z "$CMESH_DOMAIN" ]; then
+    return
+  fi
+
+  install_caddy
+  install -d -m 0755 /etc/caddy
+
+  caddyfile="/etc/caddy/Caddyfile"
+  if [ -f "$caddyfile" ]; then
+    cp "$caddyfile" "$caddyfile.cmesh-backup.$(date +%Y%m%d%H%M%S)"
+  fi
+
+  email_block=""
+  if [ -n "$CMESH_ADMIN_EMAIL" ]; then
+    email_block="{
+  email $CMESH_ADMIN_EMAIL
+}
+
+"
+  fi
+
+  cat > "$caddyfile" <<EOF
+${email_block}$CMESH_DOMAIN {
+  reverse_proxy 127.0.0.1:8080
+}
+EOF
+
+  caddy validate --config "$caddyfile"
+  systemctl enable --now caddy.service
+  systemctl reload caddy.service || systemctl restart caddy.service
+}
+
 if [ "$(uname -s)" != "Linux" ]; then
   echo "manager installer currently supports Linux only" >&2
   exit 1
@@ -59,6 +160,25 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 if ! command -v systemctl >/dev/null 2>&1; then
   echo "systemd is required" >&2
+  exit 1
+fi
+
+if can_prompt; then
+  echo "CMesh manager installer"
+  echo
+  prompt_default CMESH_DOMAIN "Domain for this cluster dashboard/API, leave blank to skip HTTPS setup" "$CMESH_DOMAIN"
+  if [ -n "$CMESH_DOMAIN" ]; then
+    if [ -z "$CMESH_PUBLIC_URL" ]; then
+      CMESH_PUBLIC_URL="https://$CMESH_DOMAIN"
+    fi
+    prompt_default CMESH_ADMIN_EMAIL "Email for Let's Encrypt notices" "$CMESH_ADMIN_EMAIL"
+    prompt_default CMESH_INSTALL_CADDY "Install/configure Caddy HTTPS reverse proxy" "yes"
+  fi
+elif [ -n "$CMESH_DOMAIN" ] && [ -z "$CMESH_PUBLIC_URL" ]; then
+  CMESH_PUBLIC_URL="https://$CMESH_DOMAIN"
+fi
+if is_yes "$CMESH_INSTALL_CADDY" && [ -z "$CMESH_DOMAIN" ]; then
+  echo "CMESH_DOMAIN is required when CMESH_INSTALL_CADDY=true" >&2
   exit 1
 fi
 
@@ -116,7 +236,18 @@ EOF
 systemctl daemon-reload
 systemctl enable --now cmesh.service
 
+if is_yes "$CMESH_INSTALL_CADDY"; then
+  configure_caddy
+fi
+
 echo "installed $($CMESH_BIN_DIR/cmesh version)"
 echo "CMesh manager service is active: $(systemctl is-active cmesh.service)"
+if [ -n "$CMESH_DOMAIN" ]; then
+  echo "CMesh public URL: $CMESH_PUBLIC_URL"
+else
+  echo "CMesh local URL: http://127.0.0.1:8080"
+fi
 echo "manager tokens are stored in /etc/cmesh/manager.env"
 echo "manager state is stored in $CMESH_STATE_PATH"
+echo "operator token: $CMESH_OPERATOR_TOKEN"
+echo "join token: $CMESH_JOIN_TOKEN"

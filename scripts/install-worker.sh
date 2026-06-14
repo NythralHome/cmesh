@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-CMESH_VERSION="${CMESH_VERSION:-v0.1.0-alpha.7}"
+CMESH_VERSION="${CMESH_VERSION:-v0.1.0-alpha.8}"
 CMESH_MANAGER_URL="${CMESH_MANAGER_URL:-}"
 CMESH_JOIN_TOKEN="${CMESH_JOIN_TOKEN:-}"
 CMESH_NODE_NAME="${CMESH_NODE_NAME:-$(hostname 2>/dev/null || echo cmesh-worker)}"

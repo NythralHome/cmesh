@@ -15,7 +15,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-  $Version = "v0.1.0-alpha.7"
+  $Version = "v0.1.0-alpha.8"
 }
 if ([string]::IsNullOrWhiteSpace($ManagerUrl)) {
   $ManagerUrl = Read-Host "Manager URL, for example https://cmesh.nythral.com"

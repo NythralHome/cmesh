@@ -51,12 +51,27 @@ export CMESH_PUBLIC_URL="https://cmesh.example.com"
   --state-path /var/lib/cmesh/cmesh-state.json
 ```
 
-Or install the manager as a Linux systemd service in one step:
+Or install the manager as a Linux systemd service with an interactive wizard:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-manager-linux.sh | sudo sh
+```
+
+The wizard asks for a domain and can install/configure Caddy for HTTPS automatically. Point DNS before enabling HTTPS:
+
+```text
+cmesh.example.com -> VPS_PUBLIC_IP
+```
+
+For cloud-init or automation, pass values non-interactively:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-manager-linux.sh | \
-  sudo env CMESH_PUBLIC_URL="https://cmesh.example.com" \
-  sh
+  sudo env \
+    CMESH_DOMAIN="cmesh.example.com" \
+    CMESH_ADMIN_EMAIL="admin@example.com" \
+    CMESH_INSTALL_CADDY=true \
+    sh
 ```
 
 If `CMESH_JOIN_TOKEN` is omitted, the installer generates one and stores it in `/etc/cmesh/manager.env`.
@@ -89,9 +104,9 @@ export CMESH_PUBLIC_URL="https://cmesh.example.com"
 docker compose up -d --build
 ```
 
-Open firewall port `8080`, or put CMesh behind HTTPS.
+Open firewall ports `80` and `443` when using Caddy. If you skip Caddy, expose `8080` or place CMesh behind your own reverse proxy.
 
-## Domain And HTTPS With Caddy
+## Manual Domain And HTTPS With Caddy
 
 Point DNS:
 

@@ -34,9 +34,18 @@ iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-wor
 Linux VPS with systemd:
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-manager-linux.sh | sudo sh
+```
+
+Non-interactive VPS install with Caddy HTTPS:
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-manager-linux.sh | \
-  sudo env CMESH_PUBLIC_URL="https://cmesh.example.com" \
-  sh
+  sudo env \
+    CMESH_DOMAIN="cmesh.example.com" \
+    CMESH_ADMIN_EMAIL="admin@example.com" \
+    CMESH_INSTALL_CADDY=true \
+    sh
 ```
 
 If `CMESH_JOIN_TOKEN` is omitted, the manager installer generates one and stores it in `/etc/cmesh/manager.env`.
