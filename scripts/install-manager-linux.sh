@@ -1,11 +1,12 @@
 #!/usr/bin/env sh
 set -eu
 
-CMESH_VERSION="${CMESH_VERSION:-v0.1.0-alpha.6}"
+CMESH_VERSION="${CMESH_VERSION:-v0.1.0-alpha.7}"
 CMESH_ADDR="${CMESH_ADDR:-127.0.0.1:8080}"
 CMESH_JOIN_TOKEN="${CMESH_JOIN_TOKEN:-}"
 CMESH_OPERATOR_TOKEN="${CMESH_OPERATOR_TOKEN:-}"
 CMESH_PUBLIC_URL="${CMESH_PUBLIC_URL:-}"
+CMESH_STATE_PATH="${CMESH_STATE_PATH:-/var/lib/cmesh/cmesh-state.json}"
 DATABASE_URL="${DATABASE_URL:-}"
 CMESH_BIN_DIR="${CMESH_BIN_DIR:-/usr/local/bin}"
 
@@ -87,6 +88,7 @@ cat > /etc/cmesh/manager.env <<EOF
 CMESH_JOIN_TOKEN="$CMESH_JOIN_TOKEN"
 CMESH_OPERATOR_TOKEN="$CMESH_OPERATOR_TOKEN"
 CMESH_PUBLIC_URL="$CMESH_PUBLIC_URL"
+CMESH_STATE_PATH="$CMESH_STATE_PATH"
 DATABASE_URL="$DATABASE_URL"
 EOF
 chmod 600 /etc/cmesh/manager.env
@@ -117,3 +119,4 @@ systemctl enable --now cmesh.service
 echo "installed $($CMESH_BIN_DIR/cmesh version)"
 echo "CMesh manager service is active: $(systemctl is-active cmesh.service)"
 echo "manager tokens are stored in /etc/cmesh/manager.env"
+echo "manager state is stored in $CMESH_STATE_PATH"

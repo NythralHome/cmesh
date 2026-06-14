@@ -8,7 +8,13 @@ services:
       CMESH_JOIN_TOKEN: "${CMESH_JOIN_TOKEN:?set CMESH_JOIN_TOKEN}"
       CMESH_OPERATOR_TOKEN: "${CMESH_OPERATOR_TOKEN:-}"
       CMESH_PUBLIC_URL: "${CMESH_PUBLIC_URL:-}"
+      CMESH_STATE_PATH: "/var/lib/cmesh/cmesh-state.json"
       DATABASE_URL: "${DATABASE_URL:-}"
     ports:
       - "8080:8080"
+    volumes:
+      - cmesh-data:/var/lib/cmesh
     restart: unless-stopped
+
+volumes:
+  cmesh-data:

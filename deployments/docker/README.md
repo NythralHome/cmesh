@@ -9,7 +9,9 @@ export CMESH_PUBLIC_URL="https://cmesh.example.com"
 docker compose up -d --build
 ```
 
-Use Postgres-backed state for internet alpha deployments:
+State is persisted in the `cmesh-data` Docker volume by default.
+
+Use Postgres-backed state only when you want an external database:
 
 ```sh
 export CMESH_JOIN_TOKEN="replace-with-generated-token"
@@ -19,4 +21,4 @@ export DATABASE_URL="postgres://user:password@host:5432/cmesh_alpha?sslmode=requ
 docker compose up -d --build
 ```
 
-Without `DATABASE_URL`, the manager uses in-memory state for local development.
+Without `DATABASE_URL`, the manager uses local file persistence.

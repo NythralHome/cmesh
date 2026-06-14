@@ -35,7 +35,7 @@ Linux VPS with systemd:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-manager-linux.sh | \
-  sudo env DATABASE_URL="postgres://user:password@host:5432/cmesh_alpha?sslmode=require" \
+  sudo env CMESH_PUBLIC_URL="https://cmesh.example.com" \
   sh
 ```
 

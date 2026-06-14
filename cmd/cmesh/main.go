@@ -70,6 +70,8 @@ func runManager(args []string) error {
 		operatorToken := fs.String("operator-token", os.Getenv("CMESH_OPERATOR_TOKEN"), "operator token for protected dashboard actions")
 		publicURL := fs.String("public-url", os.Getenv("CMESH_PUBLIC_URL"), "public manager URL used in generated worker invites")
 		databaseURL := fs.String("database-url", os.Getenv("DATABASE_URL"), "Postgres database URL")
+		statePath := fs.String("state-path", defaultStatePath(), "local manager state file path")
+		memoryState := fs.Bool("memory", false, "use in-memory manager state")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -77,9 +79,10 @@ func runManager(args []string) error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
-		var state manager.Store
-		state = manager.NewState()
-		if *databaseURL != "" {
+		var state manager.Store = manager.NewState()
+		if *memoryState {
+			fmt.Println("manager storage: in-memory")
+		} else if *databaseURL != "" {
 			postgresStore, err := manager.NewPostgresStore(ctx, *databaseURL)
 			if err != nil {
 				return err
@@ -88,7 +91,12 @@ func runManager(args []string) error {
 			state = postgresStore
 			fmt.Println("manager storage: postgres")
 		} else {
-			fmt.Println("manager storage: in-memory")
+			fileStore, err := manager.NewFileStore(*statePath)
+			if err != nil {
+				return err
+			}
+			state = fileStore
+			fmt.Printf("manager storage: file (%s)\n", *statePath)
 		}
 		server := manager.NewServerWithOptions(manager.ServerOptions{
 			Addr:          *addr,
@@ -652,6 +660,17 @@ func defaultCacheDir() string {
 		return "./data/cache"
 	}
 	return dir + "/cmesh/cache"
+}
+
+func defaultStatePath() string {
+	if value := os.Getenv("CMESH_STATE_PATH"); value != "" {
+		return value
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		return "./data/cmesh-state.json"
+	}
+	return dir + "/cmesh/cmesh-state.json"
 }
 
 func gbToBytes(gb uint64) uint64 {

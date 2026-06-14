@@ -23,4 +23,4 @@ WORKDIR /var/lib/cmesh
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/cmesh"]
-CMD ["manager", "start", "--addr", ":8080"]
+CMD ["manager", "start", "--addr", ":8080", "--state-path", "/var/lib/cmesh/cmesh-state.json"]

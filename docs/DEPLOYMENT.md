@@ -46,20 +46,28 @@ Run directly:
 export CMESH_JOIN_TOKEN="replace-with-generated-token"
 export CMESH_OPERATOR_TOKEN="replace-with-operator-token"
 export CMESH_PUBLIC_URL="https://cmesh.example.com"
-./cmesh-linux-amd64 manager start --addr :8080
+./cmesh-linux-amd64 manager start \
+  --addr :8080 \
+  --state-path /var/lib/cmesh/cmesh-state.json
 ```
 
 Or install the manager as a Linux systemd service in one step:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-manager-linux.sh | \
-  sudo env DATABASE_URL="postgres://user:password@host:5432/cmesh_alpha?sslmode=require" \
+  sudo env CMESH_PUBLIC_URL="https://cmesh.example.com" \
   sh
 ```
 
 If `CMESH_JOIN_TOKEN` is omitted, the installer generates one and stores it in `/etc/cmesh/manager.env`.
 
-For internet alpha tests, use Postgres so manager restarts do not erase workers, jobs, and benchmark history:
+CMesh uses local file persistence by default. Manager restarts do not erase workers, jobs, and benchmark history:
+
+```text
+/var/lib/cmesh/cmesh-state.json
+```
+
+For larger deployments, Postgres is optional:
 
 ```sh
 export CMESH_JOIN_TOKEN="replace-with-generated-token"
@@ -69,7 +77,7 @@ export DATABASE_URL="postgres://user:password@host:5432/cmesh_alpha?sslmode=requ
 ./cmesh-linux-amd64 manager start --addr :8080
 ```
 
-CMesh runs the required schema migrations on startup. If `DATABASE_URL` is not set, the manager uses in-memory state for local development. `CMESH_OPERATOR_TOKEN` protects the cluster dashboard, read/admin APIs, and `/invite`, where the dashboard generates worker install commands.
+CMesh runs the required schema migrations on startup when Postgres is used. `CMESH_OPERATOR_TOKEN` protects the cluster dashboard, read/admin APIs, and `/invite`, where the dashboard generates worker install commands.
 
 Run with Docker Compose:
 
@@ -78,7 +86,6 @@ cd deployments/docker
 export CMESH_JOIN_TOKEN="replace-with-generated-token"
 export CMESH_OPERATOR_TOKEN="replace-with-operator-token"
 export CMESH_PUBLIC_URL="https://cmesh.example.com"
-export DATABASE_URL="postgres://user:password@host:5432/cmesh_alpha?sslmode=require"
 docker compose up -d --build
 ```
 
@@ -183,7 +190,7 @@ The dashboard prompts for `CMESH_OPERATOR_TOKEN` before showing cluster state or
 
 ## Current Alpha Limits
 
-- Manager state is durable when `DATABASE_URL` points to Postgres. Without `DATABASE_URL`, local development uses in-memory state and restart clears nodes, jobs, and benchmark history.
+- Manager state is durable in the local state file by default. Postgres is optional for larger deployments.
 - Join token protects worker registration. Operator token protects the dashboard and read/admin API for alpha deployments.
 - Transport security depends on your reverse proxy. Use HTTPS for internet tests.
 - Workers execute only supported CMesh job types. Current executor: `echo`.

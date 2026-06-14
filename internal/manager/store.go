@@ -23,4 +23,5 @@ type Store interface {
 }
 
 var _ Store = (*State)(nil)
+var _ Store = (*FileStore)(nil)
 var _ Store = (*PostgresStore)(nil)
