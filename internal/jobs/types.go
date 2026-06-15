@@ -32,6 +32,7 @@ type CreateRequest struct {
 	Type        string `json:"type"`
 	Input       string `json:"input"`
 	RequestedBy string `json:"requested_by"`
+	AssignedTo  string `json:"assigned_to,omitempty"`
 }
 
 type CompleteRequest struct {

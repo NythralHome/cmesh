@@ -156,7 +156,10 @@ func (s *State) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if workerID := s.pickWorkerLocked(); workerID != "" {
+	if req.AssignedTo != "" {
+		job.AssignedTo = req.AssignedTo
+		job.Status = jobs.StatusScheduled
+	} else if workerID := s.pickWorkerLocked(); workerID != "" {
 		job.AssignedTo = workerID
 		job.Status = jobs.StatusScheduled
 	}
@@ -329,6 +332,14 @@ func newJobID() string {
 		return "job-unknown"
 	}
 	return "job-" + hex.EncodeToString(buf[:])
+}
+
+func newClusterBenchmarkID() string {
+	var buf [6]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "cb-unknown"
+	}
+	return "cb-" + hex.EncodeToString(buf[:])
 }
 
 type ClusterSummary struct {

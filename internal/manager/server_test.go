@@ -272,6 +272,9 @@ func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
 	if !strings.Contains(body, "Run compute job") {
 		t.Fatalf("expected compute job runner in dashboard")
 	}
+	if !strings.Contains(body, "Run cluster benchmark") {
+		t.Fatalf("expected cluster benchmark runner in dashboard")
+	}
 	if !strings.Contains(body, "1.23") || !strings.Contains(body, "test/runtime") {
 		t.Fatalf("expected parsed compute result metrics in dashboard")
 	}
@@ -565,6 +568,97 @@ func TestJobLifecycle(t *testing.T) {
 	}
 	if completed.Result != "hello cluster" {
 		t.Fatalf("unexpected result %q", completed.Result)
+	}
+}
+
+func TestClusterBenchmarkCreatesJobPerOnlineWorker(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+
+	workerA := joinWorkerForTest(t, srv, "cluster-worker-a")
+	workerB := joinWorkerForTest(t, srv, "cluster-worker-b")
+	offline := joinWorkerForTest(t, srv, "cluster-worker-offline")
+	state.MarkWorkerOffline(offline.NodeID)
+
+	reqBody := bytes.NewReader([]byte(`{"size":128,"iterations":3,"requested_by":"test-run"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/cluster-benchmarks", reqBody)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var summary ClusterBenchmarkSummary
+	if err := json.NewDecoder(rec.Body).Decode(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Workers != 2 {
+		t.Fatalf("expected 2 online workers in benchmark, got %d", summary.Workers)
+	}
+	if summary.Active != 2 || summary.Status != "running" {
+		t.Fatalf("expected running benchmark with 2 active jobs, got status=%s active=%d", summary.Status, summary.Active)
+	}
+	if summary.Size != 128 || summary.Iterations != 3 {
+		t.Fatalf("unexpected workload %dx%d iterations=%d", summary.Size, summary.Size, summary.Iterations)
+	}
+
+	assigned := map[string]bool{}
+	for _, job := range summary.Jobs {
+		assigned[job.AssignedTo] = true
+		if job.RequestedBy != summary.RequestedBy {
+			t.Fatalf("expected requested_by %q, got %q", summary.RequestedBy, job.RequestedBy)
+		}
+	}
+	if !assigned[workerA.NodeID] || !assigned[workerB.NodeID] || assigned[offline.NodeID] {
+		t.Fatalf("unexpected benchmark assignments: %#v", assigned)
+	}
+
+	jobsByID := map[string]jobs.Job{}
+	for _, job := range summary.Jobs {
+		jobsByID[job.AssignedTo] = job
+	}
+	state.CompleteJob(jobsByID[workerA.NodeID].ID, jobs.CompleteRequest{
+		NodeID: workerA.NodeID,
+		Result: `{"gflops":2.5}`,
+	})
+	state.CompleteJob(jobsByID[workerB.NodeID].ID, jobs.CompleteRequest{
+		NodeID: workerB.NodeID,
+		Result: `{"gflops":3.25}`,
+	})
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/cluster-benchmarks", nil)
+	listRec := httptest.NewRecorder()
+	srv.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", listRec.Code, listRec.Body.String())
+	}
+
+	var listResp struct {
+		ClusterBenchmarks []ClusterBenchmarkSummary `json:"cluster_benchmarks"`
+	}
+	if err := json.NewDecoder(listRec.Body).Decode(&listResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResp.ClusterBenchmarks) != 1 {
+		t.Fatalf("expected 1 benchmark summary, got %d", len(listResp.ClusterBenchmarks))
+	}
+	completed := listResp.ClusterBenchmarks[0]
+	if completed.Status != "succeeded" || completed.Completed != 2 {
+		t.Fatalf("expected succeeded summary, got status=%s completed=%d", completed.Status, completed.Completed)
+	}
+	if completed.TotalGFLOPS != 5.75 {
+		t.Fatalf("expected total GFLOPS 5.75, got %f", completed.TotalGFLOPS)
+	}
+}
+
+func TestClusterBenchmarkRequiresOnlineWorkers(t *testing.T) {
+	srv := NewServer(":0", NewState())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/cluster-benchmarks", bytes.NewReader([]byte(`{"size":128,"iterations":3}`)))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

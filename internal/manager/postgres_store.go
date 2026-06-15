@@ -204,7 +204,10 @@ func (s *PostgresStore) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	if workerID := s.pickWorker(); workerID != "" {
+	if req.AssignedTo != "" {
+		job.AssignedTo = req.AssignedTo
+		job.Status = jobs.StatusScheduled
+	} else if workerID := s.pickWorker(); workerID != "" {
 		job.AssignedTo = workerID
 		job.Status = jobs.StatusScheduled
 	}

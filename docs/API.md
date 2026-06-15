@@ -111,9 +111,12 @@ Example:
 {
   "type": "echo",
   "input": "hello cluster",
-  "requested_by": "developer"
+  "requested_by": "developer",
+  "assigned_to": "node-abc123"
 }
 ```
+
+`assigned_to` is optional. When it is omitted, the manager schedules the job to the best currently online worker. When it is present, the job is pinned to that worker; this is used by cluster benchmarks to run one compute task per online node.
 
 ```http
 GET /v1/jobs
@@ -141,3 +144,28 @@ Example:
   "result": "hello cluster"
 }
 ```
+
+## Cluster Benchmarks
+
+```http
+POST /v1/cluster-benchmarks
+Content-Type: application/json
+```
+
+Starts one `compute.matrix_multiply` job on each currently online worker and returns an aggregate run summary.
+
+Example:
+
+```json
+{
+  "size": 512,
+  "iterations": 6,
+  "requested_by": "dashboard"
+}
+```
+
+```http
+GET /v1/cluster-benchmarks
+```
+
+Returns recent benchmark runs reconstructed from jobs. Each summary includes worker count, completed/failed/active counts, workload size, and total GFLOPS from successful jobs.

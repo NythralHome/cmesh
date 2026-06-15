@@ -56,6 +56,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/cluster", s.handleCluster)
 	mux.HandleFunc("/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
+	mux.HandleFunc("/v1/cluster-benchmarks", s.handleClusterBenchmarks)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/jobs/", s.handleJob)
 	mux.HandleFunc("/v1/workers/", s.handleWorkerRoutes)
@@ -109,6 +110,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		OnlineNodes        []cluster.Node
 		OfflineWorkerCount int
 		Benchmarks         map[string]NodeBenchmarkSummary
+		ClusterBenchmarks  []ClusterBenchmarkSummary
 		Jobs               []jobs.Job
 		InviteURL          string
 	}{
@@ -116,6 +118,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		OnlineNodes:        onlineWorkerNodes(s.state.Nodes()),
 		OfflineWorkerCount: offlineWorkerCount(s.state.Nodes()),
 		Benchmarks:         s.state.BenchmarkSummaryByNode(),
+		ClusterBenchmarks:  clusterBenchmarkSummaries(s.state.Jobs(), 5),
 		Jobs:               recentJobs(s.state.Jobs(), 12),
 		InviteURL:          "/invite",
 	}
@@ -224,6 +227,28 @@ type InvitePageData struct {
 	DesktopInviteHref   template.URL
 	DownloadURL         string
 	ReleaseDownloadBase string
+}
+
+type clusterBenchmarkRequest struct {
+	Size        int    `json:"size"`
+	Iterations  int    `json:"iterations"`
+	RequestedBy string `json:"requested_by"`
+}
+
+type ClusterBenchmarkSummary struct {
+	ID          string     `json:"id"`
+	RequestedBy string     `json:"requested_by"`
+	Size        int        `json:"size"`
+	Iterations  int        `json:"iterations"`
+	Status      string     `json:"status"`
+	Workers     int        `json:"workers"`
+	Completed   int        `json:"completed"`
+	Failed      int        `json:"failed"`
+	Active      int        `json:"active"`
+	TotalGFLOPS float64    `json:"total_gflops"`
+	Jobs        []jobs.Job `json:"jobs"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 func desktopInviteURL(managerURL string, joinToken string) string {
@@ -362,6 +387,75 @@ func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, result)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleClusterBenchmarks(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"cluster_benchmarks": clusterBenchmarkSummaries(s.state.Jobs(), 12),
+		})
+	case http.MethodPost:
+		var req clusterBenchmarkRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Size == 0 {
+			req.Size = 512
+		}
+		if req.Iterations == 0 {
+			req.Iterations = 6
+		}
+		if req.Size < 16 || req.Size > 2048 {
+			http.Error(w, "size must be between 16 and 2048", http.StatusBadRequest)
+			return
+		}
+		if req.Iterations < 1 || req.Iterations > 100 {
+			http.Error(w, "iterations must be between 1 and 100", http.StatusBadRequest)
+			return
+		}
+
+		nodes := onlineWorkerNodes(s.state.Nodes())
+		if len(nodes) == 0 {
+			http.Error(w, "no online workers available", http.StatusConflict)
+			return
+		}
+
+		runID := newClusterBenchmarkID()
+		requestedBy := clusterBenchmarkRequestedBy(runID, req.RequestedBy)
+		input, err := json.Marshal(map[string]int{
+			"size":       req.Size,
+			"iterations": req.Iterations,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		created := make([]jobs.Job, 0, len(nodes))
+		for _, node := range nodes {
+			job, err := s.state.CreateJob(jobs.CreateRequest{
+				Type:        "compute.matrix_multiply",
+				Input:       string(input),
+				RequestedBy: requestedBy,
+				AssignedTo:  node.ID,
+			})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			created = append(created, job)
+		}
+
+		writeJSON(w, http.StatusCreated, buildClusterBenchmarkSummary(runID, requestedBy, created))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -596,6 +690,114 @@ func recentJobs(in []jobs.Job, limit int) []jobs.Job {
 	return out
 }
 
+func clusterBenchmarkSummaries(in []jobs.Job, limit int) []ClusterBenchmarkSummary {
+	grouped := make(map[string][]jobs.Job)
+	for _, job := range in {
+		runID, ok := clusterBenchmarkRunID(job.RequestedBy)
+		if !ok {
+			continue
+		}
+		grouped[runID] = append(grouped[runID], job)
+	}
+
+	out := make([]ClusterBenchmarkSummary, 0, len(grouped))
+	for runID, groupedJobs := range grouped {
+		out = append(out, buildClusterBenchmarkSummary(runID, groupedJobs[0].RequestedBy, groupedJobs))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func buildClusterBenchmarkSummary(runID string, requestedBy string, in []jobs.Job) ClusterBenchmarkSummary {
+	summary := ClusterBenchmarkSummary{
+		ID:          runID,
+		RequestedBy: requestedBy,
+		Workers:     len(in),
+		Jobs:        recentJobs(in, 0),
+	}
+	for i, job := range in {
+		if i == 0 || job.CreatedAt.Before(summary.CreatedAt) {
+			summary.CreatedAt = job.CreatedAt
+		}
+		if job.UpdatedAt.After(summary.UpdatedAt) {
+			summary.UpdatedAt = job.UpdatedAt
+		}
+		if summary.Size == 0 || summary.Iterations == 0 {
+			size, iterations := computeJobInput(job.Input)
+			summary.Size = size
+			summary.Iterations = iterations
+		}
+		switch job.Status {
+		case jobs.StatusSucceeded:
+			summary.Completed++
+			summary.TotalGFLOPS += computeJobGFLOPS(job)
+		case jobs.StatusFailed, jobs.StatusCanceled:
+			summary.Failed++
+		case jobs.StatusQueued, jobs.StatusScheduled, jobs.StatusRunning:
+			summary.Active++
+		}
+	}
+	switch {
+	case summary.Active > 0:
+		summary.Status = "running"
+	case summary.Failed > 0 && summary.Completed > 0:
+		summary.Status = "partial_failed"
+	case summary.Failed > 0:
+		summary.Status = "failed"
+	case summary.Completed == summary.Workers && summary.Workers > 0:
+		summary.Status = "succeeded"
+	default:
+		summary.Status = "queued"
+	}
+	return summary
+}
+
+func clusterBenchmarkRequestedBy(runID string, label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "cluster-benchmark:" + runID
+	}
+	label = strings.ReplaceAll(label, ":", "-")
+	return "cluster-benchmark:" + runID + ":" + label
+}
+
+func clusterBenchmarkRunID(requestedBy string) (string, bool) {
+	parts := strings.Split(requestedBy, ":")
+	if len(parts) < 2 || parts[0] != "cluster-benchmark" || parts[1] == "" {
+		return "", false
+	}
+	return parts[1], true
+}
+
+func computeJobInput(input string) (int, int) {
+	var payload struct {
+		Size       int `json:"size"`
+		Iterations int `json:"iterations"`
+	}
+	if err := json.Unmarshal([]byte(input), &payload); err != nil {
+		return 0, 0
+	}
+	return payload.Size, payload.Iterations
+}
+
+func computeJobGFLOPS(job jobs.Job) float64 {
+	if job.Result == "" {
+		return 0
+	}
+	var payload struct {
+		GFLOPS float64 `json:"gflops"`
+	}
+	if err := json.Unmarshal([]byte(job.Result), &payload); err != nil {
+		return 0
+	}
+	return payload.GFLOPS
+}
+
 func hasActiveJobs(in []jobs.Job) bool {
 	for _, job := range in {
 		switch job.Status {
@@ -639,6 +841,18 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		case jobs.StatusFailed, jobs.StatusCanceled:
 			return "pill pill-failed"
 		case jobs.StatusRunning, jobs.StatusScheduled:
+			return "pill pill-job"
+		default:
+			return "pill pill-muted"
+		}
+	},
+	"benchmarkPillClass": func(status string) string {
+		switch status {
+		case "succeeded":
+			return "pill"
+		case "failed", "partial_failed":
+			return "pill pill-failed"
+		case "running", "queued":
 			return "pill pill-job"
 		default:
 			return "pill pill-muted"
@@ -828,7 +1042,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       font-size: 14px;
       font-weight: 600;
     }
-    .job-runner {
+    .job-runner,
+    .cluster-runner {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 12px;
@@ -869,6 +1084,21 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       color: var(--muted);
       font-size: 13px;
     }
+    .benchmark-summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(80px, 1fr));
+      gap: 8px;
+      min-width: 320px;
+    }
+    .benchmark-summary span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .benchmark-summary strong {
+      font-size: 14px;
+    }
     .result-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(88px, 1fr));
@@ -891,7 +1121,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     @media (max-width: 640px) {
       header, main { padding-left: 18px; padding-right: 18px; }
       table { display: block; overflow-x: auto; }
-      .job-runner { grid-template-columns: 1fr; }
+      .job-runner, .cluster-runner { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -951,6 +1181,68 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
       {{else}}
       <div class="empty">No workers are online right now.</div>
+      {{end}}
+    </section>
+    <section style="margin-top: 20px;">
+      <div class="section-head">
+        <h2>Cluster Benchmark</h2>
+        <code>{{len .ClusterBenchmarks}} recent runs</code>
+      </div>
+      <form class="cluster-runner" id="cluster-benchmark-form">
+        <div class="field">
+          <label for="cluster-size">Matrix size</label>
+          <input id="cluster-size" name="size" type="number" min="16" max="2048" step="16" value="512">
+        </div>
+        <div class="field">
+          <label for="cluster-iterations">Iterations</label>
+          <input id="cluster-iterations" name="iterations" type="number" min="1" max="100" step="1" value="6">
+        </div>
+        <div class="field">
+          <label for="cluster-requested-by">Label</label>
+          <input id="cluster-requested-by" name="requested_by" value="dashboard">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button class="button primary" type="submit">Run cluster benchmark</button>
+        </div>
+      </form>
+      <div class="runner-status" id="cluster-benchmark-status">Run one compute job on each online worker and aggregate total GFLOPS.</div>
+      {{if .ClusterBenchmarks}}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Workload</th>
+              <th>Updated</th>
+              <th>Cluster result</th>
+            </tr>
+          </thead>
+          <tbody>
+          {{range .ClusterBenchmarks}}
+            <tr>
+              <td><code>{{.ID}}</code></td>
+              <td><span class="{{benchmarkPillClass .Status}}">{{.Status}}</span></td>
+              <td>{{.Completed}} / {{.Workers}} done{{if .Failed}}, {{.Failed}} failed{{end}}{{if .Active}}, {{.Active}} active{{end}}</td>
+              <td>{{.Size}} x {{.Size}}, {{.Iterations}} iterations</td>
+              <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
+              <td>
+                <div class="benchmark-summary">
+                  <div><span>Total GFLOPS</span><strong>{{printf "%.2f" .TotalGFLOPS}}</strong></div>
+                  <div><span>Workers</span><strong>{{.Workers}}</strong></div>
+                  <div><span>Completed</span><strong>{{.Completed}}</strong></div>
+                  <div><span>Failed</span><strong>{{.Failed}}</strong></div>
+                </div>
+              </td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="empty">No cluster benchmark runs yet.</div>
       {{end}}
     </section>
     <section style="margin-top: 20px;">
@@ -1050,6 +1342,40 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           setTimeout(function() { window.location.reload(); }, 1200);
         }).catch(function(error) {
           status.innerText = "Job submit failed: " + error.message;
+        });
+      });
+    }
+    var clusterForm = document.getElementById("cluster-benchmark-form");
+    var clusterStatus = document.getElementById("cluster-benchmark-status");
+    if (clusterForm) {
+      clusterForm.addEventListener("submit", function(event) {
+        event.preventDefault();
+        var size = parseInt(clusterForm.elements.size.value, 10);
+        var iterations = parseInt(clusterForm.elements.iterations.value, 10);
+        var requestedBy = String(clusterForm.elements.requested_by.value || "dashboard").trim();
+        if (!Number.isFinite(size) || size < 16 || !Number.isFinite(iterations) || iterations < 1) {
+          clusterStatus.innerText = "Use a valid matrix size and iteration count.";
+          return;
+        }
+        clusterStatus.innerText = "Starting cluster benchmark...";
+        fetch("/v1/cluster-benchmarks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            size: size,
+            iterations: iterations,
+            requested_by: requestedBy
+          })
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function(run) {
+          clusterStatus.innerText = "Started " + run.id + " on " + run.workers + " workers. Refreshing results...";
+          setTimeout(function() { window.location.reload(); }, 1200);
+        }).catch(function(error) {
+          clusterStatus.innerText = "Cluster benchmark failed: " + error.message;
         });
       });
     }
