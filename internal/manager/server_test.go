@@ -159,6 +159,25 @@ func TestInvitePageRequiresOperatorToken(t *testing.T) {
 	if !strings.Contains(body, "join-secret") {
 		t.Fatalf("expected invite page to contain join token")
 	}
+	if !strings.Contains(body, "cmesh://join?") {
+		t.Fatalf("expected invite page to contain desktop invite link")
+	}
+	if !strings.Contains(body, "manager=https%3A%2F%2Fcmesh.example.com") {
+		t.Fatalf("expected invite page to contain encoded manager URL")
+	}
+}
+
+func TestDesktopInviteURL(t *testing.T) {
+	got := desktopInviteURL("https://cmesh.example.com", "join secret")
+	if !strings.HasPrefix(got, "cmesh://join?") {
+		t.Fatalf("expected cmesh scheme, got %q", got)
+	}
+	if !strings.Contains(got, "manager=https%3A%2F%2Fcmesh.example.com") {
+		t.Fatalf("expected encoded manager URL, got %q", got)
+	}
+	if !strings.Contains(got, "token=join+secret") {
+		t.Fatalf("expected encoded token, got %q", got)
+	}
 }
 
 func TestDashboardRequiresOperatorTokenWhenConfigured(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -135,8 +136,10 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 		managerURL = localManagerURL(r)
 	}
 	data := InvitePageData{
-		ManagerURL: managerURL,
-		JoinToken:  s.joinToken,
+		ManagerURL:       managerURL,
+		JoinToken:        s.joinToken,
+		DesktopInviteURL: desktopInviteURL(managerURL, s.joinToken),
+		DownloadURL:      "https://github.com/NythralHome/cmesh/releases",
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -205,8 +208,17 @@ func localManagerURL(r *http.Request) string {
 }
 
 type InvitePageData struct {
-	ManagerURL string
-	JoinToken  string
+	ManagerURL       string
+	JoinToken        string
+	DesktopInviteURL string
+	DownloadURL      string
+}
+
+func desktopInviteURL(managerURL string, joinToken string) string {
+	values := url.Values{}
+	values.Set("manager", managerURL)
+	values.Set("token", joinToken)
+	return "cmesh://join?" + values.Encode()
 }
 
 var operatorLoginTemplate = template.Must(template.New("operator-login").Parse(`<!doctype html>
@@ -804,6 +816,17 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
       gap: 10px;
       flex-wrap: wrap;
     }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+    .primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
     @media (max-width: 640px) {
       header, main { padding-left: 18px; padding-right: 18px; }
     }
@@ -818,6 +841,19 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
     <div class="toolbar">
       <a class="button" href="/">Dashboard</a>
     </div>
+
+    <section>
+      <div class="section-head">
+        <h2>Worker desktop app</h2>
+        <button type="button" data-copy="desktop-invite">Copy invite link</button>
+      </div>
+      <p class="sub">Install the worker app, then open this invite link on the worker machine.</p>
+      <pre><code id="desktop-invite">{{.DesktopInviteURL}}</code></pre>
+      <div class="actions">
+        <a class="button primary" href="{{.DesktopInviteURL}}">Open Worker App</a>
+        <a class="button" href="{{.DownloadURL}}">Download Worker App</a>
+      </div>
+    </section>
 
     <section>
       <div class="section-head">
