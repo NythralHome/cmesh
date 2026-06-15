@@ -619,11 +619,11 @@ func TestClusterBenchmarkCreatesJobPerOnlineWorker(t *testing.T) {
 	}
 	state.CompleteJob(jobsByID[workerA.NodeID].ID, jobs.CompleteRequest{
 		NodeID: workerA.NodeID,
-		Result: `{"gflops":2.5}`,
+		Result: `{"duration_ms":20,"gflops":2.5,"worker_runtime":"test/a"}`,
 	})
 	state.CompleteJob(jobsByID[workerB.NodeID].ID, jobs.CompleteRequest{
 		NodeID: workerB.NodeID,
-		Result: `{"gflops":3.25}`,
+		Result: `{"duration_ms":30,"gflops":3.25,"worker_runtime":"test/b"}`,
 	})
 
 	listReq := httptest.NewRequest(http.MethodGet, "/v1/cluster-benchmarks", nil)
@@ -649,6 +649,26 @@ func TestClusterBenchmarkCreatesJobPerOnlineWorker(t *testing.T) {
 	if completed.TotalGFLOPS != 5.75 {
 		t.Fatalf("expected total GFLOPS 5.75, got %f", completed.TotalGFLOPS)
 	}
+
+	dashboardReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	dashboardRec := httptest.NewRecorder()
+	srv.ServeHTTP(dashboardRec, dashboardReq)
+	if dashboardRec.Code != http.StatusOK {
+		t.Fatalf("expected dashboard status 200, got %d", dashboardRec.Code)
+	}
+	dashboard := dashboardRec.Body.String()
+	for _, expected := range []string{
+		"Total GFLOPS",
+		"5.75 GFLOPS",
+		"cluster-worker-a",
+		"cluster-worker-b",
+		"test/a",
+		"test/b",
+	} {
+		if !strings.Contains(dashboard, expected) {
+			t.Fatalf("expected dashboard to contain %q", expected)
+		}
+	}
 }
 
 func TestClusterBenchmarkRequiresOnlineWorkers(t *testing.T) {
@@ -659,6 +679,16 @@ func TestClusterBenchmarkRequiresOnlineWorkers(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	dashboardReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	dashboardRec := httptest.NewRecorder()
+	srv.ServeHTTP(dashboardRec, dashboardReq)
+	if dashboardRec.Code != http.StatusOK {
+		t.Fatalf("expected dashboard status 200, got %d", dashboardRec.Code)
+	}
+	if !strings.Contains(dashboardRec.Body.String(), "Connect at least one worker") {
+		t.Fatalf("expected dashboard to explain benchmark worker requirement")
 	}
 }
 

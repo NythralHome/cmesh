@@ -105,21 +105,28 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	nodes := s.state.Nodes()
+	allJobs := s.state.Jobs()
+	clusterBenchmarks := clusterBenchmarkSummaries(allJobs, 5)
 	data := struct {
 		Summary            ClusterSummary
 		OnlineNodes        []cluster.Node
 		OfflineWorkerCount int
 		Benchmarks         map[string]NodeBenchmarkSummary
 		ClusterBenchmarks  []ClusterBenchmarkSummary
+		NodesByID          map[string]cluster.Node
+		MaxClusterGFLOPS   float64
 		Jobs               []jobs.Job
 		InviteURL          string
 	}{
 		Summary:            s.state.ClusterSummary(),
-		OnlineNodes:        onlineWorkerNodes(s.state.Nodes()),
-		OfflineWorkerCount: offlineWorkerCount(s.state.Nodes()),
+		OnlineNodes:        onlineWorkerNodes(nodes),
+		OfflineWorkerCount: offlineWorkerCount(nodes),
 		Benchmarks:         s.state.BenchmarkSummaryByNode(),
-		ClusterBenchmarks:  clusterBenchmarkSummaries(s.state.Jobs(), 5),
-		Jobs:               recentJobs(s.state.Jobs(), 12),
+		ClusterBenchmarks:  clusterBenchmarks,
+		NodesByID:          nodesByID(nodes),
+		MaxClusterGFLOPS:   maxClusterBenchmarkGFLOPS(clusterBenchmarks),
+		Jobs:               recentJobs(allJobs, 12),
 		InviteURL:          "/invite",
 	}
 
@@ -679,6 +686,14 @@ func offlineWorkerCount(nodes []cluster.Node) int {
 	return count
 }
 
+func nodesByID(nodes []cluster.Node) map[string]cluster.Node {
+	out := make(map[string]cluster.Node, len(nodes))
+	for _, node := range nodes {
+		out[node.ID] = node
+	}
+	return out
+}
+
 func recentJobs(in []jobs.Job, limit int) []jobs.Job {
 	out := append([]jobs.Job(nil), in...)
 	sort.Slice(out, func(i, j int) bool {
@@ -688,6 +703,16 @@ func recentJobs(in []jobs.Job, limit int) []jobs.Job {
 		out = out[:limit]
 	}
 	return out
+}
+
+func maxClusterBenchmarkGFLOPS(in []ClusterBenchmarkSummary) float64 {
+	var maxValue float64
+	for _, summary := range in {
+		if summary.TotalGFLOPS > maxValue {
+			maxValue = summary.TotalGFLOPS
+		}
+	}
+	return maxValue
 }
 
 func clusterBenchmarkSummaries(in []jobs.Job, limit int) []ClusterBenchmarkSummary {
@@ -857,6 +882,28 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		default:
 			return "pill pill-muted"
 		}
+	},
+	"nodeLabel": func(nodes map[string]cluster.Node, nodeID string) string {
+		if node, ok := nodes[nodeID]; ok && strings.TrimSpace(node.Name) != "" {
+			return node.Name
+		}
+		if len(nodeID) <= 12 {
+			return nodeID
+		}
+		return nodeID[:12]
+	},
+	"barPercent": func(value float64, maxValue float64) int {
+		if value <= 0 || maxValue <= 0 {
+			return 2
+		}
+		percent := int((value / maxValue) * 100)
+		if percent < 2 {
+			return 2
+		}
+		if percent > 100 {
+			return 100
+		}
+		return percent
 	},
 	"hasActiveJobs": hasActiveJobs,
 	"jobMetric": func(job jobs.Job, key string) string {
@@ -1074,6 +1121,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     button.button {
       cursor: pointer;
     }
+    button.button:disabled {
+      cursor: not-allowed;
+      opacity: 0.52;
+    }
     .primary {
       background: var(--accent);
       border-color: var(--accent);
@@ -1099,6 +1150,52 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .benchmark-summary strong {
       font-size: 14px;
     }
+    .growth-list {
+      display: grid;
+      gap: 10px;
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .growth-row {
+      display: grid;
+      grid-template-columns: 150px 1fr 92px;
+      gap: 12px;
+      align-items: center;
+      font-size: 13px;
+    }
+    .growth-meta {
+      color: var(--muted);
+    }
+    .growth-track {
+      height: 10px;
+      border-radius: 999px;
+      background: #eef2f7;
+      overflow: hidden;
+    }
+    .growth-fill {
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    }
+    .worker-breakdown {
+      display: grid;
+      gap: 8px;
+      min-width: 360px;
+    }
+    .worker-result {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) 84px 80px 92px 110px;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+    .worker-result span {
+      color: var(--muted);
+      font-size: 12px;
+    }
     .result-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(88px, 1fr));
@@ -1122,6 +1219,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       header, main { padding-left: 18px; padding-right: 18px; }
       table { display: block; overflow-x: auto; }
       .job-runner, .cluster-runner { grid-template-columns: 1fr; }
+      .growth-row { grid-template-columns: 1fr; }
+      .worker-result { grid-template-columns: 1fr 1fr; }
     }
   </style>
 </head>
@@ -1203,11 +1302,20 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         </div>
         <div class="field">
           <label>&nbsp;</label>
-          <button class="button primary" type="submit">Run cluster benchmark</button>
+          <button class="button primary" type="submit" {{if not .OnlineNodes}}disabled{{end}}>Run cluster benchmark</button>
         </div>
       </form>
-      <div class="runner-status" id="cluster-benchmark-status">Run one compute job on each online worker and aggregate total GFLOPS.</div>
+      <div class="runner-status" id="cluster-benchmark-status">{{if .OnlineNodes}}Run one compute job on each online worker and aggregate total GFLOPS.{{else}}Connect at least one worker to run a cluster benchmark.{{end}}</div>
       {{if .ClusterBenchmarks}}
+      <div class="growth-list">
+        {{range .ClusterBenchmarks}}
+        <div class="growth-row">
+          <div><code>{{.ID}}</code><br><span class="growth-meta">{{.Workers}} workers</span></div>
+          <div class="growth-track"><div class="growth-fill" style="width: {{barPercent .TotalGFLOPS $.MaxClusterGFLOPS}}%;"></div></div>
+          <strong>{{printf "%.2f" .TotalGFLOPS}} GFLOPS</strong>
+        </div>
+        {{end}}
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -1218,6 +1326,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <th>Workload</th>
               <th>Updated</th>
               <th>Cluster result</th>
+              <th>Worker breakdown</th>
             </tr>
           </thead>
           <tbody>
@@ -1234,6 +1343,19 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                   <div><span>Workers</span><strong>{{.Workers}}</strong></div>
                   <div><span>Completed</span><strong>{{.Completed}}</strong></div>
                   <div><span>Failed</span><strong>{{.Failed}}</strong></div>
+                </div>
+              </td>
+              <td>
+                <div class="worker-breakdown">
+                  {{range .Jobs}}
+                  <div class="worker-result">
+                    <code>{{nodeLabel $.NodesByID .AssignedTo}}</code>
+                    <span>{{.Status}}</span>
+                    <strong>{{jobMetric . "gflops"}}</strong>
+                    <span>{{jobMetric . "duration_ms"}} ms</span>
+                    <span>{{jobMetric . "worker_runtime"}}</span>
+                  </div>
+                  {{end}}
                 </div>
               </td>
             </tr>

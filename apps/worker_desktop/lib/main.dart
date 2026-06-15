@@ -975,14 +975,33 @@ class _WorkerTabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _Glass(
-      padding: const EdgeInsets.all(5),
-      child: const TabBar(
-        tabs: [
-          Tab(icon: Icon(Icons.speed), text: 'Overview'),
-          Tab(icon: Icon(Icons.tune), text: 'Connection'),
-          Tab(icon: Icon(Icons.terminal), text: 'Logs'),
-        ],
+    final colors = Theme.of(context).colorScheme;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+        child: Container(
+          padding: const EdgeInsets.all(5),
+          decoration: BoxDecoration(
+            color: colors.surface.withValues(alpha: 0.92),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: colors.outlineVariant),
+            boxShadow: [
+              BoxShadow(
+                color: colors.shadow.withValues(alpha: 0.10),
+                blurRadius: 18,
+                offset: const Offset(0, 8),
+              ),
+            ],
+          ),
+          child: const TabBar(
+            tabs: [
+              Tab(icon: Icon(Icons.speed), text: 'Overview'),
+              Tab(icon: Icon(Icons.tune), text: 'Connection'),
+              Tab(icon: Icon(Icons.terminal), text: 'Logs'),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1019,8 +1038,15 @@ class _Header extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
       decoration: BoxDecoration(
-        color: colors.surface,
+        color: colors.surface.withValues(alpha: 0.94),
         border: Border(bottom: BorderSide(color: colors.outlineVariant)),
+        boxShadow: [
+          BoxShadow(
+            color: colors.shadow.withValues(alpha: 0.08),
+            blurRadius: 18,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
       child: Row(
         children: [

@@ -7,10 +7,10 @@ class MainFlutterWindow: NSWindow {
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
     self.setFrame(windowFrame, display: true)
-    self.titlebarAppearsTransparent = true
+    self.titlebarAppearsTransparent = false
     self.isMovableByWindowBackground = true
-    self.backgroundColor = NSColor.clear
-    self.isOpaque = false
+    self.backgroundColor = NSColor.windowBackgroundColor
+    self.isOpaque = true
 
     InviteURLBridge.configure(controller: flutterViewController)
     MacStatusItemBridge.configure(controller: flutterViewController)
