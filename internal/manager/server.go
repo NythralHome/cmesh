@@ -287,6 +287,8 @@ var operatorLoginTemplate = template.Must(template.New("operator-login").Parse(`
       --muted: #657282;
       --line: #d9dee5;
       --accent: #0f766e;
+      --accent-2: #2563eb;
+      --soft: #eef7f5;
     }
     * { box-sizing: border-box; }
     body {
@@ -993,6 +995,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       padding: 28px 32px 18px;
       border-bottom: 1px solid var(--line);
       background: var(--panel);
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 18px;
     }
     h1 {
       margin: 0 0 6px;
@@ -1006,7 +1012,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     }
     main {
       padding: 24px 32px 40px;
-      max-width: 1180px;
+      width: 100%;
+      max-width: 1680px;
+      margin: 0 auto;
     }
     .grid {
       display: grid;
@@ -1203,7 +1211,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       text-overflow: ellipsis;
     }
     .actions {
-      margin-top: 18px;
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
@@ -1349,6 +1356,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       font-size: 13px;
     }
     @media (max-width: 640px) {
+      header { display: block; }
+      header .actions { margin-top: 14px; }
       header, main { padding-left: 18px; padding-right: 18px; }
       table { display: block; overflow-x: auto; }
       .onboarding-body { grid-template-columns: 1fr; }
@@ -1364,13 +1373,15 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 </head>
 <body data-active-jobs="{{hasActiveJobs .Jobs}}">
   <header>
-    <h1>CMesh</h1>
-    <p class="sub">Decentralized-ready AI compute cluster manager</p>
-  </header>
-  <main>
+    <div>
+      <h1>CMesh</h1>
+      <p class="sub">Decentralized-ready AI compute cluster manager</p>
+    </div>
     <div class="actions">
       <a class="button" href="{{.InviteURL}}">Invite worker</a>
     </div>
+  </header>
+  <main>
     <section class="onboarding" aria-label="First cluster test">
       <div class="section-head">
         <h2>First Cluster Test</h2>
@@ -1740,10 +1751,16 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
       padding: 28px 32px 18px;
       border-bottom: 1px solid var(--line);
       background: var(--panel);
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 18px;
     }
     main {
       padding: 24px 32px 40px;
-      max-width: 980px;
+      width: 100%;
+      max-width: 1280px;
+      margin: 0 auto;
     }
     h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: 0; }
     h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
@@ -1754,6 +1771,55 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
       border: 1px solid var(--line);
       border-radius: 8px;
       overflow: hidden;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(340px, .9fr);
+      gap: 16px;
+      align-items: stretch;
+      margin-top: 0;
+    }
+    .invite-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .hero-copy {
+      padding: 20px;
+      display: grid;
+      align-content: start;
+      gap: 14px;
+      background: linear-gradient(135deg, #ffffff 0%, var(--soft) 100%);
+    }
+    .hero-copy h2 {
+      font-size: 22px;
+    }
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .step-card {
+      min-height: 92px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.72);
+    }
+    .step-card strong {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 5px;
+    }
+    .step-card span {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .desktop-card {
+      display: grid;
+      align-content: start;
     }
     .section-head {
       padding: 14px 16px;
@@ -1803,41 +1869,72 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
       border-color: var(--accent);
       color: #ffffff;
     }
+    .secondary {
+      background: #eff6ff;
+      border-color: #bfdbfe;
+      color: var(--accent-2);
+    }
     .hint {
       margin: 10px 16px 0;
       color: var(--muted);
       font-size: 13px;
     }
+    .advanced-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .full-span {
+      grid-column: 1 / -1;
+    }
     @media (max-width: 640px) {
+      header { display: block; }
+      header .toolbar { margin-top: 14px; }
       header, main { padding-left: 18px; padding-right: 18px; }
+      .hero, .advanced-grid, .steps { grid-template-columns: 1fr; }
+      .full-span { grid-column: auto; }
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>Invite Worker</h1>
-    <p class="sub">Copy one command and run it on the machine that should join this cluster. Resource limits can be edited before running.</p>
-  </header>
-  <main>
+    <div>
+      <h1>Invite Worker</h1>
+      <p class="sub">Connect a desktop or server machine to this private CMesh cluster.</p>
+    </div>
     <div class="toolbar">
       <a class="button" href="/">Dashboard</a>
     </div>
-
-    <section>
-      <div class="section-head">
-        <h2>Worker desktop app</h2>
-        <button type="button" data-copy="desktop-invite">Copy invite link</button>
+  </header>
+  <main>
+    <div class="hero">
+      <div class="invite-card hero-copy">
+        <h2>Recommended flow</h2>
+        <p class="sub">Install the worker app on the machine that will share resources. The invite link pre-fills this manager URL and one-time join token.</p>
+        <div class="steps">
+          <div class="step-card"><strong>1. Download</strong><span>Use the platform-specific worker app for this machine.</span></div>
+          <div class="step-card"><strong>2. Open invite</strong><span>The app receives the manager URL and join token automatically.</span></div>
+          <div class="step-card"><strong>3. Start worker</strong><span>Choose resource limits, save settings, then connect to the cluster.</span></div>
+        </div>
       </div>
-      <p class="sub">Install the worker app, then open this invite link on the worker machine.</p>
-      <pre><code id="desktop-invite">{{.DesktopInviteURL}}</code></pre>
-      <div class="actions">
-        <a class="button primary" href="{{.DesktopInviteHref}}">Open Worker App</a>
-        <a class="button" id="worker-download" href="{{.DownloadURL}}">Download Worker App</a>
-        <a class="button" href="https://github.com/NythralHome/cmesh/releases/latest">Other platforms</a>
-      </div>
-      <p class="hint" id="worker-download-hint">Direct downloads use the latest CMesh release.</p>
-    </section>
 
+      <section class="desktop-card">
+        <div class="section-head">
+          <h2>Worker desktop app</h2>
+          <button type="button" data-copy="desktop-invite">Copy invite link</button>
+        </div>
+        <pre><code id="desktop-invite">{{.DesktopInviteURL}}</code></pre>
+        <div class="actions">
+          <a class="button primary" href="{{.DesktopInviteHref}}">Open Worker App</a>
+          <a class="button secondary" id="worker-download" href="{{.DownloadURL}}">Download Worker App</a>
+          <a class="button" href="https://github.com/NythralHome/cmesh/releases/latest">Other platforms</a>
+        </div>
+        <p class="hint" id="worker-download-hint">Direct downloads use the latest CMesh release.</p>
+      </section>
+    </div>
+
+    <div class="advanced-grid">
     <section>
       <div class="section-head">
         <h2>macOS / Linux</h2>
@@ -1867,7 +1964,7 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
   sh</code></pre>
     </section>
 
-    <section>
+    <section class="full-span">
       <div class="section-head">
         <h2>Worker control</h2>
         <button type="button" data-copy="worker-control">Copy</button>
@@ -1878,7 +1975,7 @@ curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/inst
 curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sudo sh -s -- uninstall</code></pre>
     </section>
 
-    <section>
+    <section class="full-span">
       <div class="section-head">
         <h2>Windows PowerShell</h2>
         <button type="button" data-copy="windows">Copy</button>
@@ -1890,6 +1987,7 @@ $env:CMESH_MEMORY_GB="8"
 $env:CMESH_DISK_GB="50"
 iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.ps1 -UseB | iex</code></pre>
     </section>
+    </div>
   </main>
   <script>
     document.querySelectorAll("[data-copy]").forEach(function(button) {

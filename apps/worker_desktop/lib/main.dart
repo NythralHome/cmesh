@@ -1094,17 +1094,18 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
         gpuEnabled: _gpuEnabled,
         benchmark: _benchmark,
         installService: _installService,
+        busy: _busy,
         onGpuChanged: (value) => setState(() => _gpuEnabled = value),
         onBenchmarkChanged: (value) => setState(() => _benchmark = value),
         onInstallServiceChanged: (value) =>
             setState(() => _installService = value),
+        onSave: _saveConfig,
       ),
     );
     final actionBar = _WorkerActionBar(
       busy: _busy,
       running: _isWorkerRunning,
       hasJoinToken: _hasJoinToken,
-      onSave: _saveConfig,
       onStatus: _refreshStatus,
       onStart: _startWorker,
       onStop: () => _serviceAction('stop'),
@@ -1332,9 +1333,11 @@ class _ConnectionPanel extends StatelessWidget {
     required this.gpuEnabled,
     required this.benchmark,
     required this.installService,
+    required this.busy,
     required this.onGpuChanged,
     required this.onBenchmarkChanged,
     required this.onInstallServiceChanged,
+    required this.onSave,
   });
 
   final TextEditingController managerUrl;
@@ -1346,9 +1349,11 @@ class _ConnectionPanel extends StatelessWidget {
   final bool gpuEnabled;
   final bool benchmark;
   final bool installService;
+  final bool busy;
   final ValueChanged<bool> onGpuChanged;
   final ValueChanged<bool> onBenchmarkChanged;
   final ValueChanged<bool> onInstallServiceChanged;
+  final VoidCallback onSave;
 
   @override
   Widget build(BuildContext context) {
@@ -1427,6 +1432,17 @@ class _ConnectionPanel extends StatelessWidget {
             value: installService,
             onChanged: onInstallServiceChanged,
           ),
+          const SizedBox(height: 14),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              FilledButton.icon(
+                onPressed: busy ? null : onSave,
+                icon: const Icon(Icons.save_outlined),
+                label: const Text('Save settings'),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -1438,7 +1454,6 @@ class _WorkerActionBar extends StatelessWidget {
     required this.busy,
     required this.running,
     required this.hasJoinToken,
-    required this.onSave,
     required this.onStatus,
     required this.onStart,
     required this.onStop,
@@ -1449,7 +1464,6 @@ class _WorkerActionBar extends StatelessWidget {
   final bool busy;
   final bool running;
   final bool hasJoinToken;
-  final VoidCallback onSave;
   final VoidCallback onStatus;
   final VoidCallback onStart;
   final VoidCallback onStop;
@@ -1500,26 +1514,15 @@ class _WorkerActionBar extends StatelessWidget {
                   label: statusLabel,
                   color: statusColor,
                 ),
-                if (!running)
-                  _ActionGroup(
-                    label: 'Setup',
-                    children: [
-                      OutlinedButton.icon(
-                        onPressed: busy ? null : onSave,
-                        icon: const Icon(Icons.save_outlined),
-                        label: const Text('Save settings'),
-                      ),
-                      if (!hasJoinToken)
-                        FilledButton.icon(
-                          onPressed: busy ? null : onOpenInvite,
-                          icon: const Icon(Icons.link),
-                          label: const Text('Open invite'),
-                        ),
-                    ],
-                  ),
                 _ActionGroup(
                   label: 'Worker',
                   children: [
+                    if (!running && !hasJoinToken)
+                      FilledButton.icon(
+                        onPressed: busy ? null : onOpenInvite,
+                        icon: const Icon(Icons.link),
+                        label: const Text('Open invite'),
+                      ),
                     if (!running && hasJoinToken)
                       FilledButton.icon(
                         onPressed: busy ? null : onStart,
