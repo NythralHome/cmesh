@@ -89,6 +89,12 @@ make worker-desktop-run
 
 The local control API supports `X-CMesh-Control-Token` for `/v1/*` routes. The desktop app generates and passes this token automatically when it starts the bundled control process.
 
+Tagged releases publish early desktop bundles alongside CLI binaries:
+
+- `CMesh-Worker-macos-<arch>.zip`
+- `CMesh-Worker-windows-amd64.zip`
+- `CMesh-Worker-linux-amd64.tar.gz`
+
 ## Quick Start
 
 Start a local manager:
