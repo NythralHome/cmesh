@@ -165,6 +165,9 @@ func TestInvitePageRequiresOperatorToken(t *testing.T) {
 	if !strings.Contains(body, "manager=https%3A%2F%2Fcmesh.example.com") {
 		t.Fatalf("expected invite page to contain encoded manager URL")
 	}
+	if strings.Contains(body, "#ZgotmplZ") {
+		t.Fatalf("expected invite page not to contain sanitized unsafe URL marker")
+	}
 }
 
 func TestDesktopInviteURL(t *testing.T) {

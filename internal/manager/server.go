@@ -136,10 +136,11 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 		managerURL = localManagerURL(r)
 	}
 	data := InvitePageData{
-		ManagerURL:       managerURL,
-		JoinToken:        s.joinToken,
-		DesktopInviteURL: desktopInviteURL(managerURL, s.joinToken),
-		DownloadURL:      "https://github.com/NythralHome/cmesh/releases",
+		ManagerURL:        managerURL,
+		JoinToken:         s.joinToken,
+		DesktopInviteURL:  desktopInviteURL(managerURL, s.joinToken),
+		DesktopInviteHref: template.URL(desktopInviteURL(managerURL, s.joinToken)),
+		DownloadURL:       "https://github.com/NythralHome/cmesh/releases",
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -208,10 +209,11 @@ func localManagerURL(r *http.Request) string {
 }
 
 type InvitePageData struct {
-	ManagerURL       string
-	JoinToken        string
-	DesktopInviteURL string
-	DownloadURL      string
+	ManagerURL        string
+	JoinToken         string
+	DesktopInviteURL  string
+	DesktopInviteHref template.URL
+	DownloadURL       string
 }
 
 func desktopInviteURL(managerURL string, joinToken string) string {
@@ -850,7 +852,7 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
       <p class="sub">Install the worker app, then open this invite link on the worker machine.</p>
       <pre><code id="desktop-invite">{{.DesktopInviteURL}}</code></pre>
       <div class="actions">
-        <a class="button primary" href="{{.DesktopInviteURL}}">Open Worker App</a>
+        <a class="button primary" href="{{.DesktopInviteHref}}">Open Worker App</a>
         <a class="button" href="{{.DownloadURL}}">Download Worker App</a>
       </div>
     </section>
