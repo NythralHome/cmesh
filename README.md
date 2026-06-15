@@ -87,6 +87,8 @@ make worker-desktop-run
 
 `make worker-desktop-build` bundles the local Go `cmesh` binary into the desktop build for the current OS. The next step is adding signed installers and a privileged helper for OS service installation/removal.
 
+The local control API supports `X-CMesh-Control-Token` for `/v1/*` routes. The desktop app generates and passes this token automatically when it starts the bundled control process.
+
 ## Quick Start
 
 Start a local manager:

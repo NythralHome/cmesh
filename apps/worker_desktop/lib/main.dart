@@ -1,15 +1,23 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-void main() {
-  runApp(const CMeshWorkerApp());
+void main(List<String> args) {
+  runApp(CMeshWorkerApp(initialInvite: InviteConfig.fromArgs(args)));
 }
 
 class CMeshWorkerApp extends StatelessWidget {
-  const CMeshWorkerApp({super.key});
+  const CMeshWorkerApp({
+    super.key,
+    required this.initialInvite,
+    this.autostartControl = true,
+  });
+
+  final InviteConfig? initialInvite;
+  final bool autostartControl;
 
   @override
   Widget build(BuildContext context) {
@@ -27,7 +35,10 @@ class CMeshWorkerApp extends StatelessWidget {
           isDense: true,
         ),
       ),
-      home: const WorkerHomePage(),
+      home: WorkerHomePage(
+        initialInvite: initialInvite,
+        autostartControl: autostartControl,
+      ),
     );
   }
 }
@@ -116,6 +127,38 @@ class WorkerConfig {
   }
 }
 
+class InviteConfig {
+  const InviteConfig({this.managerUrl, this.joinToken});
+
+  final String? managerUrl;
+  final String? joinToken;
+
+  static InviteConfig? fromArgs(List<String> args) {
+    final candidates = [
+      Platform.environment['CMESH_INVITE_URL'],
+      ...args,
+    ].whereType<String>().where((value) => value.trim().isNotEmpty);
+    for (final candidate in candidates) {
+      final parsed = fromString(candidate.trim());
+      if (parsed != null) return parsed;
+    }
+    return null;
+  }
+
+  static InviteConfig? fromString(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null) return null;
+    final query = uri.queryParameters;
+    final manager = query['manager'] ?? query['manager_url'];
+    final token = query['token'] ?? query['join_token'];
+    if ((manager == null || manager.isEmpty) &&
+        (token == null || token.isEmpty)) {
+      return null;
+    }
+    return InviteConfig(managerUrl: manager, joinToken: token);
+  }
+}
+
 class WorkerConfigStore {
   Future<File> _file() async {
     final home =
@@ -160,6 +203,9 @@ class WorkerController {
     Platform.environment['CMESH_WORKER_CONTROL_URL'] ?? 'http://127.0.0.1:9781',
   );
 
+  final String _controlToken =
+      Platform.environment['CMESH_WORKER_CONTROL_TOKEN'] ??
+      _generateControlToken();
   Process? _controlProcess;
 
   Future<WorkerCommandResult> ensureRunning() async {
@@ -176,10 +222,15 @@ class WorkerController {
       );
     }
     try {
-      _controlProcess = await Process.start(binary, [
-        'worker',
-        'control',
-      ], mode: ProcessStartMode.detachedWithStdio);
+      _controlProcess = await Process.start(
+        binary,
+        ['worker', 'control'],
+        environment: {
+          ...Platform.environment,
+          'CMESH_WORKER_CONTROL_TOKEN': _controlToken,
+        },
+        mode: ProcessStartMode.detachedWithStdio,
+      );
       _controlProcess!.stdout
           .transform(utf8.decoder)
           .listen((_) {}, onError: (_) {});
@@ -242,6 +293,9 @@ class WorkerController {
     try {
       final req = await client.openUrl(method, _baseURL.resolve(path));
       req.headers.contentType = ContentType.json;
+      if (path.startsWith('/v1/')) {
+        req.headers.set('X-CMesh-Control-Token', _controlToken);
+      }
       if (body != null) {
         req.write(jsonEncode(body));
       }
@@ -327,8 +381,21 @@ class WorkerController {
   }
 }
 
+String _generateControlToken() {
+  final random = Random.secure();
+  final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+  return base64UrlEncode(bytes);
+}
+
 class WorkerHomePage extends StatefulWidget {
-  const WorkerHomePage({super.key});
+  const WorkerHomePage({
+    super.key,
+    required this.initialInvite,
+    required this.autostartControl,
+  });
+
+  final InviteConfig? initialInvite;
+  final bool autostartControl;
 
   @override
   State<WorkerHomePage> createState() => _WorkerHomePageState();
@@ -356,7 +423,9 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   void initState() {
     super.initState();
     _loadConfig();
-    _bootstrapControlApi();
+    if (widget.autostartControl) {
+      _bootstrapControlApi();
+    }
   }
 
   @override
@@ -374,8 +443,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     final config = await _store.load();
     if (!mounted) return;
     setState(() {
-      _managerUrl.text = config.managerUrl;
-      _joinToken.text = config.joinToken;
+      _managerUrl.text = widget.initialInvite?.managerUrl ?? config.managerUrl;
+      _joinToken.text = widget.initialInvite?.joinToken ?? config.joinToken;
       _cpu.text = '${config.cpu}';
       _memoryGb.text = '${config.memoryGb}';
       _diskGb.text = '${config.diskGb}';

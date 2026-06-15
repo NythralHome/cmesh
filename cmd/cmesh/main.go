@@ -168,12 +168,13 @@ func runWorker(args []string) error {
 		fs := flag.NewFlagSet("worker control", flag.ContinueOnError)
 		addr := fs.String("addr", "127.0.0.1:9781", "local worker control API listen address")
 		configPath := fs.String("config", os.Getenv("CMESH_WORKER_CONTROL_CONFIG"), "local worker control config path")
+		token := fs.String("token", os.Getenv("CMESH_WORKER_CONTROL_TOKEN"), "local worker control API token")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		server, err := workercontrol.NewServer(*addr, *configPath)
+		server, err := workercontrol.NewServerWithToken(*addr, *configPath, *token)
 		if err != nil {
 			return err
 		}

@@ -46,6 +46,7 @@ type Status struct {
 type Server struct {
 	addr       string
 	configPath string
+	token      string
 
 	mu        sync.Mutex
 	config    Config
@@ -57,6 +58,10 @@ type Server struct {
 }
 
 func NewServer(addr string, configPath string) (*Server, error) {
+	return NewServerWithToken(addr, configPath, os.Getenv("CMESH_WORKER_CONTROL_TOKEN"))
+}
+
+func NewServerWithToken(addr string, configPath string, token string) (*Server, error) {
 	if addr == "" {
 		addr = "127.0.0.1:9781"
 	}
@@ -70,6 +75,7 @@ func NewServer(addr string, configPath string) (*Server, error) {
 	return &Server{
 		addr:       addr,
 		configPath: configPath,
+		token:      strings.TrimSpace(token),
 		config:     cfg,
 		logTail:    newTailBuffer(32 * 1024),
 	}, nil
@@ -113,6 +119,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.mu.Lock()
@@ -143,11 +152,17 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	writeJSON(w, http.StatusOK, s.status())
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -160,6 +175,9 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -172,6 +190,9 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -182,6 +203,17 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.status())
+}
+
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
+	if s.token == "" {
+		return true
+	}
+	if r != nil && r.Header.Get("X-CMesh-Control-Token") == s.token {
+		return true
+	}
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
 }
 
 func (s *Server) startWorker() error {

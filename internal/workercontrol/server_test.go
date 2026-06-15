@@ -78,6 +78,43 @@ func TestConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestTokenProtectsControlRoutes(t *testing.T) {
+	_, baseURL, stop := startTestServerWithToken(t, "secret")
+	defer stop()
+
+	resp, err := http.Get(baseURL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected health 200, got %s", resp.Status)
+	}
+
+	resp, err = http.Get(baseURL + "/v1/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected status 401 without token, got %s", resp.Status)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-CMesh-Control-Token", "secret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 with token, got %s", resp.Status)
+	}
+}
+
 func TestWorkerArgs(t *testing.T) {
 	args := workerArgs(Config{
 		ManagerURL:     "https://cmesh.example.com",
@@ -109,6 +146,10 @@ func TestWorkerArgs(t *testing.T) {
 }
 
 func startTestServer(t *testing.T) (*Server, string, func()) {
+	return startTestServerWithToken(t, "")
+}
+
+func startTestServerWithToken(t *testing.T, token string) (*Server, string, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -118,7 +159,7 @@ func startTestServer(t *testing.T) (*Server, string, func()) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(addr, t.TempDir()+"/worker-control.json")
+	server, err := NewServerWithToken(addr, t.TempDir()+"/worker-control.json", token)
 	if err != nil {
 		t.Fatal(err)
 	}

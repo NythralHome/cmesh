@@ -20,6 +20,16 @@ cd apps/worker_desktop
 CMESH_WORKER_CONTROL_BIN=../../bin/cmesh fvm flutter run -d macos
 ```
 
+The app passes a random local control token to `cmesh worker control` and sends it with `X-CMesh-Control-Token` for `/v1/*` requests.
+
+Invite links can prefill the manager URL and join token:
+
+```text
+cmesh://join?manager=https%3A%2F%2Fcmesh.example.com&token=replace-with-token
+```
+
+For development, pass an invite through `CMESH_INVITE_URL`.
+
 ## Current Scope
 
 - Manager URL and join token input.
