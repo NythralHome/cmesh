@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.nythral.cmesh" "\0"
-            VALUE "FileDescription", "cmesh_worker_desktop" "\0"
+            VALUE "FileDescription", "CMesh Worker" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "cmesh_worker_desktop" "\0"
+            VALUE "InternalName", "CMeshWorker" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.nythral.cmesh. All rights reserved." "\0"
-            VALUE "OriginalFilename", "cmesh_worker_desktop.exe" "\0"
-            VALUE "ProductName", "cmesh_worker_desktop" "\0"
+            VALUE "OriginalFilename", "CMeshWorker.exe" "\0"
+            VALUE "ProductName", "CMesh Worker" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

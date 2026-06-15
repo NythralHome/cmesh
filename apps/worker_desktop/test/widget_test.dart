@@ -15,9 +15,9 @@ void main() {
 
     expect(find.text('CMesh Worker'), findsOneWidget);
     expect(find.text('Connection'), findsOneWidget);
-    expect(find.text('Worker control'), findsOneWidget);
+    expect(find.text('Worker status'), findsOneWidget);
     expect(find.text('Status unknown'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Connect worker'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Connect'), findsOneWidget);
   });
 
   test('parses invite URLs', () {

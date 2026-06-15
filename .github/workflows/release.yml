@@ -84,8 +84,9 @@ jobs:
           cd apps/worker_desktop
           flutter pub get
           flutter build macos
-          cp ../../bin/cmesh build/macos/Build/Products/Release/cmesh_worker_desktop.app/Contents/Resources/cmesh
-          ditto -c -k --keepParent build/macos/Build/Products/Release/cmesh_worker_desktop.app ../../dist/CMesh-Worker-macos-${{ matrix.goarch }}.zip
+          app_bundle="build/macos/Build/Products/Release/CMesh Worker.app"
+          cp ../../bin/cmesh "$app_bundle/Contents/Resources/cmesh"
+          ditto -c -k --keepParent "$app_bundle" ../../dist/CMesh-Worker-macos-${{ matrix.goarch }}.zip
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2

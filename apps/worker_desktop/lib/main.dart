@@ -79,7 +79,7 @@ class WorkerConfig {
 
   factory WorkerConfig.empty() {
     return WorkerConfig(
-      managerUrl: 'https://cmesh.nythral.com',
+      managerUrl: 'https://alpha.cmesh.nythral.com',
       joinToken: '',
       cpu: Platform.numberOfProcessors.clamp(1, 64),
       memoryGb: 8,
@@ -135,6 +135,30 @@ class WorkerConfig {
       'vram_gb': vramGb,
       'benchmark': benchmark,
     };
+  }
+
+  WorkerConfig copyWith({
+    String? managerUrl,
+    String? joinToken,
+    int? cpu,
+    int? memoryGb,
+    int? diskGb,
+    bool? gpuEnabled,
+    int? vramGb,
+    bool? benchmark,
+    bool? installService,
+  }) {
+    return WorkerConfig(
+      managerUrl: managerUrl ?? this.managerUrl,
+      joinToken: joinToken ?? this.joinToken,
+      cpu: cpu ?? this.cpu,
+      memoryGb: memoryGb ?? this.memoryGb,
+      diskGb: diskGb ?? this.diskGb,
+      gpuEnabled: gpuEnabled ?? this.gpuEnabled,
+      vramGb: vramGb ?? this.vramGb,
+      benchmark: benchmark ?? this.benchmark,
+      installService: installService ?? this.installService,
+    );
   }
 }
 
@@ -551,12 +575,29 @@ class WorkerController {
     return _request('PUT', '/v1/config', body: config.toControlJson());
   }
 
+  Future<WorkerCommandResult> disconnect(WorkerConfig config) async {
+    final disconnected = await _request('POST', '/v1/disconnect');
+    if (disconnected.ok) {
+      return disconnected;
+    }
+    if (disconnected.exitCode != HttpStatus.notFound) {
+      return disconnected;
+    }
+
+    final stopped = await _request('POST', '/v1/stop');
+    if (!stopped.ok) {
+      return stopped;
+    }
+    final cleared = await saveConfig(config.copyWith(joinToken: ''));
+    if (!cleared.ok) {
+      return cleared;
+    }
+    return _request('GET', '/v1/status');
+  }
+
   Future<WorkerCommandResult> serviceAction(String action) {
     if (action == 'status') {
       return _request('GET', '/v1/status');
-    }
-    if (action == 'disconnect') {
-      return _request('POST', '/v1/disconnect');
     }
     return _request('POST', '/v1/$action');
   }
@@ -833,13 +874,14 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   }
 
   Future<void> _disconnect() async {
+    final config = _readConfig();
     final result = await _run(
       'Disconnecting',
-      () => _controller.serviceAction('disconnect'),
+      () => _controller.disconnect(config),
     );
     if (!mounted || !result.ok) return;
     _joinToken.clear();
-    await _store.save(_readConfig());
+    await _store.save(config.copyWith(joinToken: ''));
   }
 
   Future<void> _refreshStatus() async {
@@ -901,10 +943,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
             setState(() => _installService = value),
       ),
     );
-    final controlPanel = _ControlPanel(
+    final actionBar = _WorkerActionBar(
       busy: _busy,
-      output: _output,
-      runtimeStatus: _runtimeStatus,
       onConnect: _connect,
       onSave: _saveConfig,
       onStatus: _refreshStatus,
@@ -928,6 +968,10 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
             child: Column(
               children: [
                 _Header(status: _status, busy: _busy),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+                  child: actionBar,
+                ),
                 const Padding(
                   padding: EdgeInsets.fromLTRB(24, 10, 24, 0),
                   child: _WorkerTabs(),
@@ -943,7 +987,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
                               return Column(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
-                                  controlPanel,
+                                  _StatusPanel(status: _runtimeStatus),
                                   const SizedBox(height: 16),
                                   _QuickResourceSummary(
                                     cpu: _cpu,
@@ -958,7 +1002,10 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
                             return Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Expanded(flex: 4, child: controlPanel),
+                                Expanded(
+                                  flex: 4,
+                                  child: _StatusPanel(status: _runtimeStatus),
+                                ),
                                 const SizedBox(width: 16),
                                 Expanded(
                                   flex: 3,
@@ -1228,11 +1275,9 @@ class _ConnectionPanel extends StatelessWidget {
   }
 }
 
-class _ControlPanel extends StatelessWidget {
-  const _ControlPanel({
+class _WorkerActionBar extends StatelessWidget {
+  const _WorkerActionBar({
     required this.busy,
-    required this.output,
-    required this.runtimeStatus,
     required this.onConnect,
     required this.onSave,
     required this.onStatus,
@@ -1242,8 +1287,6 @@ class _ControlPanel extends StatelessWidget {
   });
 
   final bool busy;
-  final String output;
-  final WorkerRuntimeStatus? runtimeStatus;
   final VoidCallback onConnect;
   final VoidCallback onSave;
   final VoidCallback onStatus;
@@ -1253,30 +1296,40 @@ class _ControlPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _Panel(
-      title: 'Worker control',
-      icon: Icons.power_settings_new,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _RuntimeStatusCard(status: runtimeStatus),
-          const SizedBox(height: 14),
-          FilledButton.icon(
-            onPressed: busy ? null : onConnect,
-            icon: const Icon(Icons.link),
-            label: const Text('Connect worker'),
+    final colors = Theme.of(context).colorScheme;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 1180),
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: colors.surface.withValues(alpha: 0.94),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: colors.outlineVariant),
+            boxShadow: [
+              BoxShadow(
+                color: colors.shadow.withValues(alpha: 0.08),
+                blurRadius: 18,
+                offset: const Offset(0, 8),
+              ),
+            ],
           ),
-          const SizedBox(height: 10),
-          OutlinedButton.icon(
-            onPressed: busy ? null : onSave,
-            icon: const Icon(Icons.save_outlined),
-            label: const Text('Save config'),
-          ),
-          const SizedBox(height: 14),
-          Wrap(
+          child: Wrap(
             spacing: 8,
             runSpacing: 8,
+            alignment: WrapAlignment.center,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
+              FilledButton.icon(
+                onPressed: busy ? null : onConnect,
+                icon: const Icon(Icons.link),
+                label: const Text('Connect'),
+              ),
+              OutlinedButton.icon(
+                onPressed: busy ? null : onSave,
+                icon: const Icon(Icons.save_outlined),
+                label: const Text('Save'),
+              ),
               _ActionButton(
                 icon: Icons.fact_check_outlined,
                 label: 'Status',
@@ -1299,11 +1352,25 @@ class _ControlPanel extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 18),
-          _SectionLabel('Output'),
-          const SizedBox(height: 8),
-          _LogBox(output: output, minHeight: 260),
-        ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusPanel extends StatelessWidget {
+  const _StatusPanel({required this.status});
+
+  final WorkerRuntimeStatus? status;
+
+  @override
+  Widget build(BuildContext context) {
+    return _Panel(
+      title: 'Worker status',
+      icon: Icons.power_settings_new,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [_RuntimeStatusCard(status: status)],
       ),
     );
   }

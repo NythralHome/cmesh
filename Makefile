@@ -46,7 +46,7 @@ worker-desktop-test:
 worker-desktop-build: build
 	cd apps/worker_desktop && if [ "$(shell uname -s)" = "Darwin" ]; then \
 		fvm flutter build macos; \
-		cp "$(CURDIR)/bin/cmesh" build/macos/Build/Products/Release/cmesh_worker_desktop.app/Contents/Resources/cmesh; \
+		cp "$(CURDIR)/bin/cmesh" "build/macos/Build/Products/Release/CMesh Worker.app/Contents/Resources/cmesh"; \
 	elif [ "$(shell uname -s)" = "Linux" ]; then \
 		fvm flutter build linux; \
 		cp "$(CURDIR)/bin/cmesh" build/linux/*/release/bundle/cmesh; \
