@@ -189,6 +189,14 @@ func TestDesktopInviteURL(t *testing.T) {
 	}
 }
 
+func TestReleaseDownloadBaseUsesVersionedReleaseForTags(t *testing.T) {
+	got := releaseDownloadBase("v0.1.0-alpha.22")
+	want := "https://github.com/NythralHome/cmesh/releases/download/v0.1.0-alpha.22/"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
 func TestDashboardRequiresOperatorTokenWhenConfigured(t *testing.T) {
 	srv := NewServerWithOptions(ServerOptions{
 		Addr:          ":0",

@@ -15,6 +15,7 @@ import (
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
 	"github.com/cmesh/cmesh/internal/resources"
+	"github.com/cmesh/cmesh/internal/version"
 )
 
 type Server struct {
@@ -143,11 +144,12 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 		managerURL = localManagerURL(r)
 	}
 	data := InvitePageData{
-		ManagerURL:        managerURL,
-		JoinToken:         s.joinToken,
-		DesktopInviteURL:  desktopInviteURL(managerURL, s.joinToken),
-		DesktopInviteHref: template.URL(desktopInviteURL(managerURL, s.joinToken)),
-		DownloadURL:       "https://github.com/NythralHome/cmesh/releases/latest",
+		ManagerURL:          managerURL,
+		JoinToken:           s.joinToken,
+		DesktopInviteURL:    desktopInviteURL(managerURL, s.joinToken),
+		DesktopInviteHref:   template.URL(desktopInviteURL(managerURL, s.joinToken)),
+		DownloadURL:         releaseDownloadBase(version.Version) + "CMesh-Worker-macos-arm64.zip",
+		ReleaseDownloadBase: releaseDownloadBase(version.Version),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -216,11 +218,12 @@ func localManagerURL(r *http.Request) string {
 }
 
 type InvitePageData struct {
-	ManagerURL        string
-	JoinToken         string
-	DesktopInviteURL  string
-	DesktopInviteHref template.URL
-	DownloadURL       string
+	ManagerURL          string
+	JoinToken           string
+	DesktopInviteURL    string
+	DesktopInviteHref   template.URL
+	DownloadURL         string
+	ReleaseDownloadBase string
 }
 
 func desktopInviteURL(managerURL string, joinToken string) string {
@@ -228,6 +231,13 @@ func desktopInviteURL(managerURL string, joinToken string) string {
 	values.Set("manager", managerURL)
 	values.Set("token", joinToken)
 	return "cmesh://join?" + values.Encode()
+}
+
+func releaseDownloadBase(appVersion string) string {
+	if strings.HasPrefix(appVersion, "v") {
+		return "https://github.com/NythralHome/cmesh/releases/download/" + appVersion + "/"
+	}
+	return "https://github.com/NythralHome/cmesh/releases/latest/download/"
 }
 
 var operatorLoginTemplate = template.Must(template.New("operator-login").Parse(`<!doctype html>
@@ -1081,7 +1091,7 @@ iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-wor
     });
 
     (function() {
-      var releaseBase = "https://github.com/NythralHome/cmesh/releases/latest/download/";
+      var releaseBase = "{{.ReleaseDownloadBase}}";
       var options = {
         macApple: {
           label: "Download for macOS Apple Silicon",
