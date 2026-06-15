@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cmesh/cmesh/internal/workerstatus"
 )
 
 type Config struct {
@@ -33,14 +35,15 @@ type Config struct {
 }
 
 type Status struct {
-	Running    bool       `json:"running"`
-	PID        int        `json:"pid,omitempty"`
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	ExitCode   *int       `json:"exit_code,omitempty"`
-	LastError  string     `json:"last_error,omitempty"`
-	LogTail    string     `json:"log_tail"`
-	Config     Config     `json:"config"`
-	ConfigPath string     `json:"config_path"`
+	Running    bool                    `json:"running"`
+	PID        int                     `json:"pid,omitempty"`
+	StartedAt  *time.Time              `json:"started_at,omitempty"`
+	ExitCode   *int                    `json:"exit_code,omitempty"`
+	LastError  string                  `json:"last_error,omitempty"`
+	LogTail    string                  `json:"log_tail"`
+	JobStatus  *workerstatus.JobStatus `json:"job_status,omitempty"`
+	Config     Config                  `json:"config"`
+	ConfigPath string                  `json:"config_path"`
 }
 
 type Server struct {
@@ -362,6 +365,9 @@ func (s *Server) status() Status {
 		LogTail:    s.logTail.String(),
 		Config:     s.config,
 		ConfigPath: s.configPath,
+	}
+	if jobStatus, ok := workerstatus.Read(s.config.WorkerCacheDir); ok {
+		status.JobStatus = &jobStatus
 	}
 	if status.Running {
 		status.PID = s.cmd.Process.Pid

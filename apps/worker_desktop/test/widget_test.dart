@@ -61,11 +61,19 @@ void main() {
       'pid': 4120,
       'started_at': '2026-06-15T05:30:00Z',
       'log_tail': 'started worker pid=4120\n',
+      'job_status': {
+        'state': 'running',
+        'job_id': 'job-123',
+        'type': 'compute.matrix_multiply',
+        'started_at': '2026-06-15T05:31:00Z',
+      },
     });
 
     expect(status.running, isTrue);
     expect(status.pid, 4120);
     expect(status.label, 'Running');
+    expect(status.jobStatus?.label, 'Running job');
+    expect(status.jobStatus?.jobId, 'job-123');
     expect(
       status.startedAt?.toUtc().toIso8601String(),
       '2026-06-15T05:30:00.000Z',

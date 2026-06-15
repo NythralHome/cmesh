@@ -513,6 +513,7 @@ class WorkerRuntimeStatus {
     this.joinTokenConfigured = false,
     this.configPath = '',
     this.logTail = '',
+    this.jobStatus,
   });
 
   final bool running;
@@ -524,6 +525,7 @@ class WorkerRuntimeStatus {
   final bool joinTokenConfigured;
   final String configPath;
   final String logTail;
+  final WorkerJobStatus? jobStatus;
 
   factory WorkerRuntimeStatus.fromJson(Map<String, dynamic> json) {
     final startedAtRaw = json['started_at'] as String?;
@@ -541,6 +543,9 @@ class WorkerRuntimeStatus {
       joinTokenConfigured: joinToken.trim().isNotEmpty,
       configPath: json['config_path'] as String? ?? '',
       logTail: json['log_tail'] as String? ?? '',
+      jobStatus: json['job_status'] is Map<String, dynamic>
+          ? WorkerJobStatus.fromJson(json['job_status'] as Map<String, dynamic>)
+          : null,
     );
   }
 
@@ -549,6 +554,69 @@ class WorkerRuntimeStatus {
     if (lastError != null && lastError!.isNotEmpty) return 'Error';
     if (exitCode != null) return 'Stopped';
     return 'Not running';
+  }
+}
+
+class WorkerJobStatus {
+  const WorkerJobStatus({
+    required this.state,
+    this.nodeId = '',
+    this.jobId = '',
+    this.type = '',
+    this.input = '',
+    this.result = '',
+    this.error = '',
+    this.startedAt,
+    this.finishedAt,
+    this.updatedAt,
+  });
+
+  final String state;
+  final String nodeId;
+  final String jobId;
+  final String type;
+  final String input;
+  final String result;
+  final String error;
+  final DateTime? startedAt;
+  final DateTime? finishedAt;
+  final DateTime? updatedAt;
+
+  factory WorkerJobStatus.fromJson(Map<String, dynamic> json) {
+    return WorkerJobStatus(
+      state: json['state'] as String? ?? '',
+      nodeId: json['node_id'] as String? ?? '',
+      jobId: json['job_id'] as String? ?? '',
+      type: json['type'] as String? ?? '',
+      input: json['input'] as String? ?? '',
+      result: json['result'] as String? ?? '',
+      error: json['error'] as String? ?? '',
+      startedAt: _parseOptionalDate(json['started_at']),
+      finishedAt: _parseOptionalDate(json['finished_at']),
+      updatedAt: _parseOptionalDate(json['updated_at']),
+    );
+  }
+
+  bool get hasJob => jobId.isNotEmpty;
+
+  String get label {
+    switch (state) {
+      case 'running':
+        return 'Running job';
+      case 'succeeded':
+        return 'Last job succeeded';
+      case 'failed':
+        return 'Last job failed';
+      case 'idle':
+        return hasJob ? 'Idle, last job complete' : 'Idle';
+      default:
+        return 'No job activity';
+    }
+  }
+
+  static DateTime? _parseOptionalDate(Object? value) {
+    if (value is! String || value.isEmpty) return null;
+    return DateTime.tryParse(value);
   }
 }
 
@@ -1719,7 +1787,11 @@ class _StatusPanel extends StatelessWidget {
       icon: Icons.power_settings_new,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [_RuntimeStatusCard(status: status)],
+        children: [
+          _RuntimeStatusCard(status: status),
+          const SizedBox(height: 12),
+          _WorkerJobStatusCard(status: status?.jobStatus),
+        ],
       ),
     );
   }
@@ -1971,6 +2043,102 @@ class _RuntimeStatusCard extends StatelessWidget {
         '${local.hour.toString().padLeft(2, '0')}:'
         '${local.minute.toString().padLeft(2, '0')}:'
         '${local.second.toString().padLeft(2, '0')}';
+  }
+}
+
+class _WorkerJobStatusCard extends StatelessWidget {
+  const _WorkerJobStatusCard({required this.status});
+
+  final WorkerJobStatus? status;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final current = status;
+    final state = current?.state ?? '';
+    final color = switch (state) {
+      'running' => colors.primary,
+      'succeeded' => const Color(0xFF1B7F4B),
+      'failed' => colors.error,
+      _ => colors.outline,
+    };
+    final icon = switch (state) {
+      'running' => Icons.bolt,
+      'succeeded' => Icons.task_alt,
+      'failed' => Icons.error_outline,
+      _ => Icons.work_outline,
+    };
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: color, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  current?.label ?? 'No job activity',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _StatusLine(
+            label: 'Job',
+            value: current?.jobId.isNotEmpty == true ? current!.jobId : '-',
+          ),
+          _StatusLine(
+            label: 'Type',
+            value: current?.type.isNotEmpty == true ? current!.type : '-',
+          ),
+          _StatusLine(
+            label: state == 'running' ? 'Started' : 'Finished',
+            value: state == 'running'
+                ? _formatJobTime(current?.startedAt)
+                : _formatJobTime(current?.finishedAt ?? current?.updatedAt),
+          ),
+          if (current?.error.isNotEmpty == true) ...[
+            const SizedBox(height: 8),
+            Text(
+              current!.error,
+              style: TextStyle(color: colors.error, fontSize: 12),
+            ),
+          ] else if (current?.result.isNotEmpty == true) ...[
+            const SizedBox(height: 8),
+            Text(
+              _shortResult(current!.result),
+              style: TextStyle(color: colors.onSurfaceVariant, fontSize: 12),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _formatJobTime(DateTime? value) {
+    if (value == null) return '-';
+    final local = value.toLocal();
+    return '${local.year.toString().padLeft(4, '0')}-'
+        '${local.month.toString().padLeft(2, '0')}-'
+        '${local.day.toString().padLeft(2, '0')} '
+        '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}:'
+        '${local.second.toString().padLeft(2, '0')}';
+  }
+
+  String _shortResult(String value) {
+    const maxLength = 140;
+    if (value.length <= maxLength) return value;
+    return '${value.substring(0, maxLength)}...';
   }
 }
 

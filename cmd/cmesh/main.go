@@ -23,6 +23,7 @@ import (
 	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/cmesh/cmesh/internal/version"
 	"github.com/cmesh/cmesh/internal/workercontrol"
+	"github.com/cmesh/cmesh/internal/workerstatus"
 )
 
 func main() {
@@ -305,7 +306,7 @@ func workerRun(ctx context.Context, options workerOptions) error {
 			return err
 		}
 	}
-	if err := pollAndExecuteJob(options.managerURL, resp.NodeID); err != nil {
+	if err := pollAndExecuteJob(options.managerURL, resp.NodeID, options.cacheDir); err != nil {
 		return err
 	}
 	if options.runOnce {
@@ -321,7 +322,7 @@ func workerRun(ctx context.Context, options workerOptions) error {
 			if err := sendHeartbeat(options.managerURL, resp.NodeID, discoverWorkerResources(options)); err != nil {
 				return err
 			}
-			if err := pollAndExecuteJob(options.managerURL, resp.NodeID); err != nil {
+			if err := pollAndExecuteJob(options.managerURL, resp.NodeID, options.cacheDir); err != nil {
 				return err
 			}
 			fmt.Printf("heartbeat sent for %s\n", resp.NodeID)
@@ -653,7 +654,7 @@ func setOperatorToken(req *http.Request, token string) {
 	req.Header.Set("X-CMesh-Operator-Token", token)
 }
 
-func pollAndExecuteJob(managerURL string, nodeID string) error {
+func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string) error {
 	httpResp, err := http.Get(managerURL + "/v1/workers/" + nodeID + "/jobs/next")
 	if err != nil {
 		return err
@@ -671,7 +672,22 @@ func pollAndExecuteJob(managerURL string, nodeID string) error {
 		return err
 	}
 	if resp.Job == nil {
+		if err := workerstatus.MarkIdle(cacheDir, nodeID); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write worker job status: %v\n", err)
+		}
 		return nil
+	}
+
+	startedAt := time.Now().UTC()
+	if err := workerstatus.Write(cacheDir, workerstatus.JobStatus{
+		State:     "running",
+		NodeID:    nodeID,
+		JobID:     resp.Job.ID,
+		Type:      resp.Job.Type,
+		Input:     resp.Job.Input,
+		StartedAt: &startedAt,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write worker job status: %v\n", err)
 	}
 
 	result, jobErr := executeJob(*resp.Job)
@@ -696,6 +712,27 @@ func pollAndExecuteJob(managerURL string, nodeID string) error {
 
 	if completeResp.StatusCode < 200 || completeResp.StatusCode >= 300 {
 		return fmt.Errorf("manager returned %s", completeResp.Status)
+	}
+
+	finishedAt := time.Now().UTC()
+	state := "succeeded"
+	errorText := ""
+	if jobErr != nil {
+		state = "failed"
+		errorText = jobErr.Error()
+	}
+	if err := workerstatus.Write(cacheDir, workerstatus.JobStatus{
+		State:      state,
+		NodeID:     nodeID,
+		JobID:      resp.Job.ID,
+		Type:       resp.Job.Type,
+		Input:      resp.Job.Input,
+		Result:     result,
+		Error:      errorText,
+		StartedAt:  &startedAt,
+		FinishedAt: &finishedAt,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write worker job status: %v\n", err)
 	}
 
 	if jobErr != nil {
