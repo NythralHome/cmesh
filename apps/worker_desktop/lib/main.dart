@@ -14,10 +14,12 @@ class CMeshWorkerApp extends StatelessWidget {
     super.key,
     required this.initialInvite,
     this.autostartControl = true,
+    this.registerProtocolHandler = true,
   });
 
   final InviteConfig? initialInvite;
   final bool autostartControl;
+  final bool registerProtocolHandler;
 
   @override
   Widget build(BuildContext context) {
@@ -38,6 +40,7 @@ class CMeshWorkerApp extends StatelessWidget {
       home: WorkerHomePage(
         initialInvite: initialInvite,
         autostartControl: autostartControl,
+        registerProtocolHandler: registerProtocolHandler,
       ),
     );
   }
@@ -156,6 +159,162 @@ class InviteConfig {
       return null;
     }
     return InviteConfig(managerUrl: manager, joinToken: token);
+  }
+}
+
+class PlatformInviteBridge {
+  static const MethodChannel _channel = MethodChannel(
+    'cmesh.worker_desktop/invite',
+  );
+
+  static Future<InviteConfig?> initialInvite() async {
+    if (!Platform.isMacOS) return null;
+    try {
+      final raw = await _channel.invokeMethod<String>('getInitialInvite');
+      if (raw == null || raw.trim().isEmpty) return null;
+      return InviteConfig.fromString(raw);
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
+  static void setInviteHandler(ValueChanged<InviteConfig> handler) {
+    if (!Platform.isMacOS) return;
+    _channel.setMethodCallHandler((call) async {
+      if (call.method != 'openInvite') return null;
+      final raw = call.arguments as String?;
+      if (raw == null || raw.trim().isEmpty) return null;
+      final invite = InviteConfig.fromString(raw);
+      if (invite != null) {
+        handler(invite);
+      }
+      return null;
+    });
+  }
+}
+
+class WorkerProtocolRegistrar {
+  Future<WorkerCommandResult> ensureRegistered() async {
+    if (Platform.isWindows) {
+      return _registerWindows();
+    }
+    if (Platform.isLinux) {
+      return _registerLinux();
+    }
+    return const WorkerCommandResult(
+      exitCode: 0,
+      output: 'No registration needed.',
+    );
+  }
+
+  Future<WorkerCommandResult> _registerWindows() async {
+    final executable = Platform.resolvedExecutable;
+    final command = '"$executable" "%1"';
+    final operations = [
+      [
+        'add',
+        r'HKCU\Software\Classes\cmesh',
+        '/ve',
+        '/d',
+        'URL:CMesh Worker',
+        '/f',
+      ],
+      [
+        'add',
+        r'HKCU\Software\Classes\cmesh',
+        '/v',
+        'URL Protocol',
+        '/d',
+        '',
+        '/f',
+      ],
+      [
+        'add',
+        r'HKCU\Software\Classes\cmesh\DefaultIcon',
+        '/ve',
+        '/d',
+        '$executable,0',
+        '/f',
+      ],
+      [
+        'add',
+        r'HKCU\Software\Classes\cmesh\shell\open\command',
+        '/ve',
+        '/d',
+        command,
+        '/f',
+      ],
+    ];
+    for (final operation in operations) {
+      final result = await Process.run('reg', operation);
+      if (result.exitCode != 0) {
+        return WorkerCommandResult(
+          exitCode: result.exitCode,
+          output:
+              'Failed to register cmesh:// protocol.\n\n${result.stderr}${result.stdout}',
+        );
+      }
+    }
+    return const WorkerCommandResult(
+      exitCode: 0,
+      output: 'Registered cmesh:// protocol for this Windows user.',
+    );
+  }
+
+  Future<WorkerCommandResult> _registerLinux() async {
+    final executable = Platform.resolvedExecutable;
+    final home = Platform.environment['HOME'];
+    if (home == null || home.isEmpty) {
+      return const WorkerCommandResult(
+        exitCode: 1,
+        output: 'Cannot register cmesh:// protocol because HOME is not set.',
+      );
+    }
+    final applicationsDir = Directory('$home/.local/share/applications');
+    await applicationsDir.create(recursive: true);
+    final desktopFile = File(
+      '${applicationsDir.path}/com.nythral.cmesh.worker.desktop',
+    );
+    await desktopFile.writeAsString('''
+[Desktop Entry]
+Type=Application
+Name=CMesh Worker
+Comment=Join and control a CMesh worker
+Exec="${_escapeDesktopExec(executable)}" %u
+Terminal=false
+Categories=Network;Utility;
+MimeType=x-scheme-handler/cmesh;
+''');
+
+    await _runBestEffort('update-desktop-database', [applicationsDir.path]);
+    final mime = await Process.run('xdg-mime', [
+      'default',
+      desktopFile.uri.pathSegments.last,
+      'x-scheme-handler/cmesh',
+    ]);
+    if (mime.exitCode != 0) {
+      return WorkerCommandResult(
+        exitCode: mime.exitCode,
+        output:
+            'Created ${desktopFile.path}, but xdg-mime could not set it as the cmesh:// handler.\n\n${mime.stderr}${mime.stdout}',
+      );
+    }
+    return WorkerCommandResult(
+      exitCode: 0,
+      output: 'Registered cmesh:// protocol using ${desktopFile.path}.',
+    );
+  }
+
+  Future<void> _runBestEffort(String executable, List<String> args) async {
+    try {
+      await Process.run(executable, args);
+    } on Object {
+      // Optional desktop database refresh; xdg-mime is the authoritative step.
+    }
+  }
+
+  String _escapeDesktopExec(String value) {
+    return value.replaceAll(r'\', r'\\').replaceAll('"', r'\"');
   }
 }
 
@@ -392,10 +551,12 @@ class WorkerHomePage extends StatefulWidget {
     super.key,
     required this.initialInvite,
     required this.autostartControl,
+    required this.registerProtocolHandler,
   });
 
   final InviteConfig? initialInvite;
   final bool autostartControl;
+  final bool registerProtocolHandler;
 
   @override
   State<WorkerHomePage> createState() => _WorkerHomePageState();
@@ -404,6 +565,7 @@ class WorkerHomePage extends StatefulWidget {
 class _WorkerHomePageState extends State<WorkerHomePage> {
   final _store = WorkerConfigStore();
   final _controller = WorkerController();
+  final _protocolRegistrar = WorkerProtocolRegistrar();
   final _formKey = GlobalKey<FormState>();
   final _managerUrl = TextEditingController();
   final _joinToken = TextEditingController();
@@ -422,7 +584,11 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   @override
   void initState() {
     super.initState();
+    PlatformInviteBridge.setInviteHandler(_applyInvite);
     _loadConfig();
+    if (widget.registerProtocolHandler) {
+      _registerProtocolHandler();
+    }
     if (widget.autostartControl) {
       _bootstrapControlApi();
     }
@@ -441,10 +607,12 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
 
   Future<void> _loadConfig() async {
     final config = await _store.load();
+    final platformInvite = await PlatformInviteBridge.initialInvite();
     if (!mounted) return;
     setState(() {
-      _managerUrl.text = widget.initialInvite?.managerUrl ?? config.managerUrl;
-      _joinToken.text = widget.initialInvite?.joinToken ?? config.joinToken;
+      final invite = platformInvite ?? widget.initialInvite;
+      _managerUrl.text = invite?.managerUrl ?? config.managerUrl;
+      _joinToken.text = invite?.joinToken ?? config.joinToken;
       _cpu.text = '${config.cpu}';
       _memoryGb.text = '${config.memoryGb}';
       _diskGb.text = '${config.diskGb}';
@@ -452,6 +620,27 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _gpuEnabled = config.gpuEnabled;
       _benchmark = config.benchmark;
       _installService = config.installService;
+    });
+  }
+
+  Future<void> _registerProtocolHandler() async {
+    final result = await _protocolRegistrar.ensureRegistered();
+    if (!mounted || result.ok) return;
+    setState(() {
+      _output = result.output;
+    });
+  }
+
+  void _applyInvite(InviteConfig invite) {
+    if (!mounted) return;
+    setState(() {
+      if (invite.managerUrl != null && invite.managerUrl!.isNotEmpty) {
+        _managerUrl.text = invite.managerUrl!;
+      }
+      if (invite.joinToken != null && invite.joinToken!.isNotEmpty) {
+        _joinToken.text = invite.joinToken!;
+      }
+      _status = 'Invite loaded';
     });
   }
 

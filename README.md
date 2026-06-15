@@ -89,6 +89,8 @@ make worker-desktop-run
 
 The local control API supports `X-CMesh-Control-Token` for `/v1/*` routes. The desktop app generates and passes this token automatically when it starts the bundled control process.
 
+Worker invite links use the `cmesh://join` protocol. Release builds register that protocol through the macOS app bundle and through per-user registration on Windows/Linux when the app starts.
+
 Tagged releases publish early desktop bundles alongside CLI binaries:
 
 - `CMesh-Worker-macos-<arch>.zip`

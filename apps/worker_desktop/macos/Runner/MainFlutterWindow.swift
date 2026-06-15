@@ -8,6 +8,7 @@ class MainFlutterWindow: NSWindow {
     self.contentViewController = flutterViewController
     self.setFrame(windowFrame, display: true)
 
+    InviteURLBridge.configure(controller: flutterViewController)
     RegisterGeneratedPlugins(registry: flutterViewController)
 
     super.awakeFromNib()

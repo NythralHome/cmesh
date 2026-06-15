@@ -28,7 +28,7 @@ Invite links can prefill the manager URL and join token:
 cmesh://join?manager=https%3A%2F%2Fcmesh.example.com&token=replace-with-token
 ```
 
-For development, pass an invite through `CMESH_INVITE_URL`.
+For development, pass an invite through `CMESH_INVITE_URL`. Release builds also register `cmesh://join` with the host OS: macOS through the app bundle, Windows through `HKCU\Software\Classes\cmesh`, and Linux through a per-user `.desktop` handler.
 
 ## Current Scope
 
@@ -36,6 +36,7 @@ For development, pass an invite through `CMESH_INVITE_URL`.
 - CPU, RAM, disk, GPU, and VRAM limits.
 - Connect, status, start, stop, and disconnect actions.
 - Local config persistence at `~/.cmesh/worker-desktop.json`.
+- `cmesh://join` invite link handling.
 - Worker process output from the local control API.
 
 ## Next Step

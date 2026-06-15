@@ -5,7 +5,11 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   testWidgets('renders worker connection controls', (tester) async {
     await tester.pumpWidget(
-      const CMeshWorkerApp(initialInvite: null, autostartControl: false),
+      const CMeshWorkerApp(
+        initialInvite: null,
+        autostartControl: false,
+        registerProtocolHandler: false,
+      ),
     );
     await tester.pumpAndSettle();
 
