@@ -1091,62 +1091,24 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _showMissingJoinToken('Start failed');
       return;
     }
-    final config = _readConfig();
-    _statusPoller?.cancel();
-    setState(() {
-      _busy = true;
-      _status = 'Preparing worker start...';
-      _output = '1/4 Checking local worker control API';
-    });
-
-    try {
-      final control = await _controller.ensureRunning();
-      if (!mounted) return;
-      if (!control.ok) {
-        _finishCommand('Worker start failed', control);
-        return;
-      }
-
-      setState(() {
-        _status = 'Saving worker settings...';
-        _output = '2/4 Saving worker settings into local control API';
-      });
-      await _store.save(config);
-      final saveResult = await _controller.saveConfig(config);
-      if (!mounted) return;
-      if (!saveResult.ok) {
-        _finishCommand('Worker start failed', saveResult);
-        return;
-      }
-      setState(() {
-        _savedConfig = config;
-        _status = 'Starting worker process...';
-        _output = '3/4 Starting worker process';
-      });
-
-      final startResult = await _controller.serviceAction('start');
-      if (!mounted) return;
-      if (!startResult.ok) {
-        _finishCommand('Worker start failed', startResult);
-        return;
-      }
-
-      setState(() {
-        _status = 'Checking worker status...';
-        _output = '4/4 Checking worker runtime status';
-      });
-      final statusResult = await _controller.serviceAction('status');
-      if (!mounted) return;
-      _finishCommand(
-        'Worker start',
-        statusResult.ok ? statusResult : startResult,
+    if (_hasUnsavedConfig) {
+      _setLocalFailure(
+        'Start blocked',
+        'Settings are not saved. Save settings first, then start the worker.',
       );
-      if ((statusResult.ok ? statusResult : startResult).ok) {
-        _startStatusPolling();
+      return;
+    }
+    final result = await _run('Starting worker', () async {
+      final startResult = await _controller.serviceAction('start');
+      if (!startResult.ok) {
+        return startResult;
       }
-    } on Object catch (error) {
-      if (!mounted) return;
-      _setLocalFailure('Worker start failed', '$error');
+
+      final statusResult = await _controller.serviceAction('status');
+      return statusResult.ok ? statusResult : startResult;
+    });
+    if (result.ok) {
+      _startStatusPolling();
     }
   }
 
@@ -1236,7 +1198,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     return current.toJson().toString() != saved.toJson().toString();
   }
 
-  bool get _canAttemptStart => _hasJoinToken;
+  bool get _canAttemptStart =>
+      _hasJoinToken && !_hasUnsavedConfig && _readConfigOrNull() != null;
 
   void _showMissingJoinToken(String status) {
     _setLocalFailure(
@@ -1327,6 +1290,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       hasUnsavedConfig: _hasUnsavedConfig,
       canStart: _canAttemptStart,
       onStatus: _refreshStatus,
+      onSave: _saveConfig,
       onStart: _startWorker,
       onStop: () => _serviceAction('stop'),
       onDisconnect: _disconnect,
@@ -1686,6 +1650,7 @@ class _WorkerActionBar extends StatelessWidget {
     required this.hasUnsavedConfig,
     required this.canStart,
     required this.onStatus,
+    required this.onSave,
     required this.onStart,
     required this.onStop,
     required this.onDisconnect,
@@ -1698,6 +1663,7 @@ class _WorkerActionBar extends StatelessWidget {
   final bool hasUnsavedConfig;
   final bool canStart;
   final VoidCallback onStatus;
+  final VoidCallback onSave;
   final VoidCallback onStart;
   final VoidCallback onStop;
   final VoidCallback onDisconnect;
@@ -1711,7 +1677,7 @@ class _WorkerActionBar extends StatelessWidget {
         : !hasJoinToken
         ? 'Invite required'
         : hasUnsavedConfig
-        ? 'Ready to save & start'
+        ? 'Settings not saved'
         : canStart
         ? 'Ready to start'
         : 'Check settings';
@@ -1760,13 +1726,17 @@ class _WorkerActionBar extends StatelessWidget {
                         icon: const Icon(Icons.link),
                         label: const Text('Open invite'),
                       ),
-                    if (!running && hasJoinToken)
+                    if (!running && hasJoinToken && hasUnsavedConfig)
+                      FilledButton.icon(
+                        onPressed: busy ? null : onSave,
+                        icon: const Icon(Icons.save_outlined),
+                        label: const Text('Save settings'),
+                      ),
+                    if (!running && hasJoinToken && !hasUnsavedConfig)
                       FilledButton.icon(
                         onPressed: busy || !canStart ? null : onStart,
                         icon: const Icon(Icons.play_arrow),
-                        label: Text(
-                          hasUnsavedConfig ? 'Save & start' : 'Start worker',
-                        ),
+                        label: const Text('Start worker'),
                       ),
                     _ActionButton(
                       icon: Icons.fact_check_outlined,

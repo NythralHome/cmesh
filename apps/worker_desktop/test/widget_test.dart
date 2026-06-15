@@ -19,10 +19,13 @@ void main() {
     expect(find.text('Status unknown'), findsOneWidget);
     expect(find.text('Invite required'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Open invite'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Save & start'), findsNothing);
+    expect(find.widgetWithText(FilledButton, 'Save settings'), findsNothing);
+    expect(find.widgetWithText(FilledButton, 'Start worker'), findsNothing);
   });
 
-  testWidgets('offers deterministic save and start flow', (tester) async {
+  testWidgets('requires saved settings before start is available', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       const CMeshWorkerApp(
         initialInvite: null,
@@ -40,10 +43,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Ready to save & start'), findsOneWidget);
-    final start = find.widgetWithText(FilledButton, 'Save & start');
-    expect(start, findsOneWidget);
-    expect(tester.widget<FilledButton>(start).onPressed, isNotNull);
+    expect(find.text('Settings not saved'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Save settings'), findsWidgets);
+    expect(find.widgetWithText(FilledButton, 'Start worker'), findsNothing);
   });
 
   test('parses invite URLs', () {
