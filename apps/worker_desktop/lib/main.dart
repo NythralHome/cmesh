@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -28,9 +29,16 @@ class CMeshWorkerApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
+        scaffoldBackgroundColor: Colors.transparent,
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF246B5A),
           brightness: Brightness.light,
+        ),
+        tabBarTheme: const TabBarThemeData(
+          dividerHeight: 0,
+          labelColor: Color(0xFF123F36),
+          unselectedLabelColor: Color(0xFF5F6F6B),
+          indicatorSize: TabBarIndicatorSize.tab,
         ),
         inputDecorationTheme: const InputDecorationTheme(
           border: OutlineInputBorder(),
@@ -190,6 +198,33 @@ class PlatformInviteBridge {
       }
       return null;
     });
+  }
+}
+
+class MacStatusItemBridge {
+  static const MethodChannel _channel = MethodChannel(
+    'cmesh.worker_desktop/status_item',
+  );
+
+  static Future<void> configure() async {
+    if (!Platform.isMacOS) return;
+    try {
+      await _channel.invokeMethod<void>('configure');
+    } on MissingPluginException {
+      // Older builds do not expose the native status item channel.
+    }
+  }
+
+  static Future<void> update(WorkerRuntimeStatus? status) async {
+    if (!Platform.isMacOS) return;
+    try {
+      await _channel.invokeMethod<void>('update', {
+        'running': status?.running ?? false,
+        'label': status?.label ?? 'Not running',
+      });
+    } on MissingPluginException {
+      // Best-effort menu bar status.
+    }
   }
 }
 
@@ -676,6 +711,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   void initState() {
     super.initState();
     PlatformInviteBridge.setInviteHandler(_applyInvite);
+    MacStatusItemBridge.configure();
     _loadConfig();
     if (widget.registerProtocolHandler) {
       _registerProtocolHandler();
@@ -803,6 +839,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _busy = false;
       if (runtimeStatus != null) {
         _runtimeStatus = runtimeStatus;
+        MacStatusItemBridge.update(runtimeStatus);
       }
       _status = result.ok
           ? runtimeStatus?.label ?? '$label complete'
@@ -822,74 +859,148 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            _Header(status: _status, busy: _busy),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 1180),
-                  child: Form(
-                    key: _formKey,
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        final wide = constraints.maxWidth >= 920;
-                        final form = _ConnectionPanel(
-                          managerUrl: _managerUrl,
-                          joinToken: _joinToken,
-                          cpu: _cpu,
-                          memoryGb: _memoryGb,
-                          diskGb: _diskGb,
-                          vramGb: _vramGb,
-                          gpuEnabled: _gpuEnabled,
-                          benchmark: _benchmark,
-                          installService: _installService,
-                          onGpuChanged: (value) =>
-                              setState(() => _gpuEnabled = value),
-                          onBenchmarkChanged: (value) =>
-                              setState(() => _benchmark = value),
-                          onInstallServiceChanged: (value) =>
-                              setState(() => _installService = value),
-                        );
-                        final controls = _ControlPanel(
-                          busy: _busy,
+    final connectionPanel = Form(
+      key: _formKey,
+      child: _ConnectionPanel(
+        managerUrl: _managerUrl,
+        joinToken: _joinToken,
+        cpu: _cpu,
+        memoryGb: _memoryGb,
+        diskGb: _diskGb,
+        vramGb: _vramGb,
+        gpuEnabled: _gpuEnabled,
+        benchmark: _benchmark,
+        installService: _installService,
+        onGpuChanged: (value) => setState(() => _gpuEnabled = value),
+        onBenchmarkChanged: (value) => setState(() => _benchmark = value),
+        onInstallServiceChanged: (value) =>
+            setState(() => _installService = value),
+      ),
+    );
+    final controlPanel = _ControlPanel(
+      busy: _busy,
+      output: _output,
+      runtimeStatus: _runtimeStatus,
+      onConnect: _connect,
+      onSave: _saveConfig,
+      onStatus: _refreshStatus,
+      onStart: () => _serviceAction('start'),
+      onStop: () => _serviceAction('stop'),
+      onDisconnect: () => _serviceAction('disconnect'),
+    );
+
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        body: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFFEAF4F0), Color(0xFFF7FAFC), Color(0xFFE9EEF8)],
+            ),
+          ),
+          child: SafeArea(
+            child: Column(
+              children: [
+                _Header(status: _status, busy: _busy),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(24, 10, 24, 0),
+                  child: _WorkerTabs(),
+                ),
+                Expanded(
+                  child: TabBarView(
+                    children: [
+                      _TabSurface(
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            final wide = constraints.maxWidth >= 920;
+                            if (!wide) {
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  controlPanel,
+                                  const SizedBox(height: 16),
+                                  _QuickResourceSummary(
+                                    cpu: _cpu,
+                                    memoryGb: _memoryGb,
+                                    diskGb: _diskGb,
+                                    gpuEnabled: _gpuEnabled,
+                                    runtimeStatus: _runtimeStatus,
+                                  ),
+                                ],
+                              );
+                            }
+                            return Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(flex: 4, child: controlPanel),
+                                const SizedBox(width: 16),
+                                Expanded(
+                                  flex: 3,
+                                  child: _QuickResourceSummary(
+                                    cpu: _cpu,
+                                    memoryGb: _memoryGb,
+                                    diskGb: _diskGb,
+                                    gpuEnabled: _gpuEnabled,
+                                    runtimeStatus: _runtimeStatus,
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                      _TabSurface(child: connectionPanel),
+                      _TabSurface(
+                        child: _LogsPanel(
                           output: _output,
-                          runtimeStatus: _runtimeStatus,
-                          onConnect: _connect,
-                          onSave: _saveConfig,
-                          onStatus: _refreshStatus,
-                          onStart: () => _serviceAction('start'),
-                          onStop: () => _serviceAction('stop'),
-                          onDisconnect: () => _serviceAction('disconnect'),
-                        );
-                        if (!wide) {
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              form,
-                              const SizedBox(height: 16),
-                              controls,
-                            ],
-                          );
-                        }
-                        return Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(flex: 5, child: form),
-                            const SizedBox(width: 16),
-                            Expanded(flex: 4, child: controls),
-                          ],
-                        );
-                      },
-                    ),
+                          onRefresh: _refreshStatus,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _WorkerTabs extends StatelessWidget {
+  const _WorkerTabs();
+
+  @override
+  Widget build(BuildContext context) {
+    return _Glass(
+      padding: const EdgeInsets.all(5),
+      child: const TabBar(
+        tabs: [
+          Tab(icon: Icon(Icons.speed), text: 'Overview'),
+          Tab(icon: Icon(Icons.tune), text: 'Connection'),
+          Tab(icon: Icon(Icons.terminal), text: 'Logs'),
+        ],
+      ),
+    );
+  }
+}
+
+class _TabSurface extends StatelessWidget {
+  const _TabSurface({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 1180),
+          child: child,
         ),
       ),
     );
@@ -1141,23 +1252,157 @@ class _ControlPanel extends StatelessWidget {
           const SizedBox(height: 18),
           _SectionLabel('Output'),
           const SizedBox(height: 8),
-          Container(
-            constraints: const BoxConstraints(minHeight: 260),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: const Color(0xFF101418),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: SelectableText(
-              output,
-              style: const TextStyle(
-                color: Color(0xFFE6EDF3),
-                fontFamily: 'monospace',
-                fontSize: 12,
-                height: 1.35,
-              ),
+          _LogBox(output: output, minHeight: 260),
+        ],
+      ),
+    );
+  }
+}
+
+class _LogBox extends StatelessWidget {
+  const _LogBox({required this.output, required this.minHeight});
+
+  final String output;
+  final double minHeight;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: BoxConstraints(minHeight: minHeight),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF101418).withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: SelectableText(
+        output,
+        style: const TextStyle(
+          color: Color(0xFFE6EDF3),
+          fontFamily: 'monospace',
+          fontSize: 12,
+          height: 1.35,
+        ),
+      ),
+    );
+  }
+}
+
+class _QuickResourceSummary extends StatelessWidget {
+  const _QuickResourceSummary({
+    required this.cpu,
+    required this.memoryGb,
+    required this.diskGb,
+    required this.gpuEnabled,
+    required this.runtimeStatus,
+  });
+
+  final TextEditingController cpu;
+  final TextEditingController memoryGb;
+  final TextEditingController diskGb;
+  final bool gpuEnabled;
+  final WorkerRuntimeStatus? runtimeStatus;
+
+  @override
+  Widget build(BuildContext context) {
+    return _Panel(
+      title: 'Resource share',
+      icon: Icons.dashboard_customize_outlined,
+      child: Column(
+        children: [
+          _SummaryTile(
+            icon: Icons.memory,
+            label: 'CPU cores',
+            value: cpu.text.isEmpty ? '-' : cpu.text,
+          ),
+          _SummaryTile(
+            icon: Icons.storage,
+            label: 'Memory',
+            value: memoryGb.text.isEmpty ? '-' : '${memoryGb.text} GB',
+          ),
+          _SummaryTile(
+            icon: Icons.folder,
+            label: 'Storage',
+            value: diskGb.text.isEmpty ? '-' : '${diskGb.text} GB',
+          ),
+          _SummaryTile(
+            icon: Icons.view_in_ar,
+            label: 'GPU',
+            value: gpuEnabled ? 'Allowed' : 'Disabled',
+          ),
+          _SummaryTile(
+            icon: Icons.radio_button_checked,
+            label: 'Local status',
+            value: runtimeStatus?.label ?? 'Unknown',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SummaryTile extends StatelessWidget {
+  const _SummaryTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.38),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.42)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: colors.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(color: colors.onSurfaceVariant),
             ),
           ),
+          Text(value, style: const TextStyle(fontWeight: FontWeight.w700)),
+        ],
+      ),
+    );
+  }
+}
+
+class _LogsPanel extends StatelessWidget {
+  const _LogsPanel({required this.output, required this.onRefresh});
+
+  final String output;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    return _Panel(
+      title: 'Worker logs',
+      icon: Icons.terminal,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: onRefresh,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Refresh status'),
+            ),
+          ),
+          const SizedBox(height: 14),
+          _LogBox(output: output, minHeight: 420),
         ],
       ),
     );
@@ -1288,12 +1533,8 @@ class _Panel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    return Container(
+    return _Glass(
       padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        border: Border.all(color: colors.outlineVariant),
-        borderRadius: BorderRadius.circular(8),
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1312,6 +1553,40 @@ class _Panel extends StatelessWidget {
           const SizedBox(height: 16),
           child,
         ],
+      ),
+    );
+  }
+}
+
+class _Glass extends StatelessWidget {
+  const _Glass({required this.child, this.padding = EdgeInsets.zero});
+
+  final Widget child;
+  final EdgeInsetsGeometry padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+        child: Container(
+          padding: padding,
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.58),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.55)),
+            boxShadow: [
+              BoxShadow(
+                color: colors.shadow.withValues(alpha: 0.08),
+                blurRadius: 24,
+                offset: const Offset(0, 12),
+              ),
+            ],
+          ),
+          child: child,
+        ),
       ),
     );
   }

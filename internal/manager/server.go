@@ -596,6 +596,16 @@ func recentJobs(in []jobs.Job, limit int) []jobs.Job {
 	return out
 }
 
+func hasActiveJobs(in []jobs.Job) bool {
+	for _, job := range in {
+		switch job.Status {
+		case jobs.StatusQueued, jobs.StatusScheduled, jobs.StatusRunning:
+			return true
+		}
+	}
+	return false
+}
+
 var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
 	"gb": func(bytes uint64) float64 {
 		return float64(bytes) / 1024 / 1024 / 1024
@@ -632,6 +642,31 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 			return "pill pill-job"
 		default:
 			return "pill pill-muted"
+		}
+	},
+	"hasActiveJobs": hasActiveJobs,
+	"jobMetric": func(job jobs.Job, key string) string {
+		if job.Result == "" {
+			return "-"
+		}
+		var result map[string]any
+		if err := json.Unmarshal([]byte(job.Result), &result); err != nil {
+			return "-"
+		}
+		value, ok := result[key]
+		if !ok {
+			return "-"
+		}
+		switch typed := value.(type) {
+		case float64:
+			if key == "gflops" {
+				return fmt.Sprintf("%.2f", typed)
+			}
+			return fmt.Sprintf("%.0f", typed)
+		case string:
+			return typed
+		default:
+			return fmt.Sprintf("%v", typed)
 		}
 	},
 }).Parse(`<!doctype html>
@@ -793,6 +828,62 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       font-size: 14px;
       font-weight: 600;
     }
+    .job-runner {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+    label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    input {
+      min-height: 36px;
+      width: 100%;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+    }
+    button.button {
+      cursor: pointer;
+    }
+    .primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+    .runner-status {
+      padding: 0 16px 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .result-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(88px, 1fr));
+      gap: 6px;
+      min-width: 260px;
+    }
+    .result-grid span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .result-grid strong {
+      font-size: 13px;
+    }
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 13px;
@@ -800,10 +891,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     @media (max-width: 640px) {
       header, main { padding-left: 18px; padding-right: 18px; }
       table { display: block; overflow-x: auto; }
+      .job-runner { grid-template-columns: 1fr; }
     }
   </style>
 </head>
-<body>
+<body data-active-jobs="{{hasActiveJobs .Jobs}}">
   <header>
     <h1>CMesh</h1>
     <p class="sub">Decentralized-ready AI compute cluster manager</p>
@@ -866,6 +958,26 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         <h2>Jobs</h2>
         <code>{{len .Jobs}} recent</code>
       </div>
+      <form class="job-runner" id="compute-job-form">
+        <input type="hidden" name="type" value="compute.matrix_multiply">
+        <div class="field">
+          <label for="job-size">Matrix size</label>
+          <input id="job-size" name="size" type="number" min="16" max="2048" step="16" value="512">
+        </div>
+        <div class="field">
+          <label for="job-iterations">Iterations</label>
+          <input id="job-iterations" name="iterations" type="number" min="1" max="100" step="1" value="6">
+        </div>
+        <div class="field">
+          <label for="job-requested-by">Requested by</label>
+          <input id="job-requested-by" name="requested_by" value="dashboard">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button class="button primary" type="submit">Run compute job</button>
+        </div>
+      </form>
+      <div class="runner-status" id="compute-job-status">Submit a benchmark-style compute job to the current online worker pool.</div>
       {{if .Jobs}}
       <div class="table-wrap">
         <table>
@@ -876,6 +988,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <th>Type</th>
               <th>Assigned</th>
               <th>Updated</th>
+              <th>Result</th>
               <th>Output</th>
             </tr>
           </thead>
@@ -887,6 +1000,13 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <td><code>{{.Type}}</code></td>
               <td>{{if .AssignedTo}}<code>{{shortID .AssignedTo}}</code>{{else}}-{{end}}</td>
               <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
+              <td>
+                <div class="result-grid">
+                  <div><span>Duration</span><strong>{{jobMetric . "duration_ms"}} ms</strong></div>
+                  <div><span>GFLOPS</span><strong>{{jobMetric . "gflops"}}</strong></div>
+                  <div><span>Runtime</span><strong>{{jobMetric . "worker_runtime"}}</strong></div>
+                </div>
+              </td>
               <td class="mono-output"><code>{{clip (jobOutput .) 160}}</code></td>
             </tr>
           {{end}}
@@ -898,6 +1018,45 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       {{end}}
     </section>
   </main>
+  <script>
+    var form = document.getElementById("compute-job-form");
+    var status = document.getElementById("compute-job-status");
+    if (form) {
+      form.addEventListener("submit", function(event) {
+        event.preventDefault();
+        var size = parseInt(form.elements.size.value, 10);
+        var iterations = parseInt(form.elements.iterations.value, 10);
+        var requestedBy = String(form.elements.requested_by.value || "dashboard").trim();
+        if (!Number.isFinite(size) || size < 16 || !Number.isFinite(iterations) || iterations < 1) {
+          status.innerText = "Use a valid matrix size and iteration count.";
+          return;
+        }
+        status.innerText = "Submitting compute job...";
+        fetch("/v1/jobs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: "compute.matrix_multiply",
+            input: JSON.stringify({ size: size, iterations: iterations }),
+            requested_by: requestedBy
+          })
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function(job) {
+          status.innerText = "Submitted " + job.id + " to " + (job.assigned_to || "the queue") + ". Refreshing results...";
+          setTimeout(function() { window.location.reload(); }, 1200);
+        }).catch(function(error) {
+          status.innerText = "Job submit failed: " + error.message;
+        });
+      });
+    }
+    if (document.body.dataset.activeJobs === "true") {
+      setTimeout(function() { window.location.reload(); }, 5000);
+    }
+  </script>
 </body>
 </html>`))
 

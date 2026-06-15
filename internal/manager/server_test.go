@@ -243,7 +243,7 @@ func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
 	}
 	state.CompleteJob(job.ID, jobs.CompleteRequest{
 		NodeID: online.NodeID,
-		Result: `{"gflops":1.23}`,
+		Result: `{"duration_ms":42,"gflops":1.23,"worker_runtime":"test/runtime"}`,
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -268,6 +268,12 @@ func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
 	}
 	if !strings.Contains(body, "succeeded") {
 		t.Fatalf("expected job status in dashboard")
+	}
+	if !strings.Contains(body, "Run compute job") {
+		t.Fatalf("expected compute job runner in dashboard")
+	}
+	if !strings.Contains(body, "1.23") || !strings.Contains(body, "test/runtime") {
+		t.Fatalf("expected parsed compute result metrics in dashboard")
 	}
 }
 
