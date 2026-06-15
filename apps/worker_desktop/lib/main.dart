@@ -530,10 +530,14 @@ class WorkerRuntimeStatus {
 
   factory WorkerRuntimeStatus.fromJson(Map<String, dynamic> json) {
     final startedAtRaw = json['started_at'] as String?;
+    final logTail = json['log_tail'] as String? ?? '';
     final config = json['config'] is Map<String, dynamic>
         ? json['config'] as Map<String, dynamic>
         : const <String, dynamic>{};
     final joinToken = config['join_token'] as String? ?? '';
+    final parsedJobStatus = json['job_status'] is Map<String, dynamic>
+        ? WorkerJobStatus.fromJson(json['job_status'] as Map<String, dynamic>)
+        : null;
     return WorkerRuntimeStatus(
       running: json['running'] as bool? ?? false,
       pid: json['pid'] as int?,
@@ -543,10 +547,8 @@ class WorkerRuntimeStatus {
       managerUrl: config['manager_url'] as String? ?? '',
       joinTokenConfigured: joinToken.trim().isNotEmpty,
       configPath: json['config_path'] as String? ?? '',
-      logTail: json['log_tail'] as String? ?? '',
-      jobStatus: json['job_status'] is Map<String, dynamic>
-          ? WorkerJobStatus.fromJson(json['job_status'] as Map<String, dynamic>)
-          : null,
+      logTail: logTail,
+      jobStatus: parsedJobStatus ?? WorkerJobStatus.fromLogTail(logTail),
     );
   }
 
@@ -596,6 +598,28 @@ class WorkerJobStatus {
       finishedAt: _parseOptionalDate(json['finished_at']),
       updatedAt: _parseOptionalDate(json['updated_at']),
     );
+  }
+
+  static WorkerJobStatus? fromLogTail(String logTail) {
+    final lines = logTail.split(RegExp(r'\r?\n')).reversed;
+    for (final line in lines) {
+      final completed = RegExp(r'job\s+(\S+)\s+completed').firstMatch(line);
+      if (completed != null) {
+        return WorkerJobStatus(
+          state: 'succeeded',
+          jobId: completed.group(1) ?? '',
+        );
+      }
+      final failed = RegExp(r'job\s+(\S+)\s+failed:\s*(.*)').firstMatch(line);
+      if (failed != null) {
+        return WorkerJobStatus(
+          state: 'failed',
+          jobId: failed.group(1) ?? '',
+          error: failed.group(2) ?? '',
+        );
+      }
+    }
+    return null;
   }
 
   bool get hasJob => jobId.isNotEmpty;
@@ -1060,17 +1084,30 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _showMissingJoinToken('Start failed');
       return;
     }
-    if (!_hasSavedRunnableConfig) {
-      _setLocalFailure(
-        'Start blocked',
-        'Save settings before starting the worker. The worker will only start '
-            'from the config that is already saved into the local control service.',
-      );
-      return;
+    final config = _readConfig();
+    var configSaved = false;
+    final result = await _run(
+      _hasUnsavedConfig ? 'Saving and starting' : 'Starting',
+      () async {
+        await _store.save(config);
+        final saveResult = await _controller.saveConfig(config);
+        if (!saveResult.ok) return saveResult;
+        configSaved = true;
+
+        final startResult = await _controller.serviceAction('start');
+        if (!startResult.ok) return startResult;
+
+        final statusResult = await _controller.serviceAction('status');
+        return statusResult.ok ? statusResult : startResult;
+      },
+    );
+    if (!mounted) return;
+    if (configSaved) {
+      setState(() {
+        _savedConfig = config;
+      });
     }
-    await _run('Starting', () async {
-      return _controller.serviceAction('start');
-    });
+    if (result.ok) _startStatusPolling();
   }
 
   Future<void> _openInvite() async {
@@ -1159,8 +1196,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     return current.toJson().toString() != saved.toJson().toString();
   }
 
-  bool get _hasSavedRunnableConfig =>
-      _hasJoinToken && !_hasUnsavedConfig && _readConfigOrNull() != null;
+  bool get _canAttemptStart => _hasJoinToken;
 
   void _showMissingJoinToken(String status) {
     _setLocalFailure(
@@ -1240,7 +1276,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       running: _isWorkerRunning,
       hasJoinToken: _hasJoinToken,
       hasUnsavedConfig: _hasUnsavedConfig,
-      canStart: _hasSavedRunnableConfig,
+      canStart: _canAttemptStart,
       onStatus: _refreshStatus,
       onStart: _startWorker,
       onStop: () => _serviceAction('stop'),
@@ -1626,18 +1662,18 @@ class _WorkerActionBar extends StatelessWidget {
         : !hasJoinToken
         ? 'Invite required'
         : hasUnsavedConfig
-        ? 'Save settings first'
+        ? 'Ready to save & start'
         : canStart
         ? 'Ready to start'
         : 'Check settings';
     final statusIcon = running
         ? Icons.check_circle
-        : !hasJoinToken || hasUnsavedConfig
+        : !hasJoinToken
         ? Icons.warning_amber_rounded
         : Icons.radio_button_checked;
     final statusColor = running
         ? const Color(0xFF157A4A)
-        : !hasJoinToken || hasUnsavedConfig
+        : !hasJoinToken
         ? colors.error
         : colors.primary;
     return Center(
@@ -1679,7 +1715,9 @@ class _WorkerActionBar extends StatelessWidget {
                       FilledButton.icon(
                         onPressed: busy || !canStart ? null : onStart,
                         icon: const Icon(Icons.play_arrow),
-                        label: const Text('Connect & start'),
+                        label: Text(
+                          hasUnsavedConfig ? 'Save & start' : 'Start worker',
+                        ),
                       ),
                     _ActionButton(
                       icon: Icons.fact_check_outlined,

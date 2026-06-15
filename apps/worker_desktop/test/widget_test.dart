@@ -19,10 +19,10 @@ void main() {
     expect(find.text('Status unknown'), findsOneWidget);
     expect(find.text('Invite required'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Open invite'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Connect & start'), findsNothing);
+    expect(find.widgetWithText(FilledButton, 'Save & start'), findsNothing);
   });
 
-  testWidgets('requires saving invite settings before start', (tester) async {
+  testWidgets('offers deterministic save and start flow', (tester) async {
     await tester.pumpWidget(
       const CMeshWorkerApp(
         initialInvite: null,
@@ -40,10 +40,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Save settings first'), findsOneWidget);
-    final start = find.widgetWithText(FilledButton, 'Connect & start');
+    expect(find.text('Ready to save & start'), findsOneWidget);
+    final start = find.widgetWithText(FilledButton, 'Save & start');
     expect(start, findsOneWidget);
-    expect(tester.widget<FilledButton>(start).onPressed, isNull);
+    expect(tester.widget<FilledButton>(start).onPressed, isNotNull);
   });
 
   test('parses invite URLs', () {
@@ -78,5 +78,15 @@ void main() {
       status.startedAt?.toUtc().toIso8601String(),
       '2026-06-15T05:30:00.000Z',
     );
+  });
+
+  test('parses worker job activity from log tail', () {
+    final status = WorkerRuntimeStatus.fromJson({
+      'running': true,
+      'log_tail': 'started worker pid=4120\njob job-456 completed\n',
+    });
+
+    expect(status.jobStatus?.label, 'Last job succeeded');
+    expect(status.jobStatus?.jobId, 'job-456');
   });
 }
