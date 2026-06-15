@@ -210,6 +210,53 @@ func TestDashboardRequiresOperatorTokenWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+
+	offline := joinWorkerForTest(t, srv, "offline-worker")
+	if !state.MarkWorkerOffline(offline.NodeID) {
+		t.Fatal("expected offline worker to be marked offline")
+	}
+	online := joinWorkerForTest(t, srv, "online-worker")
+
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:  "compute.matrix_multiply",
+		Input: `{"size":32,"iterations":1}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.CompleteJob(job.ID, jobs.CompleteRequest{
+		NodeID: online.NodeID,
+		Result: `{"gflops":1.23}`,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "online-worker") {
+		t.Fatalf("expected online worker in dashboard")
+	}
+	if strings.Contains(body, "offline-worker") {
+		t.Fatalf("expected offline worker to be hidden from dashboard")
+	}
+	if !strings.Contains(body, "1 offline hidden") {
+		t.Fatalf("expected offline worker count in dashboard")
+	}
+	if !strings.Contains(body, "compute.matrix_multiply") {
+		t.Fatalf("expected job type in dashboard")
+	}
+	if !strings.Contains(body, "succeeded") {
+		t.Fatalf("expected job status in dashboard")
+	}
+}
+
 func TestReadAPIRequiresOperatorTokenWhenConfigured(t *testing.T) {
 	srv := NewServerWithOptions(ServerOptions{
 		Addr:          ":0",

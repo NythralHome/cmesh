@@ -7,9 +7,11 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
 	"github.com/cmesh/cmesh/internal/resources"
@@ -102,15 +104,19 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		Summary    ClusterSummary
-		Nodes      any
-		Benchmarks map[string]NodeBenchmarkSummary
-		InviteURL  string
+		Summary            ClusterSummary
+		OnlineNodes        []cluster.Node
+		OfflineWorkerCount int
+		Benchmarks         map[string]NodeBenchmarkSummary
+		Jobs               []jobs.Job
+		InviteURL          string
 	}{
-		Summary:    s.state.ClusterSummary(),
-		Nodes:      s.state.Nodes(),
-		Benchmarks: s.state.BenchmarkSummaryByNode(),
-		InviteURL:  "/invite",
+		Summary:            s.state.ClusterSummary(),
+		OnlineNodes:        onlineWorkerNodes(s.state.Nodes()),
+		OfflineWorkerCount: offlineWorkerCount(s.state.Nodes()),
+		Benchmarks:         s.state.BenchmarkSummaryByNode(),
+		Jobs:               recentJobs(s.state.Jobs(), 12),
+		InviteURL:          "/invite",
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -546,9 +552,77 @@ func requestLogger(next http.Handler) http.Handler {
 	})
 }
 
+func onlineWorkerNodes(nodes []cluster.Node) []cluster.Node {
+	out := make([]cluster.Node, 0, len(nodes))
+	for _, node := range nodes {
+		if node.Role == cluster.NodeRoleWorker && node.Status == cluster.NodeStatusOnline {
+			out = append(out, node)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out
+}
+
+func offlineWorkerCount(nodes []cluster.Node) int {
+	var count int
+	for _, node := range nodes {
+		if node.Role == cluster.NodeRoleWorker && node.Status != cluster.NodeStatusOnline {
+			count++
+		}
+	}
+	return count
+}
+
+func recentJobs(in []jobs.Job, limit int) []jobs.Job {
+	out := append([]jobs.Job(nil), in...)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
 var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
 	"gb": func(bytes uint64) float64 {
 		return float64(bytes) / 1024 / 1024 / 1024
+	},
+	"shortID": func(value string) string {
+		if len(value) <= 12 {
+			return value
+		}
+		return value[:12]
+	},
+	"jobOutput": func(job jobs.Job) string {
+		if job.Error != "" {
+			return job.Error
+		}
+		if job.Result != "" {
+			return job.Result
+		}
+		return "-"
+	},
+	"clip": func(value string, limit int) string {
+		value = strings.TrimSpace(value)
+		if limit <= 0 || len(value) <= limit {
+			return value
+		}
+		return value[:limit] + "..."
+	},
+	"jobPillClass": func(status jobs.Status) string {
+		switch status {
+		case jobs.StatusSucceeded:
+			return "pill"
+		case jobs.StatusFailed, jobs.StatusCanceled:
+			return "pill pill-failed"
+		case jobs.StatusRunning, jobs.StatusScheduled:
+			return "pill pill-job"
+		default:
+			return "pill pill-muted"
+		}
 	},
 }).Parse(`<!doctype html>
 <html lang="en">
@@ -668,6 +742,27 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       font-weight: 600;
       font-size: 12px;
     }
+    .pill-job {
+      background: #eff6ff;
+      color: var(--accent-2);
+    }
+    .pill-failed {
+      background: #fef2f2;
+      color: #b91c1c;
+    }
+    .pill-muted {
+      background: #f3f4f6;
+      color: #4b5563;
+    }
+    .table-wrap {
+      overflow-x: auto;
+    }
+    .mono-output {
+      max-width: 420px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .actions {
       margin-top: 18px;
       display: flex;
@@ -718,48 +813,79 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     </div>
     <section>
       <div class="section-head">
-        <h2>Worker Nodes</h2>
-        <code>POST /v1/workers/join</code>
+        <h2>Online Workers</h2>
+        <code>{{.OfflineWorkerCount}} offline hidden</code>
       </div>
-      {{if .Nodes}}
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Status</th>
-            <th>CPU</th>
-            <th>Memory</th>
-            <th>Storage</th>
-            <th>GPU</th>
-            <th>Benchmark</th>
-            <th>Last seen</th>
-          </tr>
-        </thead>
-        <tbody>
-        {{range .Nodes}}
-          <tr>
-            <td><code>{{.Name}}</code><br><span class="sub">{{.ID}}</span></td>
-            <td><span class="pill">{{.Status}}</span></td>
-            <td>{{.Resources.CPU.CoresAllowed}} / {{.Resources.CPU.CoresTotal}} cores</td>
-            <td>{{printf "%.1f" (gb .Resources.Memory.AllowedBytes)}} / {{printf "%.1f" (gb .Resources.Memory.TotalBytes)}} GB</td>
-            <td>{{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed</td>
-            <td>{{range .Resources.GPU}}<div>{{.Name}}</div>{{else}}0{{end}}</td>
-            <td>{{with index $.Benchmarks .ID}}{{printf "%.0f" .TotalScore}}{{else}}Not run{{end}}</td>
-            <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
-          </tr>
-        {{end}}
-        </tbody>
-      </table>
+      {{if .OnlineNodes}}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>CPU</th>
+              <th>Memory</th>
+              <th>Storage</th>
+              <th>GPU</th>
+              <th>Benchmark</th>
+              <th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+          {{range .OnlineNodes}}
+            <tr>
+              <td><code>{{.Name}}</code><br><span class="sub">{{.ID}}</span></td>
+              <td><span class="pill">{{.Status}}</span></td>
+              <td>{{.Resources.CPU.CoresAllowed}} / {{.Resources.CPU.CoresTotal}} cores</td>
+              <td>{{printf "%.1f" (gb .Resources.Memory.AllowedBytes)}} / {{printf "%.1f" (gb .Resources.Memory.TotalBytes)}} GB</td>
+              <td>{{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed</td>
+              <td>{{range .Resources.GPU}}<div>{{.Name}}</div>{{else}}0{{end}}</td>
+              <td>{{with index $.Benchmarks .ID}}{{printf "%.0f" .TotalScore}}{{else}}Not run{{end}}</td>
+              <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
       {{else}}
-      <div class="empty">No workers have joined this cluster yet.</div>
+      <div class="empty">No workers are online right now.</div>
       {{end}}
     </section>
     <section style="margin-top: 20px;">
       <div class="section-head">
         <h2>Jobs</h2>
-        <code>POST /v1/jobs</code>
+        <code>{{len .Jobs}} recent</code>
       </div>
-      <div class="empty">Job execution is available through the API and CLI. Dashboard job tables will be expanded next.</div>
+      {{if .Jobs}}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>Status</th>
+              <th>Type</th>
+              <th>Assigned</th>
+              <th>Updated</th>
+              <th>Output</th>
+            </tr>
+          </thead>
+          <tbody>
+          {{range .Jobs}}
+            <tr>
+              <td><code>{{shortID .ID}}</code></td>
+              <td><span class="{{jobPillClass .Status}}">{{.Status}}</span></td>
+              <td><code>{{.Type}}</code></td>
+              <td>{{if .AssignedTo}}<code>{{shortID .AssignedTo}}</code>{{else}}-{{end}}</td>
+              <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
+              <td class="mono-output"><code>{{clip (jobOutput .) 160}}</code></td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="empty">No jobs have been submitted yet.</div>
+      {{end}}
     </section>
   </main>
 </body>
