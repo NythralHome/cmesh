@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -353,6 +354,28 @@ func runJob(args []string) error {
 			return err
 		}
 		fmt.Printf("submitted %s status=%s assigned_to=%s\n", job.ID, job.Status, job.AssignedTo)
+	case "submit-compute":
+		fs := flag.NewFlagSet("job submit-compute", flag.ContinueOnError)
+		managerURL := fs.String("manager", "http://127.0.0.1:8080", "manager API URL")
+		operatorToken := fs.String("operator-token", os.Getenv("CMESH_OPERATOR_TOKEN"), "manager operator token")
+		size := fs.Int("size", 192, "square matrix size")
+		iterations := fs.Int("iterations", 3, "number of matrix multiply iterations")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		input, err := newMatrixMultiplyInput(*size, *iterations)
+		if err != nil {
+			return err
+		}
+		job, err := submitJob(strings.TrimRight(*managerURL, "/"), *operatorToken, jobs.CreateRequest{
+			Type:        "compute.matrix_multiply",
+			Input:       input,
+			RequestedBy: defaultNodeName(),
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("submitted %s type=%s status=%s assigned_to=%s input=%s\n", job.ID, job.Type, job.Status, job.AssignedTo, job.Input)
 	case "list":
 		fs := flag.NewFlagSet("job list", flag.ContinueOnError)
 		managerURL := fs.String("manager", "http://127.0.0.1:8080", "manager API URL")
@@ -384,6 +407,7 @@ func runJob(args []string) error {
 func printJobUsage() {
 	fmt.Println(`Usage:
   cmesh job submit --type echo --input "hello" [--operator-token token]
+  cmesh job submit-compute --size 192 --iterations 3 [--operator-token token]
   cmesh job list [--operator-token token]
   cmesh job get <job-id> [--operator-token token]`)
 }
@@ -686,8 +710,113 @@ func executeJob(job jobs.Job) (string, error) {
 	switch job.Type {
 	case "echo":
 		return job.Input, nil
+	case "compute.matrix_multiply":
+		return executeMatrixMultiplyJob(job.Input)
 	default:
 		return "", fmt.Errorf("unsupported job type %q", job.Type)
+	}
+}
+
+type matrixMultiplyInput struct {
+	Size       int `json:"size"`
+	Iterations int `json:"iterations"`
+}
+
+type matrixMultiplyResult struct {
+	Kind          string  `json:"kind"`
+	Size          int     `json:"size"`
+	Iterations    int     `json:"iterations"`
+	Operations    int64   `json:"operations"`
+	DurationMS    int64   `json:"duration_ms"`
+	GFLOPS        float64 `json:"gflops"`
+	Checksum      float64 `json:"checksum"`
+	WorkerRuntime string  `json:"worker_runtime"`
+}
+
+func newMatrixMultiplyInput(size int, iterations int) (string, error) {
+	input := matrixMultiplyInput{Size: size, Iterations: iterations}
+	if err := validateMatrixMultiplyInput(input); err != nil {
+		return "", err
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func executeMatrixMultiplyJob(input string) (string, error) {
+	var req matrixMultiplyInput
+	if strings.TrimSpace(input) == "" {
+		req = matrixMultiplyInput{Size: 192, Iterations: 3}
+	} else if err := json.Unmarshal([]byte(input), &req); err != nil {
+		return "", fmt.Errorf("invalid matrix multiply input: %w", err)
+	}
+	if err := validateMatrixMultiplyInput(req); err != nil {
+		return "", err
+	}
+
+	a := make([]float64, req.Size*req.Size)
+	b := make([]float64, req.Size*req.Size)
+	c := make([]float64, req.Size*req.Size)
+	for i := range a {
+		a[i] = math.Sin(float64(i%97)) * 0.5
+		b[i] = math.Cos(float64(i%89)) * 0.5
+	}
+
+	start := time.Now()
+	for iteration := 0; iteration < req.Iterations; iteration++ {
+		for i := range c {
+			c[i] = 0
+		}
+		multiplySquareMatrices(a, b, c, req.Size)
+	}
+	duration := time.Since(start)
+
+	var checksum float64
+	for i, value := range c {
+		if i%req.Size == 0 {
+			checksum += value
+		}
+	}
+	operations := int64(2) * int64(req.Size) * int64(req.Size) * int64(req.Size) * int64(req.Iterations)
+	result := matrixMultiplyResult{
+		Kind:          "matrix_multiply",
+		Size:          req.Size,
+		Iterations:    req.Iterations,
+		Operations:    operations,
+		DurationMS:    duration.Milliseconds(),
+		GFLOPS:        float64(operations) / duration.Seconds() / 1_000_000_000,
+		Checksum:      checksum,
+		WorkerRuntime: runtime.GOOS + "/" + runtime.GOARCH,
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func validateMatrixMultiplyInput(input matrixMultiplyInput) error {
+	if input.Size < 16 || input.Size > 2048 {
+		return fmt.Errorf("size must be between 16 and 2048")
+	}
+	if input.Iterations < 1 || input.Iterations > 100 {
+		return fmt.Errorf("iterations must be between 1 and 100")
+	}
+	return nil
+}
+
+func multiplySquareMatrices(a []float64, b []float64, c []float64, size int) {
+	for i := 0; i < size; i++ {
+		row := i * size
+		for k := 0; k < size; k++ {
+			av := a[row+k]
+			brow := k * size
+			for j := 0; j < size; j++ {
+				c[row+j] += av * b[brow+j]
+			}
+		}
 	}
 }
 
