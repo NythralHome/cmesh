@@ -16,6 +16,7 @@ void main() {
     expect(find.text('CMesh Worker'), findsOneWidget);
     expect(find.text('Connection'), findsOneWidget);
     expect(find.text('Worker control'), findsOneWidget);
+    expect(find.text('Status unknown'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Connect worker'), findsOneWidget);
   });
 
@@ -26,5 +27,22 @@ void main() {
 
     expect(invite?.managerUrl, 'https://cmesh.example.com');
     expect(invite?.joinToken, 'abc123');
+  });
+
+  test('parses worker runtime status', () {
+    final status = WorkerRuntimeStatus.fromJson({
+      'running': true,
+      'pid': 4120,
+      'started_at': '2026-06-15T05:30:00Z',
+      'log_tail': 'started worker pid=4120\n',
+    });
+
+    expect(status.running, isTrue);
+    expect(status.pid, 4120);
+    expect(status.label, 'Running');
+    expect(
+      status.startedAt?.toUtc().toIso8601String(),
+      '2026-06-15T05:30:00.000Z',
+    );
   });
 }

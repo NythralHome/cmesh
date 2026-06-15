@@ -130,6 +130,8 @@ https://cmesh.example.com
 
 ## Connect A Remote Worker
 
+For a guided first alpha with several real machines, use [FIRST_REAL_TEST.md](FIRST_REAL_TEST.md). Prefer the desktop worker app for donors; the install scripts below are the fallback path for terminal-only machines.
+
 macOS/Linux:
 
 ```sh

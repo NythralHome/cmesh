@@ -349,12 +349,54 @@ class WorkerConfigStore {
 }
 
 class WorkerCommandResult {
-  const WorkerCommandResult({required this.exitCode, required this.output});
+  const WorkerCommandResult({
+    required this.exitCode,
+    required this.output,
+    this.json,
+  });
 
   final int exitCode;
   final String output;
+  final Object? json;
 
   bool get ok => exitCode == 0;
+}
+
+class WorkerRuntimeStatus {
+  const WorkerRuntimeStatus({
+    required this.running,
+    this.pid,
+    this.startedAt,
+    this.exitCode,
+    this.lastError,
+    this.logTail = '',
+  });
+
+  final bool running;
+  final int? pid;
+  final DateTime? startedAt;
+  final int? exitCode;
+  final String? lastError;
+  final String logTail;
+
+  factory WorkerRuntimeStatus.fromJson(Map<String, dynamic> json) {
+    final startedAtRaw = json['started_at'] as String?;
+    return WorkerRuntimeStatus(
+      running: json['running'] as bool? ?? false,
+      pid: json['pid'] as int?,
+      startedAt: startedAtRaw == null ? null : DateTime.tryParse(startedAtRaw),
+      exitCode: json['exit_code'] as int?,
+      lastError: json['last_error'] as String?,
+      logTail: json['log_tail'] as String? ?? '',
+    );
+  }
+
+  String get label {
+    if (running) return 'Running';
+    if (lastError != null && lastError!.isNotEmpty) return 'Error';
+    if (exitCode != null) return 'Stopped';
+    return 'Not running';
+  }
 }
 
 class WorkerController {
@@ -460,11 +502,13 @@ class WorkerController {
       }
       final resp = await req.close();
       final raw = await utf8.decodeStream(resp);
-      final output = _formatResponse(resp.statusCode, raw);
+      final decoded = _decodeResponse(raw);
+      final output = _formatResponse(resp.statusCode, raw, decoded);
       final ok = resp.statusCode >= 200 && resp.statusCode < 300;
       return WorkerCommandResult(
         exitCode: ok ? 0 : resp.statusCode,
         output: output,
+        json: decoded,
       );
     } on Object catch (error) {
       if (tryStart) {
@@ -482,16 +526,23 @@ class WorkerController {
     }
   }
 
-  String _formatResponse(int statusCode, String raw) {
+  Object? _decodeResponse(String raw) {
+    if (raw.trim().isEmpty) return null;
+    try {
+      return jsonDecode(raw);
+    } on Object {
+      return null;
+    }
+  }
+
+  String _formatResponse(int statusCode, String raw, Object? decoded) {
     if (raw.trim().isEmpty) {
       return 'HTTP $statusCode';
     }
-    try {
-      final decoded = jsonDecode(raw);
+    if (decoded != null) {
       return const JsonEncoder.withIndent('  ').convert(decoded);
-    } on Object {
-      return raw.trim();
     }
+    return raw.trim();
   }
 
   Future<String?> _findControlBinary() async {
@@ -580,6 +631,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   bool _busy = false;
   String _status = 'Idle';
   String _output = 'No command has been run yet.';
+  WorkerRuntimeStatus? _runtimeStatus;
 
   @override
   void initState() {
@@ -651,6 +703,9 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _status = result.ok ? 'Control API ready' : 'Control API unavailable';
       _output = result.output;
     });
+    if (result.ok) {
+      await _refreshStatus();
+    }
   }
 
   WorkerConfig _readConfig() {
@@ -689,6 +744,10 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     return _run(action, () => _controller.serviceAction(action));
   }
 
+  Future<void> _refreshStatus() async {
+    await _run('Refreshing status', () => _controller.serviceAction('status'));
+  }
+
   Future<void> _run(
     String label,
     Future<WorkerCommandResult> Function() command,
@@ -700,13 +759,26 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     });
     final result = await command();
     if (!mounted) return;
+    final runtimeStatus = _runtimeStatusFromResult(result);
     setState(() {
       _busy = false;
-      _status = result.ok ? '$label complete' : '$label failed';
+      if (runtimeStatus != null) {
+        _runtimeStatus = runtimeStatus;
+      }
+      _status = result.ok
+          ? runtimeStatus?.label ?? '$label complete'
+          : '$label failed';
       _output = result.output.isEmpty
           ? 'Exit code ${result.exitCode}'
           : result.output;
     });
+  }
+
+  WorkerRuntimeStatus? _runtimeStatusFromResult(WorkerCommandResult result) {
+    final json = result.json;
+    if (json is! Map<String, dynamic>) return null;
+    if (!json.containsKey('running')) return null;
+    return WorkerRuntimeStatus.fromJson(json);
   }
 
   @override
@@ -746,9 +818,10 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
                         final controls = _ControlPanel(
                           busy: _busy,
                           output: _output,
+                          runtimeStatus: _runtimeStatus,
                           onConnect: _connect,
                           onSave: _saveConfig,
-                          onStatus: () => _serviceAction('status'),
+                          onStatus: _refreshStatus,
                           onStart: () => _serviceAction('start'),
                           onStop: () => _serviceAction('stop'),
                           onDisconnect: () => _serviceAction('disconnect'),
@@ -924,6 +997,7 @@ class _ConnectionPanel extends StatelessWidget {
                     controller: vramGb,
                     label: 'VRAM GB',
                     icon: Icons.view_in_ar,
+                    allowZero: true,
                   ),
                 ],
               );
@@ -958,6 +1032,7 @@ class _ControlPanel extends StatelessWidget {
   const _ControlPanel({
     required this.busy,
     required this.output,
+    required this.runtimeStatus,
     required this.onConnect,
     required this.onSave,
     required this.onStatus,
@@ -968,6 +1043,7 @@ class _ControlPanel extends StatelessWidget {
 
   final bool busy;
   final String output;
+  final WorkerRuntimeStatus? runtimeStatus;
   final VoidCallback onConnect;
   final VoidCallback onSave;
   final VoidCallback onStatus;
@@ -983,6 +1059,8 @@ class _ControlPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          _RuntimeStatusCard(status: runtimeStatus),
+          const SizedBox(height: 14),
           FilledButton.icon(
             onPressed: busy ? null : onConnect,
             icon: const Icon(Icons.link),
@@ -1039,6 +1117,120 @@ class _ControlPanel extends StatelessWidget {
                 fontSize: 12,
                 height: 1.35,
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RuntimeStatusCard extends StatelessWidget {
+  const _RuntimeStatusCard({required this.status});
+
+  final WorkerRuntimeStatus? status;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final current = status;
+    final running = current?.running ?? false;
+    final color = running
+        ? const Color(0xFF1B7F4B)
+        : current?.lastError?.isNotEmpty == true
+        ? colors.error
+        : colors.outline;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                running ? Icons.check_circle : Icons.pause_circle,
+                color: color,
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  current?.label ?? 'Status unknown',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _StatusLine(
+            label: 'PID',
+            value: current?.pid == null ? '-' : '${current!.pid}',
+          ),
+          _StatusLine(
+            label: 'Started',
+            value: _formatStartedAt(current?.startedAt),
+          ),
+          _StatusLine(
+            label: 'Exit code',
+            value: current?.exitCode == null ? '-' : '${current!.exitCode}',
+          ),
+          if (current?.lastError?.isNotEmpty == true) ...[
+            const SizedBox(height: 8),
+            Text(
+              current!.lastError!,
+              style: TextStyle(color: colors.error, fontSize: 12),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _formatStartedAt(DateTime? value) {
+    if (value == null) return '-';
+    final local = value.toLocal();
+    return '${local.year.toString().padLeft(4, '0')}-'
+        '${local.month.toString().padLeft(2, '0')}-'
+        '${local.day.toString().padLeft(2, '0')} '
+        '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}:'
+        '${local.second.toString().padLeft(2, '0')}';
+  }
+}
+
+class _StatusLine extends StatelessWidget {
+  const _StatusLine({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 78,
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
             ),
           ),
         ],
@@ -1138,11 +1330,13 @@ class _NumberField extends StatelessWidget {
     required this.controller,
     required this.label,
     required this.icon,
+    this.allowZero = false,
   });
 
   final TextEditingController controller;
   final String label;
   final IconData icon;
+  final bool allowZero;
 
   @override
   Widget build(BuildContext context) {
@@ -1151,7 +1345,7 @@ class _NumberField extends StatelessWidget {
       decoration: InputDecoration(labelText: label, prefixIcon: Icon(icon)),
       keyboardType: TextInputType.number,
       inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-      validator: _positiveInt,
+      validator: allowZero ? _nonNegativeInt : _positiveInt,
     );
   }
 }
@@ -1195,6 +1389,17 @@ String? _requiredUrl(String? value) {
 }
 
 String? _positiveInt(String? value) {
+  if (value == null || value.isEmpty) {
+    return 'Required';
+  }
+  final parsed = int.tryParse(value);
+  if (parsed == null || parsed <= 0) {
+    return 'Use 1 or more';
+  }
+  return null;
+}
+
+String? _nonNegativeInt(String? value) {
   if (value == null || value.isEmpty) {
     return 'Required';
   }

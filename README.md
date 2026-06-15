@@ -97,6 +97,8 @@ Tagged releases publish early desktop bundles alongside CLI binaries:
 - `CMesh-Worker-windows-amd64.zip`
 - `CMesh-Worker-linux-amd64.tar.gz`
 
+For the first multi-machine alpha, use [docs/FIRST_REAL_TEST.md](docs/FIRST_REAL_TEST.md).
+
 ## Quick Start
 
 Start a local manager:
