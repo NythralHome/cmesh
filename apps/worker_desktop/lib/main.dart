@@ -923,7 +923,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   final _store = WorkerConfigStore();
   final _controller = WorkerController();
   final _protocolRegistrar = WorkerProtocolRegistrar();
-  final _formKey = GlobalKey<FormState>();
+  final _welcomeFormKey = GlobalKey<FormState>();
+  final _connectionFormKey = GlobalKey<FormState>();
   final _managerUrl = TextEditingController();
   final _joinToken = TextEditingController();
   final _cpu = TextEditingController();
@@ -1087,7 +1088,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   }
 
   Future<void> _saveConfig() async {
-    if (!_validateFormOrExplain('Save connection failed')) return;
+    if (!_validateConfigOrExplain('Save connection failed')) return;
     final config = _readConfig();
     final result = await _run('Saving connection', () async {
       await _store.save(config);
@@ -1103,19 +1104,19 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   }
 
   Future<void> _startWorker() async {
-    if (!_validateFormOrExplain('Start failed')) return;
+    if (!_validateConfigOrExplain('Start failed')) return;
     if (!_hasJoinToken) {
       _showMissingJoinToken('Start failed');
       return;
     }
-    if (!_connectionReady) {
-      _setLocalFailure(
-        'Start blocked',
-        'Connection is not saved into the local worker control API. Save connection first, then start the worker.',
-      );
-      return;
-    }
+    final config = _readConfig();
     final result = await _run('Starting worker', () async {
+      await _store.save(config);
+      final saveResult = await _controller.saveConfig(config);
+      if (!saveResult.ok) {
+        return saveResult;
+      }
+
       final startResult = await _controller.serviceAction('start');
       if (!startResult.ok) {
         return startResult;
@@ -1125,6 +1126,10 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       return statusResult.ok ? statusResult : startResult;
     });
     if (result.ok) {
+      setState(() {
+        _savedConfig = config;
+        _connectionSaved = true;
+      });
       _startStatusPolling();
     }
   }
@@ -1226,15 +1231,41 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
 
   bool get _showWelcome => !_connectionReady && !_isWorkerRunning;
 
-  bool _validateFormOrExplain(String status) {
-    final valid = _formKey.currentState!.validate();
-    if (!valid) {
+  bool _validateConfigOrExplain(String status) {
+    _welcomeFormKey.currentState?.validate();
+    _connectionFormKey.currentState?.validate();
+
+    final error = _configValidationError();
+    if (error != null) {
       _setLocalFailure(
         status,
-        'Connection details are incomplete or invalid. Fix the highlighted fields and try again.',
+        '$error Fix the highlighted fields and try again.',
       );
+      return false;
     }
-    return valid;
+    return true;
+  }
+
+  String? _configValidationError() {
+    if (_requiredUrl(_managerUrl.text) != null) {
+      return 'Manager URL is incomplete or invalid.';
+    }
+    if (_required(_joinToken.text) != null) {
+      return 'Join token is empty.';
+    }
+    if (_positiveInt(_cpu.text) != null) {
+      return 'CPU cores must be 1 or more.';
+    }
+    if (_positiveInt(_memoryGb.text) != null) {
+      return 'Memory must be 1 GB or more.';
+    }
+    if (_positiveInt(_diskGb.text) != null) {
+      return 'Storage must be 1 GB or more.';
+    }
+    if (_nonNegativeInt(_vramGb.text) != null) {
+      return 'VRAM must be 0 GB or more.';
+    }
+    return null;
   }
 
   void _showMissingJoinToken(String status) {
@@ -1300,7 +1331,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   @override
   Widget build(BuildContext context) {
     final connectionPanel = Form(
-      key: _formKey,
+      key: _connectionFormKey,
       child: _ConnectionPanel(
         managerUrl: _managerUrl,
         joinToken: _joinToken,
@@ -1320,7 +1351,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       ),
     );
     final welcomePanel = Form(
-      key: _formKey,
+      key: _welcomeFormKey,
       child: _WelcomeConnectionPanel(
         managerUrl: _managerUrl,
         joinToken: _joinToken,
