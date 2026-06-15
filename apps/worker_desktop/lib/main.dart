@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:io';
@@ -904,6 +905,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   String _output = 'No command has been run yet.';
   WorkerRuntimeStatus? _runtimeStatus;
   WorkerConfig? _savedConfig;
+  Timer? _statusPoller;
 
   @override
   void initState() {
@@ -924,6 +926,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
 
   @override
   void dispose() {
+    _statusPoller?.cancel();
     for (final controller in _configControllers) {
       controller.removeListener(_formStateChanged);
     }
@@ -1004,7 +1007,16 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     });
     if (result.ok) {
       await _refreshStatus();
+      _startStatusPolling();
     }
+  }
+
+  void _startStatusPolling() {
+    _statusPoller?.cancel();
+    _statusPoller = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (!mounted || _busy) return;
+      _refreshStatus(silent: true);
+    });
   }
 
   WorkerConfig _readConfig() {
@@ -1118,8 +1130,22 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     await _store.save(config.copyWith(joinToken: ''));
   }
 
-  Future<void> _refreshStatus() async {
-    await _run('Refreshing status', () => _controller.serviceAction('status'));
+  Future<void> _refreshStatus({bool silent = false}) async {
+    if (!silent) {
+      await _run(
+        'Refreshing status',
+        () => _controller.serviceAction('status'),
+      );
+      return;
+    }
+    final result = await _controller.serviceAction('status');
+    if (!mounted || !result.ok) return;
+    final runtimeStatus = _runtimeStatusFromResult(result);
+    if (runtimeStatus == null) return;
+    setState(() {
+      _runtimeStatus = runtimeStatus;
+    });
+    await MacStatusItemBridge.update(runtimeStatus);
   }
 
   bool get _hasJoinToken => _joinToken.text.trim().isNotEmpty;
