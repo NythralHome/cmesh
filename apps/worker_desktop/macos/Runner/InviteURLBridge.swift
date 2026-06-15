@@ -18,11 +18,6 @@ final class InviteURLBridge {
       }
       result(FlutterMethodNotImplemented)
     }
-
-    if let pendingURL = pendingURL {
-      channel?.invokeMethod("openInvite", arguments: pendingURL)
-      self.pendingURL = nil
-    }
   }
 
   static func handle(url: URL) {
