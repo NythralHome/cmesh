@@ -362,6 +362,37 @@ class WorkerCommandResult {
   bool get ok => exitCode == 0;
 }
 
+class WorkerControlTokenStore {
+  static String loadOrCreateSync() {
+    final configured = Platform.environment['CMESH_WORKER_CONTROL_TOKEN'];
+    if (configured != null && configured.trim().isNotEmpty) {
+      return configured.trim();
+    }
+
+    final file = _file();
+    try {
+      if (file.existsSync()) {
+        final token = file.readAsStringSync().trim();
+        if (token.isNotEmpty) return token;
+      }
+      file.parent.createSync(recursive: true);
+      final token = _generateControlToken();
+      file.writeAsStringSync(token);
+      return token;
+    } on Object {
+      return _generateControlToken();
+    }
+  }
+
+  static File _file() {
+    final home =
+        Platform.environment['HOME'] ??
+        Platform.environment['USERPROFILE'] ??
+        Directory.current.path;
+    return File('$home/.cmesh/worker-control-token');
+  }
+}
+
 class WorkerRuntimeStatus {
   const WorkerRuntimeStatus({
     required this.running,
@@ -404,9 +435,7 @@ class WorkerController {
     Platform.environment['CMESH_WORKER_CONTROL_URL'] ?? 'http://127.0.0.1:9781',
   );
 
-  final String _controlToken =
-      Platform.environment['CMESH_WORKER_CONTROL_TOKEN'] ??
-      _generateControlToken();
+  final String _controlToken = WorkerControlTokenStore.loadOrCreateSync();
   Process? _controlProcess;
 
   Future<WorkerCommandResult> ensureRunning() async {
@@ -503,7 +532,7 @@ class WorkerController {
       final resp = await req.close();
       final raw = await utf8.decodeStream(resp);
       final decoded = _decodeResponse(raw);
-      final output = _formatResponse(resp.statusCode, raw, decoded);
+      final output = _formatResponse(resp.statusCode, raw, decoded, path);
       final ok = resp.statusCode >= 200 && resp.statusCode < 300;
       return WorkerCommandResult(
         exitCode: ok ? 0 : resp.statusCode,
@@ -535,7 +564,17 @@ class WorkerController {
     }
   }
 
-  String _formatResponse(int statusCode, String raw, Object? decoded) {
+  String _formatResponse(
+    int statusCode,
+    String raw,
+    Object? decoded,
+    String path,
+  ) {
+    if (statusCode == HttpStatus.unauthorized && path.startsWith('/v1/')) {
+      return 'Local worker control API rejected this app token.\n\n'
+          'This usually means an older CMesh Worker control process is still running on 127.0.0.1:9781. '
+          'Stop the old process once, then reopen the Worker App.';
+    }
     if (raw.trim().isEmpty) {
       return 'HTTP $statusCode';
     }
