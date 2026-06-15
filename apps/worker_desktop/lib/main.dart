@@ -652,6 +652,7 @@ class WorkerController {
 
   final String _controlToken = WorkerControlTokenStore.loadOrCreateSync();
   Process? _controlProcess;
+  static const Duration _requestTimeout = Duration(seconds: 10);
 
   Future<WorkerCommandResult> ensureRunning() async {
     final health = await _request('GET', '/health', tryStart: false);
@@ -761,8 +762,8 @@ class WorkerController {
       if (body != null) {
         req.write(jsonEncode(body));
       }
-      final resp = await req.close();
-      final raw = await utf8.decodeStream(resp);
+      final resp = await req.close().timeout(_requestTimeout);
+      final raw = await utf8.decodeStream(resp).timeout(_requestTimeout);
       final decoded = _decodeResponse(raw);
       final output = _formatResponse(resp.statusCode, raw, decoded, path);
       final ok = resp.statusCode >= 200 && resp.statusCode < 300;
@@ -770,6 +771,12 @@ class WorkerController {
         exitCode: ok ? 0 : resp.statusCode,
         output: output,
         json: decoded,
+      );
+    } on TimeoutException catch (error) {
+      return WorkerCommandResult(
+        exitCode: 1,
+        output:
+            'Worker control API request timed out at $_baseURL$path.\n\n$error',
       );
     } on Object catch (error) {
       if (tryStart) {
@@ -1085,29 +1092,62 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       return;
     }
     final config = _readConfig();
-    var configSaved = false;
-    final result = await _run(
-      _hasUnsavedConfig ? 'Saving and starting' : 'Starting',
-      () async {
-        await _store.save(config);
-        final saveResult = await _controller.saveConfig(config);
-        if (!saveResult.ok) return saveResult;
-        configSaved = true;
+    _statusPoller?.cancel();
+    setState(() {
+      _busy = true;
+      _status = 'Preparing worker start...';
+      _output = '1/4 Checking local worker control API';
+    });
 
-        final startResult = await _controller.serviceAction('start');
-        if (!startResult.ok) return startResult;
+    try {
+      final control = await _controller.ensureRunning();
+      if (!mounted) return;
+      if (!control.ok) {
+        _finishCommand('Worker start failed', control);
+        return;
+      }
 
-        final statusResult = await _controller.serviceAction('status');
-        return statusResult.ok ? statusResult : startResult;
-      },
-    );
-    if (!mounted) return;
-    if (configSaved) {
+      setState(() {
+        _status = 'Saving worker settings...';
+        _output = '2/4 Saving worker settings into local control API';
+      });
+      await _store.save(config);
+      final saveResult = await _controller.saveConfig(config);
+      if (!mounted) return;
+      if (!saveResult.ok) {
+        _finishCommand('Worker start failed', saveResult);
+        return;
+      }
       setState(() {
         _savedConfig = config;
+        _status = 'Starting worker process...';
+        _output = '3/4 Starting worker process';
       });
+
+      final startResult = await _controller.serviceAction('start');
+      if (!mounted) return;
+      if (!startResult.ok) {
+        _finishCommand('Worker start failed', startResult);
+        return;
+      }
+
+      setState(() {
+        _status = 'Checking worker status...';
+        _output = '4/4 Checking worker runtime status';
+      });
+      final statusResult = await _controller.serviceAction('status');
+      if (!mounted) return;
+      _finishCommand(
+        'Worker start',
+        statusResult.ok ? statusResult : startResult,
+      );
+      if ((statusResult.ok ? statusResult : startResult).ok) {
+        _startStatusPolling();
+      }
+    } on Object catch (error) {
+      if (!mounted) return;
+      _setLocalFailure('Worker start failed', '$error');
     }
-    if (result.ok) _startStatusPolling();
   }
 
   Future<void> _openInvite() async {
@@ -1214,6 +1254,21 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     });
   }
 
+  void _finishCommand(String label, WorkerCommandResult result) {
+    final runtimeStatus = _runtimeStatusFromResult(result);
+    setState(() {
+      _busy = false;
+      if (runtimeStatus != null) {
+        _runtimeStatus = runtimeStatus;
+        MacStatusItemBridge.update(runtimeStatus);
+      }
+      _status = result.ok ? runtimeStatus?.label ?? '$label complete' : label;
+      _output = result.output.isEmpty
+          ? 'Exit code ${result.exitCode}'
+          : result.output;
+    });
+  }
+
   Future<WorkerCommandResult> _run(
     String label,
     Future<WorkerCommandResult> Function() command,
@@ -1223,23 +1278,17 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _status = '$label...';
       _output = '';
     });
-    final result = await command();
-    if (!mounted) return result;
-    final runtimeStatus = _runtimeStatusFromResult(result);
-    setState(() {
-      _busy = false;
-      if (runtimeStatus != null) {
-        _runtimeStatus = runtimeStatus;
-        MacStatusItemBridge.update(runtimeStatus);
-      }
-      _status = result.ok
-          ? runtimeStatus?.label ?? '$label complete'
-          : '$label failed';
-      _output = result.output.isEmpty
-          ? 'Exit code ${result.exitCode}'
-          : result.output;
-    });
-    return result;
+    try {
+      final result = await command();
+      if (!mounted) return result;
+      _finishCommand(result.ok ? label : '$label failed', result);
+      return result;
+    } on Object catch (error) {
+      final result = WorkerCommandResult(exitCode: 1, output: '$error');
+      if (!mounted) return result;
+      _finishCommand('$label failed', result);
+      return result;
+    }
   }
 
   WorkerRuntimeStatus? _runtimeStatusFromResult(WorkerCommandResult result) {
