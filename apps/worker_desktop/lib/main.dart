@@ -257,6 +257,9 @@ class WorkerProtocolRegistrar {
     if (Platform.isWindows) {
       return _registerWindows();
     }
+    if (Platform.isMacOS) {
+      return _registerMacOS();
+    }
     if (Platform.isLinux) {
       return _registerLinux();
     }
@@ -318,6 +321,53 @@ class WorkerProtocolRegistrar {
       exitCode: 0,
       output: 'Registered cmesh:// protocol for this Windows user.',
     );
+  }
+
+  Future<WorkerCommandResult> _registerMacOS() async {
+    final appBundle = _macOSAppBundle();
+    if (appBundle == null) {
+      return const WorkerCommandResult(
+        exitCode: 1,
+        output:
+            'Cannot register cmesh:// protocol because the app bundle was not found.',
+      );
+    }
+
+    final lsregister = File(
+      '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister',
+    );
+    if (!await lsregister.exists()) {
+      return const WorkerCommandResult(
+        exitCode: 0,
+        output:
+            'LaunchServices registration tool was not found; relying on macOS bundle registration.',
+      );
+    }
+
+    final result = await Process.run(lsregister.path, ['-f', appBundle.path]);
+    if (result.exitCode != 0) {
+      return WorkerCommandResult(
+        exitCode: result.exitCode,
+        output:
+            'Failed to register cmesh:// protocol with LaunchServices.\n\n${result.stderr}${result.stdout}',
+      );
+    }
+    return WorkerCommandResult(
+      exitCode: 0,
+      output: 'Registered cmesh:// protocol using ${appBundle.path}.',
+    );
+  }
+
+  Directory? _macOSAppBundle() {
+    if (!Platform.isMacOS) return null;
+    var dir = File(Platform.resolvedExecutable).parent;
+    while (dir.path != dir.parent.path) {
+      if (dir.path.endsWith('.app') && Directory(dir.path).existsSync()) {
+        return dir;
+      }
+      dir = dir.parent;
+    }
+    return null;
   }
 
   Future<WorkerCommandResult> _registerLinux() async {
@@ -688,6 +738,7 @@ class WorkerController {
     final candidates = <File>[
       File('${executableDir.path}/$executableName'),
       File('${executableDir.parent.path}/Resources/$executableName'),
+      ..._macOSBundleControlBinaryCandidates(executableName),
       File('${Directory.current.path}/../../bin/$executableName'),
       File('${Directory.current.path}/bin/$executableName'),
       File('${Directory.current.parent.parent.path}/bin/$executableName'),
@@ -700,6 +751,28 @@ class WorkerController {
 
     final lookup = await _lookupOnPath(executableName);
     return lookup;
+  }
+
+  List<File> _macOSBundleControlBinaryCandidates(String executableName) {
+    if (!Platform.isMacOS) return const [];
+    final executable = File(Platform.resolvedExecutable);
+    final dirs = <Directory>[];
+    var dir = executable.parent;
+    while (dir.path != dir.parent.path) {
+      if (dir.path.endsWith('.app')) {
+        dirs.add(dir);
+        final productsDir = dir.parent;
+        dirs.add(Directory('${productsDir.path}/CMesh Worker.app'));
+        dirs.add(Directory('${productsDir.path}/cmesh_worker_desktop.app'));
+        break;
+      }
+      dir = dir.parent;
+    }
+    return dirs
+        .map(
+          (bundle) => File('${bundle.path}/Contents/Resources/$executableName'),
+        )
+        .toList();
   }
 
   Future<String?> _lookupOnPath(String executableName) async {
@@ -757,6 +830,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   bool _benchmark = true;
   bool _installService = true;
   bool _busy = false;
+  bool _configLoaded = false;
+  InviteConfig? _pendingInvite;
   String _status = 'Idle';
   String _output = 'No command has been run yet.';
   WorkerRuntimeStatus? _runtimeStatus;
@@ -791,7 +866,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     final platformInvite = await PlatformInviteBridge.initialInvite();
     if (!mounted) return;
     setState(() {
-      final invite = platformInvite ?? widget.initialInvite;
+      final invite = _pendingInvite ?? platformInvite ?? widget.initialInvite;
       _managerUrl.text = invite?.managerUrl ?? config.managerUrl;
       _joinToken.text = invite?.joinToken ?? config.joinToken;
       _cpu.text = '${config.cpu}';
@@ -801,6 +876,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _gpuEnabled = config.gpuEnabled;
       _benchmark = config.benchmark;
       _installService = config.installService;
+      _configLoaded = true;
+      _pendingInvite = invite;
     });
   }
 
@@ -814,6 +891,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
 
   void _applyInvite(InviteConfig invite) {
     if (!mounted) return;
+    _pendingInvite = invite;
+    if (!_configLoaded) return;
     setState(() {
       if (invite.managerUrl != null && invite.managerUrl!.isNotEmpty) {
         _managerUrl.text = invite.managerUrl!;
