@@ -72,13 +72,16 @@ class WorkerConfig {
 
   factory WorkerConfig.fromJson(Map<String, dynamic> json) {
     return WorkerConfig(
-      managerUrl: json['managerUrl'] as String? ?? '',
-      joinToken: json['joinToken'] as String? ?? '',
+      managerUrl:
+          json['managerUrl'] as String? ?? json['manager_url'] as String? ?? '',
+      joinToken:
+          json['joinToken'] as String? ?? json['join_token'] as String? ?? '',
       cpu: json['cpu'] as int? ?? Platform.numberOfProcessors,
-      memoryGb: json['memoryGb'] as int? ?? 8,
-      diskGb: json['diskGb'] as int? ?? 50,
-      gpuEnabled: json['gpuEnabled'] as bool? ?? true,
-      vramGb: json['vramGb'] as int? ?? 0,
+      memoryGb: json['memoryGb'] as int? ?? json['memory_gb'] as int? ?? 8,
+      diskGb: json['diskGb'] as int? ?? json['disk_gb'] as int? ?? 50,
+      gpuEnabled:
+          json['gpuEnabled'] as bool? ?? json['gpu_enabled'] as bool? ?? true,
+      vramGb: json['vramGb'] as int? ?? json['vram_gb'] as int? ?? 0,
       benchmark: json['benchmark'] as bool? ?? true,
       installService: json['installService'] as bool? ?? true,
     );
@@ -95,6 +98,20 @@ class WorkerConfig {
       'vramGb': vramGb,
       'benchmark': benchmark,
       'installService': installService,
+    };
+  }
+
+  Map<String, dynamic> toControlJson() {
+    return {
+      'manager_url': managerUrl,
+      'join_token': joinToken,
+      'node_name': Platform.localHostname,
+      'cpu': cpu,
+      'memory_gb': memoryGb,
+      'disk_gb': diskGb,
+      'gpu_enabled': gpuEnabled,
+      'vram_gb': vramGb,
+      'benchmark': benchmark,
     };
   }
 }
@@ -139,98 +156,73 @@ class WorkerCommandResult {
 }
 
 class WorkerController {
-  static const installerUrl =
-      'https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh';
-  static const windowsInstallerUrl =
-      'https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.ps1';
+  static final Uri _baseURL = Uri.parse(
+    Platform.environment['CMESH_WORKER_CONTROL_URL'] ?? 'http://127.0.0.1:9781',
+  );
 
-  Future<WorkerCommandResult> install(WorkerConfig config) {
-    if (Platform.isWindows) {
-      return _runWindowsInstall(config);
+  Future<WorkerCommandResult> install(WorkerConfig config) async {
+    final save = await saveConfig(config);
+    if (!save.ok) {
+      return save;
     }
-    return _runUnixInstall(config);
+    return _request('POST', '/v1/start');
+  }
+
+  Future<WorkerCommandResult> saveConfig(WorkerConfig config) {
+    return _request('PUT', '/v1/config', body: config.toControlJson());
   }
 
   Future<WorkerCommandResult> serviceAction(String action) {
-    if (Platform.isWindows) {
-      return _runWindowsAction(action);
+    if (action == 'status') {
+      return _request('GET', '/v1/status');
     }
-    return _runUnixAction(action);
+    if (action == 'disconnect') {
+      return _request('POST', '/v1/stop');
+    }
+    return _request('POST', '/v1/$action');
   }
 
-  Future<WorkerCommandResult> _runUnixInstall(WorkerConfig config) {
-    final env = _environment(config);
-    final script = 'curl -fsSL $installerUrl | sh';
-    return _run('/bin/sh', ['-lc', script], env);
-  }
-
-  Future<WorkerCommandResult> _runUnixAction(String action) {
-    final script = 'curl -fsSL $installerUrl | sh -s -- $action';
-    return _run('/bin/sh', ['-lc', script], const {});
-  }
-
-  Future<WorkerCommandResult> _runWindowsInstall(WorkerConfig config) {
-    final env = _environment(config);
-    final script = 'iwr $windowsInstallerUrl -UseB | iex';
-    return _run('powershell.exe', [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      script,
-    ], env);
-  }
-
-  Future<WorkerCommandResult> _runWindowsAction(String action) {
-    final script =
-        r'$script = (iwr '
-        '$windowsInstallerUrl'
-        r' -UseB).Content; '
-        'iex "& { \$script } -Action $action"';
-    return _run('powershell.exe', [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      script,
-    ], const {});
-  }
-
-  Future<WorkerCommandResult> _run(
-    String executable,
-    List<String> arguments,
-    Map<String, String> extraEnv,
-  ) async {
+  Future<WorkerCommandResult> _request(
+    String method,
+    String path, {
+    Map<String, dynamic>? body,
+  }) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
     try {
-      final result = await Process.run(
-        executable,
-        arguments,
-        environment: {...Platform.environment, ...extraEnv},
+      final req = await client.openUrl(method, _baseURL.resolve(path));
+      req.headers.contentType = ContentType.json;
+      if (body != null) {
+        req.write(jsonEncode(body));
+      }
+      final resp = await req.close();
+      final raw = await utf8.decodeStream(resp);
+      final output = _formatResponse(resp.statusCode, raw);
+      final ok = resp.statusCode >= 200 && resp.statusCode < 300;
+      return WorkerCommandResult(
+        exitCode: ok ? 0 : resp.statusCode,
+        output: output,
       );
-      final output = [
-        if ((result.stdout as String).trim().isNotEmpty)
-          result.stdout as String,
-        if ((result.stderr as String).trim().isNotEmpty)
-          result.stderr as String,
-      ].join('\n').trim();
-      return WorkerCommandResult(exitCode: result.exitCode, output: output);
     } on Object catch (error) {
-      return WorkerCommandResult(exitCode: 1, output: error.toString());
+      return WorkerCommandResult(
+        exitCode: 1,
+        output:
+            'Worker control API is not reachable at $_baseURL.\n\nStart it with:\n  cmesh worker control\n\n$error',
+      );
+    } finally {
+      client.close(force: true);
     }
   }
 
-  Map<String, String> _environment(WorkerConfig config) {
-    return {
-      'CMESH_MANAGER_URL': config.managerUrl,
-      'CMESH_JOIN_TOKEN': config.joinToken,
-      'CMESH_CPU': '${config.cpu}',
-      'CMESH_MEMORY_GB': '${config.memoryGb}',
-      'CMESH_DISK_GB': '${config.diskGb}',
-      'CMESH_GPU': '${config.gpuEnabled}',
-      'CMESH_VRAM_GB': '${config.vramGb}',
-      'CMESH_BENCHMARK': '${config.benchmark}',
-      'CMESH_INSTALL_SERVICE': '${config.installService}',
-    };
+  String _formatResponse(int statusCode, String raw) {
+    if (raw.trim().isEmpty) {
+      return 'HTTP $statusCode';
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      return const JsonEncoder.withIndent('  ').convert(decoded);
+    } on Object {
+      return raw.trim();
+    }
   }
 }
 
@@ -308,8 +300,11 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
 
   Future<void> _saveConfig() async {
     if (!_formKey.currentState!.validate()) return;
-    await _store.save(_readConfig());
-    _setOutput('Saved', 'Config saved to ~/.cmesh/worker-desktop.json');
+    await _run('Saving', () async {
+      final config = _readConfig();
+      await _store.save(config);
+      return _controller.saveConfig(config);
+    });
   }
 
   Future<void> _connect() async {
@@ -342,13 +337,6 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _output = result.output.isEmpty
           ? 'Exit code ${result.exitCode}'
           : result.output;
-    });
-  }
-
-  void _setOutput(String status, String output) {
-    setState(() {
-      _status = status;
-      _output = output;
     });
   }
 
@@ -394,7 +382,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
                           onStatus: () => _serviceAction('status'),
                           onStart: () => _serviceAction('start'),
                           onStop: () => _serviceAction('stop'),
-                          onUninstall: () => _serviceAction('uninstall'),
+                          onDisconnect: () => _serviceAction('disconnect'),
                         );
                         if (!wide) {
                           return Column(
@@ -606,7 +594,7 @@ class _ControlPanel extends StatelessWidget {
     required this.onStatus,
     required this.onStart,
     required this.onStop,
-    required this.onUninstall,
+    required this.onDisconnect,
   });
 
   final bool busy;
@@ -616,7 +604,7 @@ class _ControlPanel extends StatelessWidget {
   final VoidCallback onStatus;
   final VoidCallback onStart;
   final VoidCallback onStop;
-  final VoidCallback onUninstall;
+  final VoidCallback onDisconnect;
 
   @override
   Widget build(BuildContext context) {
@@ -658,9 +646,9 @@ class _ControlPanel extends StatelessWidget {
                 onPressed: busy ? null : onStop,
               ),
               _ActionButton(
-                icon: Icons.delete_outline,
-                label: 'Uninstall',
-                onPressed: busy ? null : onUninstall,
+                icon: Icons.link_off,
+                label: 'Disconnect',
+                onPressed: busy ? null : onDisconnect,
               ),
             ],
           ),

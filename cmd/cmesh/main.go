@@ -21,6 +21,7 @@ import (
 	"github.com/cmesh/cmesh/internal/membership"
 	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/cmesh/cmesh/internal/version"
+	"github.com/cmesh/cmesh/internal/workercontrol"
 )
 
 func main() {
@@ -163,6 +164,20 @@ func runWorker(args []string) error {
 			return err
 		}
 		return workerBenchmark(strings.TrimRight(*managerURL, "/"), *nodeID, *cacheDir)
+	case "control":
+		fs := flag.NewFlagSet("worker control", flag.ContinueOnError)
+		addr := fs.String("addr", "127.0.0.1:9781", "local worker control API listen address")
+		configPath := fs.String("config", os.Getenv("CMESH_WORKER_CONTROL_CONFIG"), "local worker control config path")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		server, err := workercontrol.NewServer(*addr, *configPath)
+		if err != nil {
+			return err
+		}
+		return server.Start(ctx)
 	case "help", "--help", "-h":
 		printWorkerUsage()
 	default:
@@ -180,6 +195,7 @@ Usage:
   cmesh worker join         Join a cluster as a worker
   cmesh worker run          Join and keep a worker heartbeat running
   cmesh worker benchmark    Run worker benchmarks
+  cmesh worker control      Start local worker control API
   cmesh job submit          Submit a job
   cmesh job list            List jobs
   cmesh dev local-cluster   Register multiple local test workers
@@ -198,7 +214,8 @@ func printWorkerUsage() {
 	fmt.Println(`Usage:
   cmesh worker join         Join a cluster as a worker
   cmesh worker run          Join and keep sending heartbeats
-  cmesh worker benchmark    Run CPU, memory, disk, network, and AI benchmarks`)
+  cmesh worker benchmark    Run CPU, memory, disk, network, and AI benchmarks
+  cmesh worker control      Start local worker control API for desktop apps`)
 }
 
 type workerOptions struct {

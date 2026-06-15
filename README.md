@@ -79,7 +79,13 @@ make worker-desktop-test
 make worker-desktop-build
 ```
 
-The app is currently a thin shell over the existing worker installer and service scripts. The next step is moving lifecycle control behind a local CMesh worker API so the GUI talks to `127.0.0.1` instead of executing scripts directly.
+The app talks to the local CMesh worker control API:
+
+```sh
+cmesh worker control
+```
+
+The next step is bundling the Go `cmesh` binary with the desktop app and starting the control API automatically.
 
 ## Quick Start
 
