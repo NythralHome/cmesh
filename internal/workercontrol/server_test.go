@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -142,6 +145,46 @@ func TestWorkerArgs(t *testing.T) {
 		if !bytes.Contains([]byte(got), []byte(want)) {
 			t.Fatalf("expected args to contain %q, got %q", want, got)
 		}
+	}
+}
+
+func TestStopWorkerStopsProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based process signal test is unix-only")
+	}
+
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "fake-worker")
+	script := []byte("#!/bin/sh\ntrap 'exit 0' INT TERM\nwhile :; do sleep 1; done\n")
+	if err := os.WriteFile(binary, script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	server, err := NewServerWithToken("127.0.0.1:0", filepath.Join(dir, "worker-control.json"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.config = Config{
+		ManagerURL:   "https://cmesh.example.com",
+		JoinToken:    "join-token",
+		NodeName:     "test-worker",
+		CPU:          1,
+		MemoryGB:     1,
+		DiskGB:       1,
+		WorkerBinary: binary,
+	}
+
+	if err := server.startWorker(); err != nil {
+		t.Fatal(err)
+	}
+	if status := server.status(); !status.Running || status.PID == 0 {
+		t.Fatalf("expected worker to be running, got %+v", status)
+	}
+	if err := server.stopWorker(); err != nil {
+		t.Fatal(err)
+	}
+	if status := server.status(); status.Running {
+		t.Fatalf("expected worker to stop, got %+v", status)
 	}
 }
 

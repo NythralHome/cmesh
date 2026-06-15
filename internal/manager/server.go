@@ -147,7 +147,7 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 		JoinToken:         s.joinToken,
 		DesktopInviteURL:  desktopInviteURL(managerURL, s.joinToken),
 		DesktopInviteHref: template.URL(desktopInviteURL(managerURL, s.joinToken)),
-		DownloadURL:       "https://github.com/NythralHome/cmesh/releases",
+		DownloadURL:       "https://github.com/NythralHome/cmesh/releases/latest",
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -981,6 +981,11 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
       border-color: var(--accent);
       color: #ffffff;
     }
+    .hint {
+      margin: 10px 16px 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
     @media (max-width: 640px) {
       header, main { padding-left: 18px; padding-right: 18px; }
     }
@@ -1005,8 +1010,10 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
       <pre><code id="desktop-invite">{{.DesktopInviteURL}}</code></pre>
       <div class="actions">
         <a class="button primary" href="{{.DesktopInviteHref}}">Open Worker App</a>
-        <a class="button" href="{{.DownloadURL}}">Download Worker App</a>
+        <a class="button" id="worker-download" href="{{.DownloadURL}}">Download Worker App</a>
+        <a class="button" href="https://github.com/NythralHome/cmesh/releases/latest">Other platforms</a>
       </div>
+      <p class="hint" id="worker-download-hint">Direct downloads use the latest CMesh release.</p>
     </section>
 
     <section>
@@ -1072,6 +1079,72 @@ iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-wor
         });
       });
     });
+
+    (function() {
+      var releaseBase = "https://github.com/NythralHome/cmesh/releases/latest/download/";
+      var options = {
+        macApple: {
+          label: "Download for macOS Apple Silicon",
+          asset: "CMesh-Worker-macos-arm64.zip",
+          hint: "Best for M1, M2, M3, and newer Apple Silicon Macs."
+        },
+        macIntel: {
+          label: "Download for macOS Intel",
+          asset: "CMesh-Worker-macos-amd64.zip",
+          hint: "Best for older Intel-based Macs."
+        },
+        windows: {
+          label: "Download for Windows",
+          asset: "CMesh-Worker-windows-amd64.zip",
+          hint: "Best for 64-bit Windows PCs."
+        },
+        linux: {
+          label: "Download for Linux",
+          asset: "CMesh-Worker-linux-amd64.tar.gz",
+          hint: "Best for 64-bit Linux desktops."
+        }
+      };
+
+      function chooseDownload() {
+        var ua = navigator.userAgent || "";
+        var platform = navigator.platform || "";
+        var text = (ua + " " + platform).toLowerCase();
+        if (text.indexOf("win") >= 0) return options.windows;
+        if (text.indexOf("linux") >= 0) return options.linux;
+        if (text.indexOf("mac") >= 0) return options.macApple;
+        return null;
+      }
+
+      function applyChoice(choice) {
+        var link = document.getElementById("worker-download");
+        var hint = document.getElementById("worker-download-hint");
+        if (!link || !choice) return;
+        link.href = releaseBase + choice.asset;
+        link.innerText = choice.label;
+        if (hint) hint.innerText = choice.hint;
+      }
+
+      var choice = chooseDownload();
+      if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+        navigator.userAgentData.getHighEntropyValues(["architecture", "platform"]).then(function(values) {
+          var platform = String(values.platform || "").toLowerCase();
+          var arch = String(values.architecture || "").toLowerCase();
+          if (platform.indexOf("mac") >= 0 && (arch.indexOf("x86") >= 0 || arch.indexOf("amd64") >= 0)) {
+            applyChoice(options.macIntel);
+            return;
+          }
+          if (platform.indexOf("mac") >= 0 && (arch.indexOf("arm") >= 0 || arch.indexOf("aarch64") >= 0)) {
+            applyChoice(options.macApple);
+            return;
+          }
+          applyChoice(choice);
+        }).catch(function() {
+          applyChoice(choice);
+        });
+        return;
+      }
+      applyChoice(choice);
+    })();
   </script>
 </body>
 </html>`))

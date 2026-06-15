@@ -232,6 +232,7 @@ func (s *Server) startWorker() error {
 	}
 	args := workerArgs(cfg)
 	cmd := exec.Command(binary, args...)
+	configureWorkerCommand(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -262,8 +263,8 @@ func (s *Server) stopWorker() error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
-		_ = cmd.Process.Kill()
+	if err := interruptWorkerProcess(cmd); err != nil {
+		_ = killWorkerProcess(cmd)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -274,7 +275,7 @@ func (s *Server) stopWorker() error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			_ = cmd.Process.Kill()
+			_ = killWorkerProcess(cmd)
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
