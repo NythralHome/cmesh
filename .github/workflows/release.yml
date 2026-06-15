@@ -5,6 +5,9 @@ on:
     tags:
       - "v*"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   cli:
     name: Build CLI Release
@@ -36,11 +39,19 @@ jobs:
             dist/*
 
   worker-desktop-macos:
-    name: Build Worker Desktop macOS
-    runs-on: macos-latest
+    name: Build Worker Desktop macOS (${{ matrix.goarch }})
+    runs-on: ${{ matrix.runner }}
     needs: cli
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            goarch: amd64
+          - runner: macos-latest
+            goarch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,19 +71,21 @@ jobs:
       - name: Build
         run: |
           set -eu
-          arch="$(uname -m)"
-          if [ "$arch" = "arm64" ]; then
-            goarch="arm64"
-          else
-            goarch="amd64"
+          expected_arch="x86_64"
+          if [ "${{ matrix.goarch }}" = "arm64" ]; then
+            expected_arch="arm64"
+          fi
+          if [ "$(uname -m)" != "$expected_arch" ]; then
+            echo "runner arch $(uname -m) does not match expected $expected_arch"
+            exit 1
           fi
           mkdir -p dist
-          GOOS=darwin GOARCH="$goarch" go build -ldflags "-X github.com/cmesh/cmesh/internal/version.Version=${GITHUB_REF_NAME} -X github.com/cmesh/cmesh/internal/version.Commit=${GITHUB_SHA::7} -X github.com/cmesh/cmesh/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/cmesh ./cmd/cmesh
+          GOOS=darwin GOARCH="${{ matrix.goarch }}" go build -ldflags "-X github.com/cmesh/cmesh/internal/version.Version=${GITHUB_REF_NAME} -X github.com/cmesh/cmesh/internal/version.Commit=${GITHUB_SHA::7} -X github.com/cmesh/cmesh/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/cmesh ./cmd/cmesh
           cd apps/worker_desktop
           flutter pub get
           flutter build macos
           cp ../../bin/cmesh build/macos/Build/Products/Release/cmesh_worker_desktop.app/Contents/Resources/cmesh
-          ditto -c -k --keepParent build/macos/Build/Products/Release/cmesh_worker_desktop.app ../../dist/CMesh-Worker-macos-${goarch}.zip
+          ditto -c -k --keepParent build/macos/Build/Products/Release/cmesh_worker_desktop.app ../../dist/CMesh-Worker-macos-${{ matrix.goarch }}.zip
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
