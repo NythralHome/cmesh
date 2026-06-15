@@ -79,13 +79,13 @@ make worker-desktop-test
 make worker-desktop-build
 ```
 
-The app talks to the local CMesh worker control API:
+The app starts the local CMesh worker control API automatically when it can find a `cmesh` binary. In development, use:
 
 ```sh
-cmesh worker control
+make worker-desktop-run
 ```
 
-The next step is bundling the Go `cmesh` binary with the desktop app and starting the control API automatically.
+`make worker-desktop-build` bundles the local Go `cmesh` binary into the desktop build for the current OS. The next step is adding signed installers and a privileged helper for OS service installation/removal.
 
 ## Quick Start
 

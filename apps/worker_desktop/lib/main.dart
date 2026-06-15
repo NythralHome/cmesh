@@ -160,6 +160,56 @@ class WorkerController {
     Platform.environment['CMESH_WORKER_CONTROL_URL'] ?? 'http://127.0.0.1:9781',
   );
 
+  Process? _controlProcess;
+
+  Future<WorkerCommandResult> ensureRunning() async {
+    final health = await _request('GET', '/health', tryStart: false);
+    if (health.ok) {
+      return health;
+    }
+    final binary = await _findControlBinary();
+    if (binary == null) {
+      return WorkerCommandResult(
+        exitCode: 1,
+        output:
+            'Worker control API is not running at $_baseURL.\n\nCould not find the cmesh binary. Set CMESH_WORKER_CONTROL_BIN or build it with:\n  make build',
+      );
+    }
+    try {
+      _controlProcess = await Process.start(binary, [
+        'worker',
+        'control',
+      ], mode: ProcessStartMode.detachedWithStdio);
+      _controlProcess!.stdout
+          .transform(utf8.decoder)
+          .listen((_) {}, onError: (_) {});
+      _controlProcess!.stderr
+          .transform(utf8.decoder)
+          .listen((_) {}, onError: (_) {});
+    } on Object catch (error) {
+      return WorkerCommandResult(
+        exitCode: 1,
+        output: 'Failed to start worker control API with $binary.\n\n$error',
+      );
+    }
+
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      final ready = await _request('GET', '/health', tryStart: false);
+      if (ready.ok) {
+        return WorkerCommandResult(
+          exitCode: 0,
+          output: 'Worker control API started at $_baseURL using $binary',
+        );
+      }
+    }
+    return WorkerCommandResult(
+      exitCode: 1,
+      output: 'Started $binary, but worker control API did not become ready.',
+    );
+  }
+
   Future<WorkerCommandResult> install(WorkerConfig config) async {
     final save = await saveConfig(config);
     if (!save.ok) {
@@ -186,6 +236,7 @@ class WorkerController {
     String method,
     String path, {
     Map<String, dynamic>? body,
+    bool tryStart = true,
   }) async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
     try {
@@ -203,10 +254,15 @@ class WorkerController {
         output: output,
       );
     } on Object catch (error) {
+      if (tryStart) {
+        final start = await ensureRunning();
+        if (start.ok) {
+          return _request(method, path, body: body, tryStart: false);
+        }
+      }
       return WorkerCommandResult(
         exitCode: 1,
-        output:
-            'Worker control API is not reachable at $_baseURL.\n\nStart it with:\n  cmesh worker control\n\n$error',
+        output: 'Worker control API is not reachable at $_baseURL.\n\n$error',
       );
     } finally {
       client.close(force: true);
@@ -222,6 +278,51 @@ class WorkerController {
       return const JsonEncoder.withIndent('  ').convert(decoded);
     } on Object {
       return raw.trim();
+    }
+  }
+
+  Future<String?> _findControlBinary() async {
+    final configured =
+        Platform.environment['CMESH_WORKER_CONTROL_BIN'] ??
+        Platform.environment['CMESH_BIN'];
+    if (configured != null && configured.trim().isNotEmpty) {
+      final file = File(configured.trim());
+      if (await file.exists()) return file.path;
+    }
+
+    final executableName = Platform.isWindows ? 'cmesh.exe' : 'cmesh';
+    final executable = File(Platform.resolvedExecutable);
+    final executableDir = executable.parent;
+    final candidates = <File>[
+      File('${executableDir.path}/$executableName'),
+      File('${executableDir.parent.path}/Resources/$executableName'),
+      File('${Directory.current.path}/../../bin/$executableName'),
+      File('${Directory.current.path}/bin/$executableName'),
+      File('${Directory.current.parent.parent.path}/bin/$executableName'),
+    ];
+    for (final candidate in candidates) {
+      if (await candidate.exists()) {
+        return candidate.path;
+      }
+    }
+
+    final lookup = await _lookupOnPath(executableName);
+    return lookup;
+  }
+
+  Future<String?> _lookupOnPath(String executableName) async {
+    final command = Platform.isWindows ? 'where' : 'which';
+    try {
+      final result = await Process.run(command, [executableName]);
+      if (result.exitCode != 0) return null;
+      final first = (result.stdout as String)
+          .split(RegExp(r'\r?\n'))
+          .map((line) => line.trim())
+          .where((line) => line.isNotEmpty)
+          .firstOrNull;
+      return first;
+    } on Object {
+      return null;
     }
   }
 }
@@ -255,6 +356,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   void initState() {
     super.initState();
     _loadConfig();
+    _bootstrapControlApi();
   }
 
   @override
@@ -281,6 +383,15 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _gpuEnabled = config.gpuEnabled;
       _benchmark = config.benchmark;
       _installService = config.installService;
+    });
+  }
+
+  Future<void> _bootstrapControlApi() async {
+    final result = await _controller.ensureRunning();
+    if (!mounted) return;
+    setState(() {
+      _status = result.ok ? 'Control API ready' : 'Control API unavailable';
+      _output = result.output;
     });
   }
 

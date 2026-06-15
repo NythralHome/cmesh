@@ -37,14 +37,22 @@ dist: clean
 docker:
 	docker build -t cmesh:$(VERSION) .
 
-worker-desktop-run:
-	cd apps/worker_desktop && fvm flutter run
+worker-desktop-run: build
+	cd apps/worker_desktop && CMESH_WORKER_CONTROL_BIN="$(CURDIR)/bin/cmesh" fvm flutter run
 
 worker-desktop-test:
 	cd apps/worker_desktop && fvm flutter analyze && fvm flutter test
 
-worker-desktop-build:
-	cd apps/worker_desktop && if [ "$(shell uname -s)" = "Darwin" ]; then fvm flutter build macos; elif [ "$(shell uname -s)" = "Linux" ]; then fvm flutter build linux; else echo "Unsupported desktop build host: $(shell uname -s)" >&2; exit 1; fi
+worker-desktop-build: build
+	cd apps/worker_desktop && if [ "$(shell uname -s)" = "Darwin" ]; then \
+		fvm flutter build macos; \
+		cp "$(CURDIR)/bin/cmesh" build/macos/Build/Products/Release/cmesh_worker_desktop.app/Contents/Resources/cmesh; \
+	elif [ "$(shell uname -s)" = "Linux" ]; then \
+		fvm flutter build linux; \
+		cp "$(CURDIR)/bin/cmesh" build/linux/*/release/bundle/cmesh; \
+	else \
+		echo "Unsupported desktop build host: $(shell uname -s)" >&2; exit 1; \
+	fi
 
 clean:
 	rm -rf dist

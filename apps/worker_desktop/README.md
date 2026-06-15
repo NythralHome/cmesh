@@ -4,19 +4,20 @@ Flutter desktop shell for joining and controlling a local CMesh worker.
 
 The app is intentionally thin: CMesh core behavior stays in the Go CLI. This app talks to the local worker control API and displays status/output.
 
-Start the local control API before opening the app:
+The app starts the local control API automatically when it can find a `cmesh` binary. For development, use the repository Make target so the binary path is passed in:
 
 ```sh
-cmesh worker control
+make worker-desktop-run
 ```
 
 ## Run
 
-From the repository root:
+Manual run from the repository root:
 
 ```sh
+make build
 cd apps/worker_desktop
-fvm flutter run -d macos
+CMESH_WORKER_CONTROL_BIN=../../bin/cmesh fvm flutter run -d macos
 ```
 
 ## Current Scope
@@ -29,4 +30,4 @@ fvm flutter run -d macos
 
 ## Next Step
 
-Bundle the Go `cmesh` binary with the desktop app and start the local control API automatically. After that, add signed installers and a privileged helper for OS service installation/removal.
+Add signed installers and a privileged helper for OS service installation/removal.
