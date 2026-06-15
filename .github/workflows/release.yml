@@ -83,7 +83,7 @@ jobs:
           GOOS=darwin GOARCH="${{ matrix.goarch }}" go build -ldflags "-X github.com/cmesh/cmesh/internal/version.Version=${GITHUB_REF_NAME} -X github.com/cmesh/cmesh/internal/version.Commit=${GITHUB_SHA::7} -X github.com/cmesh/cmesh/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/cmesh ./cmd/cmesh
           cd apps/worker_desktop
           flutter pub get
-          flutter build macos
+          flutter build macos --dart-define=CMESH_WORKER_VERSION=${GITHUB_REF_NAME}
           app_bundle="build/macos/Build/Products/Release/CMesh Worker.app"
           cp ../../bin/cmesh "$app_bundle/Contents/Resources/cmesh"
           ditto -c -k --keepParent "$app_bundle" ../../dist/CMesh-Worker-macos-${{ matrix.goarch }}.zip
@@ -125,7 +125,7 @@ jobs:
           go build -ldflags "-X github.com/cmesh/cmesh/internal/version.Version=$env:GITHUB_REF_NAME -X github.com/cmesh/cmesh/internal/version.Commit=$($env:GITHUB_SHA.Substring(0, 7)) -X github.com/cmesh/cmesh/internal/version.Date=$date" -o bin/cmesh.exe ./cmd/cmesh
           Push-Location apps/worker_desktop
           flutter pub get
-          flutter build windows
+          flutter build windows --dart-define=CMESH_WORKER_VERSION=$env:GITHUB_REF_NAME
           Copy-Item ../../bin/cmesh.exe build/windows/x64/runner/Release/cmesh.exe
           Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath ../../dist/CMesh-Worker-windows-amd64.zip -Force
           Pop-Location
@@ -171,7 +171,7 @@ jobs:
           go build -ldflags "-X github.com/cmesh/cmesh/internal/version.Version=${GITHUB_REF_NAME} -X github.com/cmesh/cmesh/internal/version.Commit=${GITHUB_SHA::7} -X github.com/cmesh/cmesh/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/cmesh ./cmd/cmesh
           cd apps/worker_desktop
           flutter pub get
-          flutter build linux
+          flutter build linux --dart-define=CMESH_WORKER_VERSION=${GITHUB_REF_NAME}
           cp ../../bin/cmesh build/linux/x64/release/bundle/cmesh
           tar -C build/linux/x64/release/bundle -czf ../../dist/CMesh-Worker-linux-amd64.tar.gz .
 

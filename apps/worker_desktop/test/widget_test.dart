@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('renders worker connection controls', (tester) async {
+  testWidgets('renders first run save connection screen', (tester) async {
     await tester.pumpWidget(
       const CMeshWorkerApp(
         initialInvite: null,
@@ -14,16 +14,18 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('CMesh Worker'), findsOneWidget);
-    expect(find.text('Connection'), findsOneWidget);
-    expect(find.text('Worker status'), findsOneWidget);
-    expect(find.text('Status unknown'), findsOneWidget);
-    expect(find.text('Invite required'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Open invite'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Save settings'), findsNothing);
+    expect(find.text('Version dev'), findsWidgets);
+    expect(find.text('Save connection'), findsWidgets);
+    expect(find.text('Connection'), findsNothing);
+    expect(find.text('Worker status'), findsNothing);
+    expect(
+      find.widgetWithText(FilledButton, 'Save connection'),
+      findsOneWidget,
+    );
     expect(find.widgetWithText(FilledButton, 'Start worker'), findsNothing);
   });
 
-  testWidgets('requires saved settings before start is available', (
+  testWidgets('keeps start hidden while connection is not saved', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -35,16 +37,16 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Connection'));
-    await tester.pumpAndSettle();
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Join token'),
       'test-token',
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Settings not saved'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Save settings'), findsWidgets);
+    expect(
+      find.widgetWithText(FilledButton, 'Save connection'),
+      findsOneWidget,
+    );
     expect(find.widgetWithText(FilledButton, 'Start worker'), findsNothing);
   });
 

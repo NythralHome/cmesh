@@ -7,6 +7,11 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+const cmeshWorkerVersion = String.fromEnvironment(
+  'CMESH_WORKER_VERSION',
+  defaultValue: 'dev',
+);
+
 void main(List<String> args) {
   runApp(CMeshWorkerApp(initialInvite: InviteConfig.fromArgs(args)));
 }
@@ -931,9 +936,10 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   bool _installService = true;
   bool _busy = false;
   bool _configLoaded = false;
+  bool _connectionSaved = false;
   InviteConfig? _pendingInvite;
-  String _status = 'Idle';
-  String _output = 'No command has been run yet.';
+  String _status = 'Save connection';
+  String _output = 'Save the connection before starting the worker.';
   WorkerRuntimeStatus? _runtimeStatus;
   WorkerConfig? _savedConfig;
   Timer? _statusPoller;
@@ -1002,7 +1008,12 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _installService = config.installService;
       _configLoaded = true;
       _pendingInvite = invite;
-      _savedConfig = config;
+      _savedConfig = null;
+      _connectionSaved = false;
+      if (invite != null) {
+        _status = 'Invite loaded';
+        _output = 'Review the connection and save it before starting.';
+      }
     });
   }
 
@@ -1025,7 +1036,10 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       if (invite.joinToken != null && invite.joinToken!.isNotEmpty) {
         _joinToken.text = invite.joinToken!;
       }
+      _connectionSaved = false;
+      _savedConfig = null;
       _status = 'Invite loaded';
+      _output = 'Review the connection and save it before starting.';
     });
   }
 
@@ -1073,28 +1087,31 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   }
 
   Future<void> _saveConfig() async {
-    if (!_formKey.currentState!.validate()) return;
+    if (!_validateFormOrExplain('Save connection failed')) return;
     final config = _readConfig();
-    final result = await _run('Saving', () async {
+    final result = await _run('Saving connection', () async {
       await _store.save(config);
       return _controller.saveConfig(config);
     });
     if (!mounted || !result.ok) return;
     setState(() {
       _savedConfig = config;
+      _connectionSaved = true;
+      _status = 'Connection saved';
+      _output = 'Connection saved. You can start the worker now.';
     });
   }
 
   Future<void> _startWorker() async {
-    if (!_formKey.currentState!.validate()) return;
+    if (!_validateFormOrExplain('Start failed')) return;
     if (!_hasJoinToken) {
       _showMissingJoinToken('Start failed');
       return;
     }
-    if (_hasUnsavedConfig) {
+    if (!_connectionReady) {
       _setLocalFailure(
         'Start blocked',
-        'Settings are not saved. Save settings first, then start the worker.',
+        'Connection is not saved into the local worker control API. Save connection first, then start the worker.',
       );
       return;
     }
@@ -1167,6 +1184,10 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     if (!mounted || !result.ok) return;
     _joinToken.clear();
     await _store.save(config.copyWith(joinToken: ''));
+    setState(() {
+      _connectionSaved = false;
+      _savedConfig = null;
+    });
   }
 
   Future<void> _refreshStatus({bool silent = false}) async {
@@ -1191,6 +1212,9 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
 
   bool get _isWorkerRunning => _runtimeStatus?.running ?? false;
 
+  bool get _connectionReady =>
+      _connectionSaved && _hasJoinToken && !_hasUnsavedConfig;
+
   bool get _hasUnsavedConfig {
     final current = _readConfigOrNull();
     final saved = _savedConfig;
@@ -1198,8 +1222,20 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     return current.toJson().toString() != saved.toJson().toString();
   }
 
-  bool get _canAttemptStart =>
-      _hasJoinToken && !_hasUnsavedConfig && _readConfigOrNull() != null;
+  bool get _canAttemptStart => _connectionReady && _readConfigOrNull() != null;
+
+  bool get _showWelcome => !_connectionReady && !_isWorkerRunning;
+
+  bool _validateFormOrExplain(String status) {
+    final valid = _formKey.currentState!.validate();
+    if (!valid) {
+      _setLocalFailure(
+        status,
+        'Connection details are incomplete or invalid. Fix the highlighted fields and try again.',
+      );
+    }
+    return valid;
+  }
 
   void _showMissingJoinToken(String status) {
     _setLocalFailure(
@@ -1283,11 +1319,32 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
         onSave: _saveConfig,
       ),
     );
+    final welcomePanel = Form(
+      key: _formKey,
+      child: _WelcomeConnectionPanel(
+        managerUrl: _managerUrl,
+        joinToken: _joinToken,
+        cpu: _cpu,
+        memoryGb: _memoryGb,
+        diskGb: _diskGb,
+        vramGb: _vramGb,
+        gpuEnabled: _gpuEnabled,
+        benchmark: _benchmark,
+        installService: _installService,
+        busy: _busy,
+        output: _output,
+        onGpuChanged: (value) => setState(() => _gpuEnabled = value),
+        onBenchmarkChanged: (value) => setState(() => _benchmark = value),
+        onInstallServiceChanged: (value) =>
+            setState(() => _installService = value),
+        onSave: _saveConfig,
+      ),
+    );
     final actionBar = _WorkerActionBar(
       busy: _busy,
       running: _isWorkerRunning,
       hasJoinToken: _hasJoinToken,
-      hasUnsavedConfig: _hasUnsavedConfig,
+      connectionReady: _connectionReady,
       canStart: _canAttemptStart,
       onStatus: _refreshStatus,
       onSave: _saveConfig,
@@ -1311,70 +1368,82 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
           child: SafeArea(
             child: Column(
               children: [
-                _Header(status: _status, busy: _busy),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
-                  child: actionBar,
+                _Header(
+                  status: _status,
+                  busy: _busy,
+                  version: cmeshWorkerVersion,
                 ),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(24, 10, 24, 0),
-                  child: _WorkerTabs(),
-                ),
-                Expanded(
-                  child: TabBarView(
-                    children: [
-                      _TabSurface(
-                        child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            final wide = constraints.maxWidth >= 920;
-                            if (!wide) {
-                              return Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  _StatusPanel(status: _runtimeStatus),
-                                  const SizedBox(height: 16),
-                                  _QuickResourceSummary(
-                                    cpu: _cpu,
-                                    memoryGb: _memoryGb,
-                                    diskGb: _diskGb,
-                                    gpuEnabled: _gpuEnabled,
-                                    runtimeStatus: _runtimeStatus,
-                                  ),
-                                ],
-                              );
-                            }
-                            return Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  flex: 4,
-                                  child: _StatusPanel(status: _runtimeStatus),
-                                ),
-                                const SizedBox(width: 16),
-                                Expanded(
-                                  flex: 3,
-                                  child: _QuickResourceSummary(
-                                    cpu: _cpu,
-                                    memoryGb: _memoryGb,
-                                    diskGb: _diskGb,
-                                    gpuEnabled: _gpuEnabled,
-                                    runtimeStatus: _runtimeStatus,
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
-                        ),
-                      ),
-                      _TabSurface(child: connectionPanel),
-                      _TabSurface(
-                        child: _LogsPanel(
-                          output: _output,
-                          onRefresh: _refreshStatus,
-                        ),
-                      ),
-                    ],
+                if (!_showWelcome)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+                    child: actionBar,
                   ),
+                if (!_showWelcome)
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(24, 10, 24, 0),
+                    child: _WorkerTabs(),
+                  ),
+                Expanded(
+                  child: _showWelcome
+                      ? _TabSurface(child: welcomePanel)
+                      : TabBarView(
+                          children: [
+                            _TabSurface(
+                              child: LayoutBuilder(
+                                builder: (context, constraints) {
+                                  final wide = constraints.maxWidth >= 920;
+                                  if (!wide) {
+                                    return Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.stretch,
+                                      children: [
+                                        _StatusPanel(status: _runtimeStatus),
+                                        const SizedBox(height: 16),
+                                        _QuickResourceSummary(
+                                          cpu: _cpu,
+                                          memoryGb: _memoryGb,
+                                          diskGb: _diskGb,
+                                          gpuEnabled: _gpuEnabled,
+                                          runtimeStatus: _runtimeStatus,
+                                        ),
+                                      ],
+                                    );
+                                  }
+                                  return Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Expanded(
+                                        flex: 4,
+                                        child: _StatusPanel(
+                                          status: _runtimeStatus,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 16),
+                                      Expanded(
+                                        flex: 3,
+                                        child: _QuickResourceSummary(
+                                          cpu: _cpu,
+                                          memoryGb: _memoryGb,
+                                          diskGb: _diskGb,
+                                          gpuEnabled: _gpuEnabled,
+                                          runtimeStatus: _runtimeStatus,
+                                        ),
+                                      ),
+                                    ],
+                                  );
+                                },
+                              ),
+                            ),
+                            _TabSurface(child: connectionPanel),
+                            _TabSurface(
+                              child: _LogsPanel(
+                                output: _output,
+                                onRefresh: _refreshStatus,
+                              ),
+                            ),
+                          ],
+                        ),
                 ),
               ],
             ),
@@ -1442,10 +1511,15 @@ class _TabSurface extends StatelessWidget {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.status, required this.busy});
+  const _Header({
+    required this.status,
+    required this.busy,
+    required this.version,
+  });
 
   final String status;
   final bool busy;
+  final String version;
 
   @override
   Widget build(BuildContext context) {
@@ -1475,17 +1549,21 @@ class _Header extends StatelessWidget {
             child: Icon(Icons.hub_outlined, color: colors.onPrimaryContainer),
           ),
           const SizedBox(width: 14),
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                const Text(
                   'CMesh Worker',
                   style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
                 ),
-                SizedBox(height: 2),
+                const SizedBox(height: 2),
                 Text(
-                  'Join a private cluster and control local worker resources.',
+                  'Version $version',
+                  style: TextStyle(
+                    color: colors.onSurfaceVariant,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ],
             ),
@@ -1500,6 +1578,152 @@ class _Header extends StatelessWidget {
             avatar: Icon(busy ? Icons.sync : Icons.circle, size: 14),
             label: Text(status),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WelcomeConnectionPanel extends StatelessWidget {
+  const _WelcomeConnectionPanel({
+    required this.managerUrl,
+    required this.joinToken,
+    required this.cpu,
+    required this.memoryGb,
+    required this.diskGb,
+    required this.vramGb,
+    required this.gpuEnabled,
+    required this.benchmark,
+    required this.installService,
+    required this.busy,
+    required this.output,
+    required this.onGpuChanged,
+    required this.onBenchmarkChanged,
+    required this.onInstallServiceChanged,
+    required this.onSave,
+  });
+
+  final TextEditingController managerUrl;
+  final TextEditingController joinToken;
+  final TextEditingController cpu;
+  final TextEditingController memoryGb;
+  final TextEditingController diskGb;
+  final TextEditingController vramGb;
+  final bool gpuEnabled;
+  final bool benchmark;
+  final bool installService;
+  final bool busy;
+  final String output;
+  final ValueChanged<bool> onGpuChanged;
+  final ValueChanged<bool> onBenchmarkChanged;
+  final ValueChanged<bool> onInstallServiceChanged;
+  final VoidCallback onSave;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return _Panel(
+      title: 'Save connection',
+      icon: Icons.link,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Version $cmeshWorkerVersion',
+            style: TextStyle(
+              color: colors.primary,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 14),
+          TextFormField(
+            controller: managerUrl,
+            decoration: const InputDecoration(
+              labelText: 'Manager URL',
+              prefixIcon: Icon(Icons.public),
+            ),
+            validator: _requiredUrl,
+          ),
+          const SizedBox(height: 12),
+          TextFormField(
+            controller: joinToken,
+            decoration: const InputDecoration(
+              labelText: 'Join token',
+              prefixIcon: Icon(Icons.key),
+            ),
+            obscureText: true,
+            validator: _required,
+          ),
+          const SizedBox(height: 18),
+          _SectionLabel('Resource limits'),
+          const SizedBox(height: 10),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final columns = constraints.maxWidth > 560 ? 3 : 1;
+              return _FieldGrid(
+                columns: columns,
+                children: [
+                  _NumberField(
+                    controller: cpu,
+                    label: 'CPU cores',
+                    icon: Icons.memory,
+                  ),
+                  _NumberField(
+                    controller: memoryGb,
+                    label: 'RAM GB',
+                    icon: Icons.storage,
+                  ),
+                  _NumberField(
+                    controller: diskGb,
+                    label: 'Disk GB',
+                    icon: Icons.folder,
+                  ),
+                  _NumberField(
+                    controller: vramGb,
+                    label: 'VRAM GB',
+                    icon: Icons.view_in_ar,
+                    allowZero: true,
+                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 8),
+          Material(
+            type: MaterialType.transparency,
+            child: SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Allow GPU usage'),
+              value: gpuEnabled,
+              onChanged: busy ? null : onGpuChanged,
+            ),
+          ),
+          Material(
+            type: MaterialType.transparency,
+            child: SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Run benchmark after connect'),
+              value: benchmark,
+              onChanged: busy ? null : onBenchmarkChanged,
+            ),
+          ),
+          Material(
+            type: MaterialType.transparency,
+            child: SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Run in background and start on login/boot'),
+              value: installService,
+              onChanged: busy ? null : onInstallServiceChanged,
+            ),
+          ),
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: busy ? null : onSave,
+            icon: const Icon(Icons.save_outlined),
+            label: const Text('Save connection'),
+          ),
+          const SizedBox(height: 14),
+          _LogBox(output: output, minHeight: 92),
         ],
       ),
     );
@@ -1562,6 +1786,7 @@ class _ConnectionPanel extends StatelessWidget {
               prefixIcon: Icon(Icons.key),
             ),
             obscureText: true,
+            validator: _required,
           ),
           const SizedBox(height: 18),
           _SectionLabel('Resource limits'),
@@ -1647,7 +1872,7 @@ class _WorkerActionBar extends StatelessWidget {
     required this.busy,
     required this.running,
     required this.hasJoinToken,
-    required this.hasUnsavedConfig,
+    required this.connectionReady,
     required this.canStart,
     required this.onStatus,
     required this.onSave,
@@ -1660,7 +1885,7 @@ class _WorkerActionBar extends StatelessWidget {
   final bool busy;
   final bool running;
   final bool hasJoinToken;
-  final bool hasUnsavedConfig;
+  final bool connectionReady;
   final bool canStart;
   final VoidCallback onStatus;
   final VoidCallback onSave;
@@ -1676,8 +1901,8 @@ class _WorkerActionBar extends StatelessWidget {
         ? 'Worker running'
         : !hasJoinToken
         ? 'Invite required'
-        : hasUnsavedConfig
-        ? 'Settings not saved'
+        : !connectionReady
+        ? 'Connection not saved'
         : canStart
         ? 'Ready to start'
         : 'Check settings';
@@ -1726,13 +1951,13 @@ class _WorkerActionBar extends StatelessWidget {
                         icon: const Icon(Icons.link),
                         label: const Text('Open invite'),
                       ),
-                    if (!running && hasJoinToken && hasUnsavedConfig)
+                    if (!running && hasJoinToken && !connectionReady)
                       FilledButton.icon(
                         onPressed: busy ? null : onSave,
                         icon: const Icon(Icons.save_outlined),
-                        label: const Text('Save settings'),
+                        label: const Text('Save connection'),
                       ),
-                    if (!running && hasJoinToken && !hasUnsavedConfig)
+                    if (!running && connectionReady)
                       FilledButton.icon(
                         onPressed: busy || !canStart ? null : onStart,
                         icon: const Icon(Icons.play_arrow),
