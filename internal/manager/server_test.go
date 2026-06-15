@@ -278,6 +278,12 @@ func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
 	if !strings.Contains(body, "Run cluster benchmark") {
 		t.Fatalf("expected cluster benchmark runner in dashboard")
 	}
+	if !strings.Contains(body, "First Cluster Test") {
+		t.Fatalf("expected first test onboarding in dashboard")
+	}
+	if !strings.Contains(body, "Run first cluster test") {
+		t.Fatalf("expected first test action in dashboard")
+	}
 	if !strings.Contains(body, "1.23") || !strings.Contains(body, "test/runtime") {
 		t.Fatalf("expected parsed compute result metrics in dashboard")
 	}

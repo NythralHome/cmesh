@@ -1014,6 +1014,105 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       gap: 12px;
       margin-bottom: 24px;
     }
+    .onboarding {
+      margin-bottom: 20px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .onboarding-body {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
+      gap: 18px;
+      padding: 16px;
+    }
+    .step-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .step {
+      display: grid;
+      grid-template-columns: 30px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      min-height: 42px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+    .step-index {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 999px;
+      background: #eef2f7;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .step strong {
+      display: block;
+      font-size: 14px;
+    }
+    .step span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+    .step.done .step-index {
+      background: #ecfdf5;
+      color: var(--accent);
+    }
+    .first-test-panel {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+    .first-test-panel h3 {
+      margin: 0;
+      font-size: 14px;
+    }
+    .first-test-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .first-test-stat {
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .first-test-stat span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+    .first-test-stat strong {
+      font-size: 18px;
+    }
+    .first-test-form {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .first-test-form .wide {
+      grid-column: 1 / -1;
+    }
     .metric {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -1252,6 +1351,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     @media (max-width: 640px) {
       header, main { padding-left: 18px; padding-right: 18px; }
       table { display: block; overflow-x: auto; }
+      .onboarding-body { grid-template-columns: 1fr; }
+      .step { grid-template-columns: 30px 1fr; }
+      .step .pill, .step .pill-job, .step .pill-muted { grid-column: 2; width: fit-content; }
+      .first-test-form { grid-template-columns: 1fr; }
+      .first-test-form .wide { grid-column: auto; }
       .job-runner, .cluster-runner { grid-template-columns: 1fr; }
       .growth-row { grid-template-columns: 1fr; }
       .worker-result { grid-template-columns: 1fr 1fr; }
@@ -1267,6 +1371,62 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     <div class="actions">
       <a class="button" href="{{.InviteURL}}">Invite worker</a>
     </div>
+    <section class="onboarding" aria-label="First cluster test">
+      <div class="section-head">
+        <h2>First Cluster Test</h2>
+        <code>{{if .OnlineNodes}}ready{{else}}waiting for worker{{end}}</code>
+      </div>
+      <div class="onboarding-body">
+        <ol class="step-list">
+          <li class="step done">
+            <span class="step-index">1</span>
+            <div><strong>Open invite</strong><span>Download the worker app or open the registered cmesh:// link.</span></div>
+            <a class="button" href="{{.InviteURL}}">Invite</a>
+          </li>
+          <li class="step {{if .OnlineNodes}}done{{end}}">
+            <span class="step-index">2</span>
+            <div><strong>Connect at least one worker</strong><span>Worker should show online after Save and Start in the desktop app.</span></div>
+            <span class="{{if .OnlineNodes}}pill{{else}}pill pill-muted{{end}}">{{.Summary.WorkersOnline}} online</span>
+          </li>
+          <li class="step {{if .ClusterBenchmarks}}done{{end}}">
+            <span class="step-index">3</span>
+            <div><strong>Run a cluster benchmark</strong><span>Starts one compute task per online worker and aggregates throughput.</span></div>
+            <span class="{{if .ClusterBenchmarks}}pill{{else}}pill pill-muted{{end}}">{{len .ClusterBenchmarks}} runs</span>
+          </li>
+          <li class="step {{if .Jobs}}done{{end}}">
+            <span class="step-index">4</span>
+            <div><strong>Inspect results</strong><span>Use the jobs and benchmark tables below to prove real work completed.</span></div>
+            <span class="{{if .Jobs}}pill{{else}}pill pill-muted{{end}}">{{len .Jobs}} jobs</span>
+          </li>
+        </ol>
+        <div class="first-test-panel">
+          <h3>Current test signal</h3>
+          <div class="first-test-grid">
+            <div class="first-test-stat"><span>Workers</span><strong>{{.Summary.WorkersOnline}}</strong></div>
+            <div class="first-test-stat"><span>Score</span><strong>{{printf "%.0f" .Summary.BenchmarkScore}}</strong></div>
+            {{if .ClusterBenchmarks}}{{with index .ClusterBenchmarks 0}}
+            <div class="first-test-stat"><span>Last run</span><strong>{{.Status}}</strong></div>
+            <div class="first-test-stat"><span>Total GFLOPS</span><strong>{{printf "%.2f" .TotalGFLOPS}}</strong></div>
+            {{end}}{{else}}
+            <div class="first-test-stat"><span>Last run</span><strong>-</strong></div>
+            <div class="first-test-stat"><span>Total GFLOPS</span><strong>-</strong></div>
+            {{end}}
+          </div>
+          <form class="first-test-form" id="first-test-form">
+            <div class="field">
+              <label for="first-test-size">Matrix size</label>
+              <input id="first-test-size" name="size" type="number" min="16" max="2048" step="16" value="512">
+            </div>
+            <div class="field">
+              <label for="first-test-iterations">Iterations</label>
+              <input id="first-test-iterations" name="iterations" type="number" min="1" max="100" step="1" value="6">
+            </div>
+            <button class="button primary wide" type="submit" {{if not .OnlineNodes}}disabled{{end}}>Run first cluster test</button>
+          </form>
+          <div class="runner-status" id="first-test-status">{{if .OnlineNodes}}Ready to run one task on each online worker.{{else}}Connect a worker first, then this button becomes available.{{end}}</div>
+        </div>
+      </div>
+    </section>
     <div class="grid">
       <div class="metric"><span>Workers online</span><strong>{{.Summary.WorkersOnline}} / {{.Summary.WorkersTotal}}</strong></div>
       <div class="metric"><span>Allowed CPU cores</span><strong>{{.Summary.Resources.CPU.CoresAllowed}}</strong></div>
@@ -1501,38 +1661,49 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         });
       });
     }
+    function startClusterBenchmark(sourceForm, statusElement, label) {
+      var size = parseInt(sourceForm.elements.size.value, 10);
+      var iterations = parseInt(sourceForm.elements.iterations.value, 10);
+      if (!Number.isFinite(size) || size < 16 || !Number.isFinite(iterations) || iterations < 1) {
+        statusElement.innerText = "Use a valid matrix size and iteration count.";
+        return;
+      }
+      statusElement.innerText = "Starting cluster benchmark...";
+      fetch("/v1/cluster-benchmarks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          size: size,
+          iterations: iterations,
+          requested_by: label
+        })
+      }).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(run) {
+        statusElement.innerText = "Started " + run.id + " on " + run.workers + " workers. Refreshing results...";
+        setTimeout(function() { window.location.reload(); }, 1200);
+      }).catch(function(error) {
+        statusElement.innerText = "Cluster benchmark failed: " + error.message;
+      });
+    }
+    var firstTestForm = document.getElementById("first-test-form");
+    var firstTestStatus = document.getElementById("first-test-status");
+    if (firstTestForm) {
+      firstTestForm.addEventListener("submit", function(event) {
+        event.preventDefault();
+        startClusterBenchmark(firstTestForm, firstTestStatus, "first-test");
+      });
+    }
     var clusterForm = document.getElementById("cluster-benchmark-form");
     var clusterStatus = document.getElementById("cluster-benchmark-status");
     if (clusterForm) {
       clusterForm.addEventListener("submit", function(event) {
         event.preventDefault();
-        var size = parseInt(clusterForm.elements.size.value, 10);
-        var iterations = parseInt(clusterForm.elements.iterations.value, 10);
         var requestedBy = String(clusterForm.elements.requested_by.value || "dashboard").trim();
-        if (!Number.isFinite(size) || size < 16 || !Number.isFinite(iterations) || iterations < 1) {
-          clusterStatus.innerText = "Use a valid matrix size and iteration count.";
-          return;
-        }
-        clusterStatus.innerText = "Starting cluster benchmark...";
-        fetch("/v1/cluster-benchmarks", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            size: size,
-            iterations: iterations,
-            requested_by: requestedBy
-          })
-        }).then(function(response) {
-          if (!response.ok) {
-            return response.text().then(function(text) { throw new Error(text || response.statusText); });
-          }
-          return response.json();
-        }).then(function(run) {
-          clusterStatus.innerText = "Started " + run.id + " on " + run.workers + " workers. Refreshing results...";
-          setTimeout(function() { window.location.reload(); }, 1200);
-        }).catch(function(error) {
-          clusterStatus.innerText = "Cluster benchmark failed: " + error.message;
-        });
+        startClusterBenchmark(clusterForm, clusterStatus, requestedBy);
       });
     }
     if (document.body.dataset.activeJobs === "true") {
