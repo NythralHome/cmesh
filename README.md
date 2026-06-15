@@ -117,7 +117,17 @@ Install a macOS/Linux worker from a release in one step:
 curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | \
   CMESH_MANAGER_URL="https://cmesh.nythral.com" \
   CMESH_JOIN_TOKEN="replace-with-join-token" \
+  CMESH_CPU=4 \
+  CMESH_MEMORY_GB=8 \
+  CMESH_DISK_GB=50 \
   sh
+```
+
+When installed as a background service, the donor can inspect or stop it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sh -s -- status
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sudo sh -s -- stop
 ```
 
 For a one-shot registration without a heartbeat loop:

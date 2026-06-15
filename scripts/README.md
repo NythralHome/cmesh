@@ -8,6 +8,9 @@ macOS/Linux one-shot worker runner:
 curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | \
   CMESH_MANAGER_URL="https://cmesh.nythral.com" \
   CMESH_JOIN_TOKEN="replace-with-join-token" \
+  CMESH_CPU=4 \
+  CMESH_MEMORY_GB=8 \
+  CMESH_DISK_GB=50 \
   sh
 ```
 
@@ -18,7 +21,19 @@ curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/inst
   sudo env CMESH_MANAGER_URL="https://cmesh.nythral.com" \
   CMESH_JOIN_TOKEN="replace-with-join-token" \
   CMESH_INSTALL_SERVICE=true \
+  CMESH_CPU=4 \
+  CMESH_MEMORY_GB=8 \
+  CMESH_DISK_GB=50 \
   sh
+```
+
+Worker service control:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sh -s -- status
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sudo sh -s -- stop
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sudo sh -s -- start
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sudo sh -s -- uninstall
 ```
 
 Windows PowerShell:
@@ -26,7 +41,20 @@ Windows PowerShell:
 ```powershell
 $env:CMESH_MANAGER_URL="https://cmesh.nythral.com"
 $env:CMESH_JOIN_TOKEN="replace-with-join-token"
+$env:CMESH_CPU="4"
+$env:CMESH_MEMORY_GB="8"
+$env:CMESH_DISK_GB="50"
 iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.ps1 -UseB | iex
+```
+
+Windows service control:
+
+```powershell
+$script = (iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.ps1 -UseB).Content
+iex "& { $script } -Action status"
+iex "& { $script } -Action stop"
+iex "& { $script } -Action start"
+iex "& { $script } -Action uninstall"
 ```
 
 ## Manager Install

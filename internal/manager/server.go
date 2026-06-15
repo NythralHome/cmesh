@@ -812,7 +812,7 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
 <body>
   <header>
     <h1>Invite Worker</h1>
-    <p class="sub">Copy one command and run it on the machine that should join this cluster.</p>
+    <p class="sub">Copy one command and run it on the machine that should join this cluster. Resource limits can be edited before running.</p>
   </header>
   <main>
     <div class="toolbar">
@@ -827,6 +827,9 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
       <pre><code id="mac-linux">curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | \
   CMESH_MANAGER_URL="{{.ManagerURL}}" \
   CMESH_JOIN_TOKEN="{{.JoinToken}}" \
+  CMESH_CPU=4 \
+  CMESH_MEMORY_GB=8 \
+  CMESH_DISK_GB=50 \
   sh</code></pre>
     </section>
 
@@ -839,7 +842,21 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
   sudo env CMESH_MANAGER_URL="{{.ManagerURL}}" \
   CMESH_JOIN_TOKEN="{{.JoinToken}}" \
   CMESH_INSTALL_SERVICE=true \
+  CMESH_CPU=4 \
+  CMESH_MEMORY_GB=8 \
+  CMESH_DISK_GB=50 \
   sh</code></pre>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Worker control</h2>
+        <button type="button" data-copy="worker-control">Copy</button>
+      </div>
+      <pre><code id="worker-control">curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sh -s -- status
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sudo sh -s -- stop
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sudo sh -s -- start
+curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | sudo sh -s -- uninstall</code></pre>
     </section>
 
     <section>
@@ -849,6 +866,9 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
       </div>
       <pre><code id="windows">$env:CMESH_MANAGER_URL="{{.ManagerURL}}"
 $env:CMESH_JOIN_TOKEN="{{.JoinToken}}"
+$env:CMESH_CPU="4"
+$env:CMESH_MEMORY_GB="8"
+$env:CMESH_DISK_GB="50"
 iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.ps1 -UseB | iex</code></pre>
     </section>
   </main>
