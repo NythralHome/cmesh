@@ -22,3 +22,28 @@ jobs:
       - name: Test
         run: go test ./...
 
+  worker-desktop:
+    name: Worker Desktop
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/worker_desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.2"
+          channel: stable
+          cache: true
+
+      - name: Dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test

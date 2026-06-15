@@ -62,11 +62,24 @@ internal/storage/       AI artifact cache and future object storage layer
 internal/transport/     API and RPC transport boundaries
 internal/version/       Build/version metadata
 web/                    Dashboard application
+apps/worker_desktop/    Flutter donor app for worker setup and control
 docs/                   Architecture and project documentation
 deployments/            Docker, Compose, and future deployment assets
 scripts/                Development scripts
 examples/               Example configs and workflows
 ```
+
+## Worker Desktop App
+
+The Flutter worker desktop shell gives donors a graphical way to enter a manager URL, join token, resource limits, and lifecycle actions without typing installer commands.
+
+```sh
+make worker-desktop-run
+make worker-desktop-test
+make worker-desktop-build
+```
+
+The app is currently a thin shell over the existing worker installer and service scripts. The next step is moving lifecycle control behind a local CMesh worker API so the GUI talks to `127.0.0.1` instead of executing scripts directly.
 
 ## Quick Start
 

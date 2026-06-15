@@ -19,8 +19,14 @@ data/
 node_modules/
 .vite/
 
+# Flutter/FVM
+.fvm/flutter_sdk
+**/.dart_tool/
+**/build/
+**/.flutter-plugins-dependencies
+**/.pub/
+
 # OS/editor
 .DS_Store
 .idea/
 .vscode/
-

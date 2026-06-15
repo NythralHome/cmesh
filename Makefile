@@ -3,7 +3,7 @@ COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X github.com/cmesh/cmesh/internal/version.Version=$(VERSION) -X github.com/cmesh/cmesh/internal/version.Commit=$(COMMIT) -X github.com/cmesh/cmesh/internal/version.Date=$(DATE)
 
-.PHONY: test run build dist clean docker help
+.PHONY: test run build dist clean docker worker-desktop-run worker-desktop-test worker-desktop-build help
 
 help:
 	@echo "Targets:"
@@ -12,6 +12,9 @@ help:
 	@echo "  make build     Build local binary"
 	@echo "  make dist      Cross-compile release binaries"
 	@echo "  make docker    Build Docker image"
+	@echo "  make worker-desktop-run    Run the Flutter worker desktop app"
+	@echo "  make worker-desktop-test   Test/analyze the Flutter worker desktop app"
+	@echo "  make worker-desktop-build  Build the Flutter worker desktop app for this OS"
 
 test:
 	go test ./...
@@ -33,6 +36,15 @@ dist: clean
 
 docker:
 	docker build -t cmesh:$(VERSION) .
+
+worker-desktop-run:
+	cd apps/worker_desktop && fvm flutter run
+
+worker-desktop-test:
+	cd apps/worker_desktop && fvm flutter analyze && fvm flutter test
+
+worker-desktop-build:
+	cd apps/worker_desktop && if [ "$(shell uname -s)" = "Darwin" ]; then fvm flutter build macos; elif [ "$(shell uname -s)" = "Linux" ]; then fvm flutter build linux; else echo "Unsupported desktop build host: $(shell uname -s)" >&2; exit 1; fi
 
 clean:
 	rm -rf dist
