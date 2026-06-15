@@ -89,6 +89,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/v1/start", s.handleStart)
 	mux.HandleFunc("/v1/stop", s.handleStop)
 	mux.HandleFunc("/v1/restart", s.handleRestart)
+	mux.HandleFunc("/v1/disconnect", s.handleDisconnect)
 
 	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -200,6 +201,33 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	_ = s.stopWorker()
 	if err := s.startWorker(); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.status())
+}
+
+func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.stopWorker(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	s.mu.Lock()
+	cfg := s.config
+	cfg.JoinToken = ""
+	s.config = cfg
+	s.logTail.WriteString("disconnected worker from cluster\n")
+	s.mu.Unlock()
+
+	if err := saveConfig(s.configPath, cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.status())

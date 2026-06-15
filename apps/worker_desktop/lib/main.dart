@@ -435,6 +435,9 @@ class WorkerRuntimeStatus {
     this.startedAt,
     this.exitCode,
     this.lastError,
+    this.managerUrl = '',
+    this.joinTokenConfigured = false,
+    this.configPath = '',
     this.logTail = '',
   });
 
@@ -443,16 +446,26 @@ class WorkerRuntimeStatus {
   final DateTime? startedAt;
   final int? exitCode;
   final String? lastError;
+  final String managerUrl;
+  final bool joinTokenConfigured;
+  final String configPath;
   final String logTail;
 
   factory WorkerRuntimeStatus.fromJson(Map<String, dynamic> json) {
     final startedAtRaw = json['started_at'] as String?;
+    final config = json['config'] is Map<String, dynamic>
+        ? json['config'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final joinToken = config['join_token'] as String? ?? '';
     return WorkerRuntimeStatus(
       running: json['running'] as bool? ?? false,
       pid: json['pid'] as int?,
       startedAt: startedAtRaw == null ? null : DateTime.tryParse(startedAtRaw),
       exitCode: json['exit_code'] as int?,
       lastError: json['last_error'] as String?,
+      managerUrl: config['manager_url'] as String? ?? '',
+      joinTokenConfigured: joinToken.trim().isNotEmpty,
+      configPath: json['config_path'] as String? ?? '',
       logTail: json['log_tail'] as String? ?? '',
     );
   }
@@ -543,7 +556,7 @@ class WorkerController {
       return _request('GET', '/v1/status');
     }
     if (action == 'disconnect') {
-      return _request('POST', '/v1/stop');
+      return _request('POST', '/v1/disconnect');
     }
     return _request('POST', '/v1/$action');
   }
@@ -819,11 +832,21 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     return _run(action, () => _controller.serviceAction(action));
   }
 
+  Future<void> _disconnect() async {
+    final result = await _run(
+      'Disconnecting',
+      () => _controller.serviceAction('disconnect'),
+    );
+    if (!mounted || !result.ok) return;
+    _joinToken.clear();
+    await _store.save(_readConfig());
+  }
+
   Future<void> _refreshStatus() async {
     await _run('Refreshing status', () => _controller.serviceAction('status'));
   }
 
-  Future<void> _run(
+  Future<WorkerCommandResult> _run(
     String label,
     Future<WorkerCommandResult> Function() command,
   ) async {
@@ -833,7 +856,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _output = '';
     });
     final result = await command();
-    if (!mounted) return;
+    if (!mounted) return result;
     final runtimeStatus = _runtimeStatusFromResult(result);
     setState(() {
       _busy = false;
@@ -848,6 +871,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
           ? 'Exit code ${result.exitCode}'
           : result.output;
     });
+    return result;
   }
 
   WorkerRuntimeStatus? _runtimeStatusFromResult(WorkerCommandResult result) {
@@ -886,7 +910,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       onStatus: _refreshStatus,
       onStart: () => _serviceAction('start'),
       onStop: () => _serviceAction('stop'),
-      onDisconnect: () => _serviceAction('disconnect'),
+      onDisconnect: _disconnect,
     );
 
     return DefaultTabController(
@@ -1479,6 +1503,20 @@ class _RuntimeStatusCard extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           _StatusLine(
+            label: 'Cluster',
+            value: current?.managerUrl.isNotEmpty == true
+                ? current!.managerUrl
+                : '-',
+          ),
+          _StatusLine(
+            label: 'Join token',
+            value: current == null
+                ? '-'
+                : current.joinTokenConfigured
+                ? 'Configured'
+                : 'Not configured',
+          ),
+          _StatusLine(
             label: 'PID',
             value: current?.pid == null ? '-' : '${current!.pid}',
           ),
@@ -1489,6 +1527,12 @@ class _RuntimeStatusCard extends StatelessWidget {
           _StatusLine(
             label: 'Exit code',
             value: current?.exitCode == null ? '-' : '${current!.exitCode}',
+          ),
+          _StatusLine(
+            label: 'Config',
+            value: current?.configPath.isNotEmpty == true
+                ? current!.configPath
+                : '-',
           ),
           if (current?.lastError?.isNotEmpty == true) ...[
             const SizedBox(height: 8),

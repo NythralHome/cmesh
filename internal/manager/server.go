@@ -852,6 +852,40 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		}
 		return "-"
 	},
+	"jobWorkerLabel": func(nodes map[string]cluster.Node, job jobs.Job) string {
+		if job.AssignedTo == "" {
+			return "Queued"
+		}
+		if node, ok := nodes[job.AssignedTo]; ok && strings.TrimSpace(node.Name) != "" {
+			return node.Name
+		}
+		if len(job.AssignedTo) <= 12 {
+			return job.AssignedTo
+		}
+		return job.AssignedTo[:12]
+	},
+	"jobDetail": func(job jobs.Job) string {
+		if job.Error != "" {
+			return job.Error
+		}
+		if job.Result == "" {
+			if job.AssignedTo == "" {
+				return "Waiting for an online worker."
+			}
+			return "Waiting for worker result."
+		}
+		var result map[string]any
+		if err := json.Unmarshal([]byte(job.Result), &result); err != nil {
+			return job.Result
+		}
+		if output, ok := result["output"].(string); ok && strings.TrimSpace(output) != "" {
+			return output
+		}
+		if runtimeValue, ok := result["worker_runtime"].(string); ok && strings.TrimSpace(runtimeValue) != "" {
+			return "Completed on " + runtimeValue
+		}
+		return "Completed."
+	},
 	"clip": func(value string, limit int) string {
 		value = strings.TrimSpace(value)
 		if limit <= 0 || len(value) <= limit {
@@ -1388,10 +1422,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         </div>
         <div class="field">
           <label>&nbsp;</label>
-          <button class="button primary" type="submit">Run compute job</button>
+          <button class="button primary" type="submit" {{if not .OnlineNodes}}disabled{{end}}>Run compute job</button>
         </div>
       </form>
-      <div class="runner-status" id="compute-job-status">Submit a benchmark-style compute job to the current online worker pool.</div>
+      <div class="runner-status" id="compute-job-status">{{if .OnlineNodes}}Submit a benchmark-style compute job to the current online worker pool.{{else}}Connect at least one worker before submitting a compute job.{{end}}</div>
       {{if .Jobs}}
       <div class="table-wrap">
         <table>
@@ -1400,10 +1434,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <th>Job</th>
               <th>Status</th>
               <th>Type</th>
-              <th>Assigned</th>
+              <th>Worker</th>
               <th>Updated</th>
               <th>Result</th>
-              <th>Output</th>
+              <th>Detail</th>
             </tr>
           </thead>
           <tbody>
@@ -1412,7 +1446,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <td><code>{{shortID .ID}}</code></td>
               <td><span class="{{jobPillClass .Status}}">{{.Status}}</span></td>
               <td><code>{{.Type}}</code></td>
-              <td>{{if .AssignedTo}}<code>{{shortID .AssignedTo}}</code>{{else}}-{{end}}</td>
+              <td><code>{{jobWorkerLabel $.NodesByID .}}</code>{{if .AssignedTo}}<br><span class="sub">{{shortID .AssignedTo}}</span>{{end}}</td>
               <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
               <td>
                 <div class="result-grid">
@@ -1421,7 +1455,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                   <div><span>Runtime</span><strong>{{jobMetric . "worker_runtime"}}</strong></div>
                 </div>
               </td>
-              <td class="mono-output"><code>{{clip (jobOutput .) 160}}</code></td>
+              <td class="mono-output"><code>{{clip (jobDetail .) 180}}</code></td>
             </tr>
           {{end}}
           </tbody>

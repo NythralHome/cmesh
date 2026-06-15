@@ -266,6 +266,9 @@ func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
 	if !strings.Contains(body, "compute.matrix_multiply") {
 		t.Fatalf("expected job type in dashboard")
 	}
+	if !strings.Contains(body, "Worker") {
+		t.Fatalf("expected worker column in jobs dashboard")
+	}
 	if !strings.Contains(body, "succeeded") {
 		t.Fatalf("expected job status in dashboard")
 	}
@@ -277,6 +280,9 @@ func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
 	}
 	if !strings.Contains(body, "1.23") || !strings.Contains(body, "test/runtime") {
 		t.Fatalf("expected parsed compute result metrics in dashboard")
+	}
+	if !strings.Contains(body, "Completed on test/runtime") {
+		t.Fatalf("expected human job detail in dashboard")
 	}
 }
 

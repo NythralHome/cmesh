@@ -81,6 +81,52 @@ func TestConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestDisconnectStopsAndClearsJoinToken(t *testing.T) {
+	server, baseURL, stop := startTestServer(t)
+	defer stop()
+
+	server.config = Config{
+		ManagerURL: "https://cmesh.example.com",
+		JoinToken:  "join-token",
+		NodeName:   "desktop-worker",
+		CPU:        2,
+		MemoryGB:   4,
+		DiskGB:     10,
+	}
+
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/disconnect", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %s", resp.Status)
+	}
+
+	var status Status
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Running {
+		t.Fatalf("expected worker to be stopped, got %+v", status)
+	}
+	if status.Config.JoinToken != "" {
+		t.Fatalf("expected join token to be cleared, got %q", status.Config.JoinToken)
+	}
+
+	saved, err := loadConfig(server.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.JoinToken != "" {
+		t.Fatalf("expected saved join token to be cleared, got %q", saved.JoinToken)
+	}
+}
+
 func TestTokenProtectsControlRoutes(t *testing.T) {
 	_, baseURL, stop := startTestServerWithToken(t, "secret")
 	defer stop()
