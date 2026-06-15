@@ -254,6 +254,9 @@ func (s *Server) startWorker() error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
+	if err := validateRunnableConfig(cfg); err != nil {
+		return err
+	}
 	binary, err := resolveWorkerBinary(cfg.WorkerBinary)
 	if err != nil {
 		return err
@@ -450,6 +453,13 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.DiskGB <= 0 {
 		return fmt.Errorf("disk_gb must be greater than zero")
+	}
+	return nil
+}
+
+func validateRunnableConfig(cfg Config) error {
+	if strings.TrimSpace(cfg.JoinToken) == "" {
+		return fmt.Errorf("join_token is required before starting worker")
 	}
 	return nil
 }

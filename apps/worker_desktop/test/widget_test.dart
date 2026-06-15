@@ -17,7 +17,9 @@ void main() {
     expect(find.text('Connection'), findsOneWidget);
     expect(find.text('Worker status'), findsOneWidget);
     expect(find.text('Status unknown'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Connect'), findsOneWidget);
+    expect(find.text('Invite required'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Open invite'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Connect & start'), findsNothing);
   });
 
   test('parses invite URLs', () {

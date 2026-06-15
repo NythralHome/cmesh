@@ -839,6 +839,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   @override
   void initState() {
     super.initState();
+    _managerUrl.addListener(_formStateChanged);
+    _joinToken.addListener(_formStateChanged);
     PlatformInviteBridge.setInviteHandler(_applyInvite);
     MacStatusItemBridge.configure();
     _loadConfig();
@@ -852,6 +854,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
 
   @override
   void dispose() {
+    _managerUrl.removeListener(_formStateChanged);
+    _joinToken.removeListener(_formStateChanged);
     _managerUrl.dispose();
     _joinToken.dispose();
     _cpu.dispose();
@@ -859,6 +863,12 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     _diskGb.dispose();
     _vramGb.dispose();
     super.dispose();
+  }
+
+  void _formStateChanged() {
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _loadConfig() async {
@@ -939,13 +949,61 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     });
   }
 
-  Future<void> _connect() async {
+  Future<void> _startWorker() async {
     if (!_formKey.currentState!.validate()) return;
-    await _run('Connecting', () async {
+    if (!_hasJoinToken) {
+      _showMissingJoinToken('Start failed');
+      return;
+    }
+    await _run('Starting', () async {
       final config = _readConfig();
       await _store.save(config);
-      return _controller.install(config);
+      final saved = await _controller.saveConfig(config);
+      if (!saved.ok) return saved;
+      return _controller.serviceAction('start');
     });
+  }
+
+  Future<void> _openInvite() async {
+    final managerURL = _managerUrl.text.trim();
+    if (managerURL.isEmpty) {
+      _setLocalFailure(
+        'Open invite failed',
+        'Manager URL is empty. Set the manager URL first.',
+      );
+      return;
+    }
+    final inviteURL = '${managerURL.replaceAll(RegExp(r'/+$'), '')}/invite';
+    String executable;
+    List<String> args;
+    if (Platform.isMacOS) {
+      executable = 'open';
+      args = [inviteURL];
+    } else if (Platform.isWindows) {
+      executable = 'cmd';
+      args = ['/c', 'start', '', inviteURL];
+    } else {
+      executable = 'xdg-open';
+      args = [inviteURL];
+    }
+    try {
+      final result = await Process.run(executable, args);
+      if (!mounted) return;
+      if (result.exitCode != 0) {
+        _setLocalFailure(
+          'Open invite failed',
+          '${result.stderr}${result.stdout}'.trim(),
+        );
+        return;
+      }
+      setState(() {
+        _status = 'Invite page opened';
+        _output = 'Opened $inviteURL';
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      _setLocalFailure('Open invite failed', '$error');
+    }
   }
 
   Future<void> _serviceAction(String action) {
@@ -965,6 +1023,26 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
 
   Future<void> _refreshStatus() async {
     await _run('Refreshing status', () => _controller.serviceAction('status'));
+  }
+
+  bool get _hasJoinToken => _joinToken.text.trim().isNotEmpty;
+
+  bool get _isWorkerRunning => _runtimeStatus?.running ?? false;
+
+  void _showMissingJoinToken(String status) {
+    _setLocalFailure(
+      status,
+      'Join token is empty. Open the manager invite page and use Open Worker App, '
+      'or paste the invite token into the Connection tab.',
+    );
+  }
+
+  void _setLocalFailure(String status, String output) {
+    setState(() {
+      _busy = false;
+      _status = status;
+      _output = output.trim().isEmpty ? status : output.trim();
+    });
   }
 
   Future<WorkerCommandResult> _run(
@@ -1024,12 +1102,14 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     );
     final actionBar = _WorkerActionBar(
       busy: _busy,
-      onConnect: _connect,
+      running: _isWorkerRunning,
+      hasJoinToken: _hasJoinToken,
       onSave: _saveConfig,
       onStatus: _refreshStatus,
-      onStart: () => _serviceAction('start'),
+      onStart: _startWorker,
       onStop: () => _serviceAction('stop'),
       onDisconnect: _disconnect,
+      onOpenInvite: _openInvite,
     );
 
     return DefaultTabController(
@@ -1293,7 +1373,6 @@ class _ConnectionPanel extends StatelessWidget {
               prefixIcon: Icon(Icons.key),
             ),
             obscureText: true,
-            validator: _required,
           ),
           const SizedBox(height: 18),
           _SectionLabel('Resource limits'),
@@ -1357,25 +1436,44 @@ class _ConnectionPanel extends StatelessWidget {
 class _WorkerActionBar extends StatelessWidget {
   const _WorkerActionBar({
     required this.busy,
-    required this.onConnect,
+    required this.running,
+    required this.hasJoinToken,
     required this.onSave,
     required this.onStatus,
     required this.onStart,
     required this.onStop,
     required this.onDisconnect,
+    required this.onOpenInvite,
   });
 
   final bool busy;
-  final VoidCallback onConnect;
+  final bool running;
+  final bool hasJoinToken;
   final VoidCallback onSave;
   final VoidCallback onStatus;
   final VoidCallback onStart;
   final VoidCallback onStop;
   final VoidCallback onDisconnect;
+  final VoidCallback onOpenInvite;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final statusLabel = running
+        ? 'Worker running'
+        : hasJoinToken
+        ? 'Ready to start'
+        : 'Invite required';
+    final statusIcon = running
+        ? Icons.check_circle
+        : hasJoinToken
+        ? Icons.radio_button_checked
+        : Icons.warning_amber_rounded;
+    final statusColor = running
+        ? const Color(0xFF157A4A)
+        : hasJoinToken
+        ? colors.primary
+        : colors.error;
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 1180),
@@ -1393,45 +1491,156 @@ class _WorkerActionBar extends StatelessWidget {
               ),
             ],
           ),
-          child: Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            alignment: WrapAlignment.center,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              FilledButton.icon(
-                onPressed: busy ? null : onConnect,
-                icon: const Icon(Icons.link),
-                label: const Text('Connect'),
-              ),
-              OutlinedButton.icon(
-                onPressed: busy ? null : onSave,
-                icon: const Icon(Icons.save_outlined),
-                label: const Text('Save'),
-              ),
-              _ActionButton(
-                icon: Icons.fact_check_outlined,
-                label: 'Status',
-                onPressed: busy ? null : onStatus,
-              ),
-              _ActionButton(
-                icon: Icons.play_arrow,
-                label: 'Start',
-                onPressed: busy ? null : onStart,
-              ),
-              _ActionButton(
-                icon: Icons.stop,
-                label: 'Stop',
-                onPressed: busy ? null : onStop,
-              ),
-              _ActionButton(
-                icon: Icons.link_off,
-                label: 'Disconnect',
-                onPressed: busy ? null : onDisconnect,
-              ),
-            ],
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 720;
+              final content = [
+                _ActionStatusChip(
+                  icon: statusIcon,
+                  label: statusLabel,
+                  color: statusColor,
+                ),
+                if (!running)
+                  _ActionGroup(
+                    label: 'Setup',
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: busy ? null : onSave,
+                        icon: const Icon(Icons.save_outlined),
+                        label: const Text('Save settings'),
+                      ),
+                      if (!hasJoinToken)
+                        FilledButton.icon(
+                          onPressed: busy ? null : onOpenInvite,
+                          icon: const Icon(Icons.link),
+                          label: const Text('Open invite'),
+                        ),
+                    ],
+                  ),
+                _ActionGroup(
+                  label: 'Worker',
+                  children: [
+                    if (!running && hasJoinToken)
+                      FilledButton.icon(
+                        onPressed: busy ? null : onStart,
+                        icon: const Icon(Icons.play_arrow),
+                        label: const Text('Connect & start'),
+                      ),
+                    _ActionButton(
+                      icon: Icons.fact_check_outlined,
+                      label: 'Status',
+                      onPressed: busy ? null : onStatus,
+                    ),
+                    if (running) ...[
+                      _ActionButton(
+                        icon: Icons.stop,
+                        label: 'Stop',
+                        onPressed: busy ? null : onStop,
+                      ),
+                      _ActionButton(
+                        icon: Icons.link_off,
+                        label: 'Disconnect',
+                        onPressed: busy ? null : onDisconnect,
+                      ),
+                    ],
+                  ],
+                ),
+              ];
+              if (compact) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final child in content) ...[
+                      child,
+                      if (child != content.last) const SizedBox(height: 10),
+                    ],
+                  ],
+                );
+              }
+              return Wrap(
+                spacing: 12,
+                runSpacing: 10,
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: content,
+              );
+            },
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ActionStatusChip extends StatelessWidget {
+  const _ActionStatusChip({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(minHeight: 42),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: TextStyle(color: color, fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActionGroup extends StatelessWidget {
+  const _ActionGroup({required this.label, required this.children});
+
+  final String label;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest.withValues(alpha: 0.58),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: colors.outlineVariant),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 2, bottom: 6),
+            child: Text(
+              label.toUpperCase(),
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: colors.onSurfaceVariant,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ),
+          Wrap(spacing: 8, runSpacing: 8, children: [...children]),
+        ],
       ),
     );
   }
