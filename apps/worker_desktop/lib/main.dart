@@ -835,12 +835,14 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   String _status = 'Idle';
   String _output = 'No command has been run yet.';
   WorkerRuntimeStatus? _runtimeStatus;
+  WorkerConfig? _savedConfig;
 
   @override
   void initState() {
     super.initState();
-    _managerUrl.addListener(_formStateChanged);
-    _joinToken.addListener(_formStateChanged);
+    for (final controller in _configControllers) {
+      controller.addListener(_formStateChanged);
+    }
     PlatformInviteBridge.setInviteHandler(_applyInvite);
     MacStatusItemBridge.configure();
     _loadConfig();
@@ -854,8 +856,9 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
 
   @override
   void dispose() {
-    _managerUrl.removeListener(_formStateChanged);
-    _joinToken.removeListener(_formStateChanged);
+    for (final controller in _configControllers) {
+      controller.removeListener(_formStateChanged);
+    }
     _managerUrl.dispose();
     _joinToken.dispose();
     _cpu.dispose();
@@ -864,6 +867,15 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     _vramGb.dispose();
     super.dispose();
   }
+
+  List<TextEditingController> get _configControllers => [
+    _managerUrl,
+    _joinToken,
+    _cpu,
+    _memoryGb,
+    _diskGb,
+    _vramGb,
+  ];
 
   void _formStateChanged() {
     if (mounted) {
@@ -888,6 +900,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _installService = config.installService;
       _configLoaded = true;
       _pendingInvite = invite;
+      _savedConfig = config;
     });
   }
 
@@ -940,12 +953,24 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     );
   }
 
+  WorkerConfig? _readConfigOrNull() {
+    try {
+      return _readConfig();
+    } on FormatException {
+      return null;
+    }
+  }
+
   Future<void> _saveConfig() async {
     if (!_formKey.currentState!.validate()) return;
-    await _run('Saving', () async {
-      final config = _readConfig();
+    final config = _readConfig();
+    final result = await _run('Saving', () async {
       await _store.save(config);
       return _controller.saveConfig(config);
+    });
+    if (!mounted || !result.ok) return;
+    setState(() {
+      _savedConfig = config;
     });
   }
 
@@ -955,11 +980,15 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _showMissingJoinToken('Start failed');
       return;
     }
+    if (!_hasSavedRunnableConfig) {
+      _setLocalFailure(
+        'Start blocked',
+        'Save settings before starting the worker. The worker will only start '
+            'from the config that is already saved into the local control service.',
+      );
+      return;
+    }
     await _run('Starting', () async {
-      final config = _readConfig();
-      await _store.save(config);
-      final saved = await _controller.saveConfig(config);
-      if (!saved.ok) return saved;
       return _controller.serviceAction('start');
     });
   }
@@ -1028,6 +1057,16 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   bool get _hasJoinToken => _joinToken.text.trim().isNotEmpty;
 
   bool get _isWorkerRunning => _runtimeStatus?.running ?? false;
+
+  bool get _hasUnsavedConfig {
+    final current = _readConfigOrNull();
+    final saved = _savedConfig;
+    if (current == null || saved == null) return true;
+    return current.toJson().toString() != saved.toJson().toString();
+  }
+
+  bool get _hasSavedRunnableConfig =>
+      _hasJoinToken && !_hasUnsavedConfig && _readConfigOrNull() != null;
 
   void _showMissingJoinToken(String status) {
     _setLocalFailure(
@@ -1106,6 +1145,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       busy: _busy,
       running: _isWorkerRunning,
       hasJoinToken: _hasJoinToken,
+      hasUnsavedConfig: _hasUnsavedConfig,
+      canStart: _hasSavedRunnableConfig,
       onStatus: _refreshStatus,
       onStart: _startWorker,
       onStop: () => _serviceAction('stop'),
@@ -1414,23 +1455,32 @@ class _ConnectionPanel extends StatelessWidget {
             },
           ),
           const SizedBox(height: 8),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Allow GPU usage'),
-            value: gpuEnabled,
-            onChanged: onGpuChanged,
+          Material(
+            type: MaterialType.transparency,
+            child: SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Allow GPU usage'),
+              value: gpuEnabled,
+              onChanged: onGpuChanged,
+            ),
           ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Run benchmark after connect'),
-            value: benchmark,
-            onChanged: onBenchmarkChanged,
+          Material(
+            type: MaterialType.transparency,
+            child: SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Run benchmark after connect'),
+              value: benchmark,
+              onChanged: onBenchmarkChanged,
+            ),
           ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Run in background and start on login/boot'),
-            value: installService,
-            onChanged: onInstallServiceChanged,
+          Material(
+            type: MaterialType.transparency,
+            child: SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Run in background and start on login/boot'),
+              value: installService,
+              onChanged: onInstallServiceChanged,
+            ),
           ),
           const SizedBox(height: 14),
           Row(
@@ -1454,6 +1504,8 @@ class _WorkerActionBar extends StatelessWidget {
     required this.busy,
     required this.running,
     required this.hasJoinToken,
+    required this.hasUnsavedConfig,
+    required this.canStart,
     required this.onStatus,
     required this.onStart,
     required this.onStop,
@@ -1464,6 +1516,8 @@ class _WorkerActionBar extends StatelessWidget {
   final bool busy;
   final bool running;
   final bool hasJoinToken;
+  final bool hasUnsavedConfig;
+  final bool canStart;
   final VoidCallback onStatus;
   final VoidCallback onStart;
   final VoidCallback onStop;
@@ -1475,19 +1529,23 @@ class _WorkerActionBar extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     final statusLabel = running
         ? 'Worker running'
-        : hasJoinToken
+        : !hasJoinToken
+        ? 'Invite required'
+        : hasUnsavedConfig
+        ? 'Save settings first'
+        : canStart
         ? 'Ready to start'
-        : 'Invite required';
+        : 'Check settings';
     final statusIcon = running
         ? Icons.check_circle
-        : hasJoinToken
-        ? Icons.radio_button_checked
-        : Icons.warning_amber_rounded;
+        : !hasJoinToken || hasUnsavedConfig
+        ? Icons.warning_amber_rounded
+        : Icons.radio_button_checked;
     final statusColor = running
         ? const Color(0xFF157A4A)
-        : hasJoinToken
-        ? colors.primary
-        : colors.error;
+        : !hasJoinToken || hasUnsavedConfig
+        ? colors.error
+        : colors.primary;
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 1180),
@@ -1525,7 +1583,7 @@ class _WorkerActionBar extends StatelessWidget {
                       ),
                     if (!running && hasJoinToken)
                       FilledButton.icon(
-                        onPressed: busy ? null : onStart,
+                        onPressed: busy || !canStart ? null : onStart,
                         icon: const Icon(Icons.play_arrow),
                         label: const Text('Connect & start'),
                       ),

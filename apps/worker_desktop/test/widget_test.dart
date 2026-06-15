@@ -22,6 +22,30 @@ void main() {
     expect(find.widgetWithText(FilledButton, 'Connect & start'), findsNothing);
   });
 
+  testWidgets('requires saving invite settings before start', (tester) async {
+    await tester.pumpWidget(
+      const CMeshWorkerApp(
+        initialInvite: null,
+        autostartControl: false,
+        registerProtocolHandler: false,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Connection'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Join token'),
+      'test-token',
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Save settings first'), findsOneWidget);
+    final start = find.widgetWithText(FilledButton, 'Connect & start');
+    expect(start, findsOneWidget);
+    expect(tester.widget<FilledButton>(start).onPressed, isNull);
+  });
+
   test('parses invite URLs', () {
     final invite = InviteConfig.fromString(
       'cmesh://join?manager=https%3A%2F%2Fcmesh.example.com&token=abc123',
