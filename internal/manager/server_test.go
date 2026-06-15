@@ -301,6 +301,67 @@ func TestWorkerHeartbeatUpdatesNodeAndOfflineStatus(t *testing.T) {
 	}
 }
 
+func TestWorkerLeaveMarksNodeOfflineAndRemovesActiveCapacity(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+
+	joinReq := membership.JoinRequest{
+		NodeName: "worker-leave",
+		Role:     cluster.NodeRoleWorker,
+		Resources: cluster.ResourceSnapshot{
+			CPU: cluster.CPUResources{
+				CoresTotal:   8,
+				CoresAllowed: 4,
+			},
+			Memory: cluster.MemoryResources{
+				TotalBytes:   16 * gb,
+				AllowedBytes: 8 * gb,
+			},
+		},
+	}
+	body, err := json.Marshal(joinReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joinReqHTTP := httptest.NewRequest(http.MethodPost, "/v1/workers/join", bytes.NewReader(body))
+	joinRec := httptest.NewRecorder()
+	srv.ServeHTTP(joinRec, joinReqHTTP)
+	if joinRec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d", joinRec.Code)
+	}
+
+	var joinResp membership.JoinResponse
+	if err := json.NewDecoder(joinRec.Body).Decode(&joinResp); err != nil {
+		t.Fatal(err)
+	}
+	if summary := state.ClusterSummary(); summary.Resources.CPU.CoresAllowed != 4 {
+		t.Fatalf("expected online worker capacity before leave, got %d", summary.Resources.CPU.CoresAllowed)
+	}
+
+	leaveBody, err := json.Marshal(membership.LeaveRequest{NodeID: joinResp.NodeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaveReq := httptest.NewRequest(http.MethodPost, "/v1/workers/leave", bytes.NewReader(leaveBody))
+	leaveRec := httptest.NewRecorder()
+	srv.ServeHTTP(leaveRec, leaveReq)
+	if leaveRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", leaveRec.Code, leaveRec.Body.String())
+	}
+
+	nodes := state.Nodes()
+	if nodes[0].Status != cluster.NodeStatusOffline {
+		t.Fatalf("expected worker to be offline, got %s", nodes[0].Status)
+	}
+	summary := state.ClusterSummary()
+	if summary.WorkersOnline != 0 {
+		t.Fatalf("expected zero online workers, got %d", summary.WorkersOnline)
+	}
+	if summary.Resources.CPU.CoresAllowed != 0 {
+		t.Fatalf("expected offline worker capacity to be excluded, got %d", summary.Resources.CPU.CoresAllowed)
+	}
+}
+
 func TestBenchmarkSubmissionUpdatesClusterScore(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)

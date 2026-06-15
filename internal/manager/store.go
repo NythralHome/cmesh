@@ -10,6 +10,7 @@ import (
 type Store interface {
 	RegisterWorker(req membership.JoinRequest) membership.JoinResponse
 	Heartbeat(hb membership.Heartbeat) bool
+	MarkWorkerOffline(nodeID string) bool
 	PutBenchmark(result resources.BenchmarkResult) bool
 	Benchmarks() []resources.BenchmarkResult
 	BenchmarkSummaryByNode() map[string]NodeBenchmarkSummary

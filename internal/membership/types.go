@@ -25,3 +25,8 @@ type Heartbeat struct {
 	At        time.Time                `json:"at"`
 	Resources cluster.ResourceSnapshot `json:"resources"`
 }
+
+type LeaveRequest struct {
+	NodeID string    `json:"node_id"`
+	At     time.Time `json:"at"`
+}

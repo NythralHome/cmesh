@@ -58,6 +58,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/workers/", s.handleWorkerRoutes)
 	mux.HandleFunc("/v1/workers/join", s.handleWorkerJoin)
 	mux.HandleFunc("/v1/workers/heartbeat", s.handleWorkerHeartbeat)
+	mux.HandleFunc("/v1/workers/leave", s.handleWorkerLeave)
 
 	s.server = &http.Server{
 		Addr:              options.Addr,
@@ -504,6 +505,31 @@ func (s *Server) handleWorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleWorkerLeave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req membership.LeaveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+
+	if !s.state.MarkWorkerOffline(req.NodeID) {
+		http.Error(w, "unknown node", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "offline"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

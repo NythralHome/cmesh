@@ -120,6 +120,15 @@ WHERE id = $1
 	return err == nil && tag.RowsAffected() > 0
 }
 
+func (s *PostgresStore) MarkWorkerOffline(nodeID string) bool {
+	tag, err := s.pool.Exec(context.Background(), `
+UPDATE nodes
+SET status = $2, updated_at = $3
+WHERE id = $1
+`, nodeID, string(cluster.NodeStatusOffline), time.Now().UTC())
+	return err == nil && tag.RowsAffected() > 0
+}
+
 func (s *PostgresStore) PutBenchmark(result resources.BenchmarkResult) bool {
 	if result.CreatedAt.IsZero() {
 		result.CreatedAt = time.Now().UTC()
@@ -308,19 +317,21 @@ func (s *PostgresStore) ClusterSummary() ClusterSummary {
 				summary.WorkersOnline++
 			}
 		}
-		summary.Resources.CPU.CoresTotal += node.Resources.CPU.CoresTotal
-		summary.Resources.CPU.CoresAllowed += node.Resources.CPU.CoresAllowed
-		summary.Resources.Memory.TotalBytes += node.Resources.Memory.TotalBytes
-		summary.Resources.Memory.AllowedBytes += node.Resources.Memory.AllowedBytes
-		summary.Resources.Storage.TotalBytes += node.Resources.Storage.TotalBytes
-		summary.Resources.Storage.AllowedBytes += node.Resources.Storage.AllowedBytes
-		summary.Resources.Storage.FreeBytes += node.Resources.Storage.FreeBytes
-		summary.GPUs += len(node.Resources.GPU)
-		for _, gpu := range node.Resources.GPU {
-			summary.VRAMTotalBytes += gpu.TotalVRAMBytes
-			summary.VRAMAllowedBytes += gpu.AllowedVRAMBytes
+		if node.Role == cluster.NodeRoleWorker && node.Status == cluster.NodeStatusOnline {
+			summary.Resources.CPU.CoresTotal += node.Resources.CPU.CoresTotal
+			summary.Resources.CPU.CoresAllowed += node.Resources.CPU.CoresAllowed
+			summary.Resources.Memory.TotalBytes += node.Resources.Memory.TotalBytes
+			summary.Resources.Memory.AllowedBytes += node.Resources.Memory.AllowedBytes
+			summary.Resources.Storage.TotalBytes += node.Resources.Storage.TotalBytes
+			summary.Resources.Storage.AllowedBytes += node.Resources.Storage.AllowedBytes
+			summary.Resources.Storage.FreeBytes += node.Resources.Storage.FreeBytes
+			summary.GPUs += len(node.Resources.GPU)
+			for _, gpu := range node.Resources.GPU {
+				summary.VRAMTotalBytes += gpu.TotalVRAMBytes
+				summary.VRAMAllowedBytes += gpu.AllowedVRAMBytes
+			}
+			summary.BenchmarkScore += benchmarkSummary[node.ID].TotalScore
 		}
-		summary.BenchmarkScore += benchmarkSummary[node.ID].TotalScore
 	}
 	return summary
 }

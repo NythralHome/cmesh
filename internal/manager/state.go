@@ -73,6 +73,21 @@ func (s *State) Heartbeat(hb membership.Heartbeat) bool {
 	return true
 }
 
+func (s *State) MarkWorkerOffline(nodeID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	node, ok := s.nodes[nodeID]
+	if !ok {
+		return false
+	}
+
+	node.Status = cluster.NodeStatusOffline
+	node.UpdatedAt = time.Now().UTC()
+	s.nodes[nodeID] = node
+	return true
+}
+
 func (s *State) PutBenchmark(result resources.BenchmarkResult) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -280,19 +295,21 @@ func (s *State) ClusterSummary() ClusterSummary {
 			}
 		}
 
-		summary.Resources.CPU.CoresTotal += node.Resources.CPU.CoresTotal
-		summary.Resources.CPU.CoresAllowed += node.Resources.CPU.CoresAllowed
-		summary.Resources.Memory.TotalBytes += node.Resources.Memory.TotalBytes
-		summary.Resources.Memory.AllowedBytes += node.Resources.Memory.AllowedBytes
-		summary.Resources.Storage.TotalBytes += node.Resources.Storage.TotalBytes
-		summary.Resources.Storage.AllowedBytes += node.Resources.Storage.AllowedBytes
-		summary.Resources.Storage.FreeBytes += node.Resources.Storage.FreeBytes
-		summary.GPUs += len(node.Resources.GPU)
-		for _, gpu := range node.Resources.GPU {
-			summary.VRAMTotalBytes += gpu.TotalVRAMBytes
-			summary.VRAMAllowedBytes += gpu.AllowedVRAMBytes
+		if node.Role == cluster.NodeRoleWorker && node.Status == cluster.NodeStatusOnline {
+			summary.Resources.CPU.CoresTotal += node.Resources.CPU.CoresTotal
+			summary.Resources.CPU.CoresAllowed += node.Resources.CPU.CoresAllowed
+			summary.Resources.Memory.TotalBytes += node.Resources.Memory.TotalBytes
+			summary.Resources.Memory.AllowedBytes += node.Resources.Memory.AllowedBytes
+			summary.Resources.Storage.TotalBytes += node.Resources.Storage.TotalBytes
+			summary.Resources.Storage.AllowedBytes += node.Resources.Storage.AllowedBytes
+			summary.Resources.Storage.FreeBytes += node.Resources.Storage.FreeBytes
+			summary.GPUs += len(node.Resources.GPU)
+			for _, gpu := range node.Resources.GPU {
+				summary.VRAMTotalBytes += gpu.TotalVRAMBytes
+				summary.VRAMAllowedBytes += gpu.AllowedVRAMBytes
+			}
+			summary.BenchmarkScore += benchmarkSummary[node.ID].TotalScore
 		}
-		summary.BenchmarkScore += benchmarkSummary[node.ID].TotalScore
 	}
 
 	return summary

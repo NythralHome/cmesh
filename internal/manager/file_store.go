@@ -50,6 +50,14 @@ func (s *FileStore) Heartbeat(hb membership.Heartbeat) bool {
 	return ok
 }
 
+func (s *FileStore) MarkWorkerOffline(nodeID string) bool {
+	ok := s.State.MarkWorkerOffline(nodeID)
+	if ok {
+		_ = s.save()
+	}
+	return ok
+}
+
 func (s *FileStore) PutBenchmark(result resources.BenchmarkResult) bool {
 	ok := s.State.PutBenchmark(result)
 	if ok {

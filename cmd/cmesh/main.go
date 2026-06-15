@@ -287,6 +287,11 @@ func workerRun(ctx context.Context, options workerOptions) error {
 
 	fmt.Printf("worker %s joined as %s\n", options.name, resp.NodeID)
 	fmt.Printf("heartbeat every %s\n", heartbeatEvery)
+	defer func() {
+		if err := sendLeave(options.managerURL, resp.NodeID); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to mark worker offline: %v\n", err)
+		}
+	}()
 
 	ticker := time.NewTicker(heartbeatEvery)
 	defer ticker.Stop()
@@ -481,6 +486,28 @@ func sendHeartbeat(managerURL string, nodeID string, snapshot cluster.ResourceSn
 	}
 
 	httpResp, err := http.Post(managerURL+"/v1/workers/heartbeat", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return fmt.Errorf("manager returned %s", httpResp.Status)
+	}
+
+	return nil
+}
+
+func sendLeave(managerURL string, nodeID string) error {
+	body, err := json.Marshal(membership.LeaveRequest{
+		NodeID: nodeID,
+		At:     time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+
+	httpResp, err := http.Post(managerURL+"/v1/workers/leave", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
