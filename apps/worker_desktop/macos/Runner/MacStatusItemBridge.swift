@@ -33,10 +33,10 @@ final class MacStatusItemBridge {
   private static func update(running: Bool, label: String) {
     DispatchQueue.main.async {
       guard let button = statusItem?.button else { return }
-      button.title = ""
+      button.title = running ? "CM On" : "CM"
       button.toolTip = "CMesh Worker: \(label)"
       button.image = AppDelegate.statusImage(running: running)
-      button.imagePosition = .imageOnly
+      button.imagePosition = .imageLeading
     }
   }
 }

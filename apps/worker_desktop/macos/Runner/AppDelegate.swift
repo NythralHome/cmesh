@@ -35,10 +35,10 @@ class AppDelegate: FlutterAppDelegate {
   }
 
   private func configureStatusItem() {
-    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    item.button?.title = ""
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    item.button?.title = "CM"
     item.button?.image = Self.statusImage(running: false)
-    item.button?.imagePosition = .imageOnly
+    item.button?.imagePosition = .imageLeading
     item.button?.toolTip = "CMesh Worker: Not running"
 
     let menu = NSMenu()
