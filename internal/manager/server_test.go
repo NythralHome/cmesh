@@ -162,7 +162,7 @@ func TestInvitePageRequiresOperatorToken(t *testing.T) {
 	if !strings.Contains(body, "cmesh://join?") {
 		t.Fatalf("expected invite page to contain desktop invite link")
 	}
-	if !strings.Contains(body, "CMesh-Worker-macos-arm64.dmg") {
+	if !strings.Contains(body, "CMesh-Worker-Apple-Silicon.dmg") {
 		t.Fatalf("expected invite page to contain Apple Silicon installer download")
 	}
 	if !strings.Contains(body, "Download installer for macOS Apple Silicon") {

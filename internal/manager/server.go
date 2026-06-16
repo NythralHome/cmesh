@@ -158,7 +158,7 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 		JoinToken:           s.joinToken,
 		DesktopInviteURL:    desktopInviteURL(managerURL, s.joinToken),
 		DesktopInviteHref:   template.URL(desktopInviteURL(managerURL, s.joinToken)),
-		DownloadURL:         releaseDownloadBase(version.Version) + "CMesh-Worker-macos-arm64.dmg",
+		DownloadURL:         releaseDownloadBase(version.Version) + "CMesh-Worker-Apple-Silicon.dmg",
 		ReleaseDownloadBase: releaseDownloadBase(version.Version),
 	}
 
@@ -2005,12 +2005,12 @@ iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-wor
       var options = {
         macApple: {
           label: "Download installer for macOS Apple Silicon",
-          asset: "CMesh-Worker-macos-arm64.dmg",
+          asset: "CMesh-Worker-Apple-Silicon.dmg",
           hint: "Open the DMG, drag CMesh Worker to Applications, then use Open Worker App."
         },
         macIntel: {
           label: "Download installer for macOS Intel",
-          asset: "CMesh-Worker-macos-amd64.dmg",
+          asset: "CMesh-Worker-Intel-Mac.dmg",
           hint: "Open the DMG, drag CMesh Worker to Applications, then use Open Worker App."
         },
         windows: {
