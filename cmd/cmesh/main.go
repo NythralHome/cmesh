@@ -6,11 +6,15 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,6 +25,7 @@ import (
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/manager"
 	"github.com/cmesh/cmesh/internal/membership"
+	"github.com/cmesh/cmesh/internal/models"
 	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/cmesh/cmesh/internal/version"
 	"github.com/cmesh/cmesh/internal/workercontrol"
@@ -763,7 +768,7 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapsh
 		fmt.Fprintf(os.Stderr, "failed to write worker job status: %v\n", err)
 	}
 
-	result, jobErr := executeJobWithResources(*resp.Job, snapshot)
+	result, jobErr := executeJobWithRuntime(*resp.Job, snapshot, cacheDir)
 	complete := jobs.CompleteRequest{
 		NodeID: nodeID,
 		Result: result,
@@ -821,6 +826,10 @@ func executeJob(job jobs.Job) (string, error) {
 }
 
 func executeJobWithResources(job jobs.Job, snapshot cluster.ResourceSnapshot) (string, error) {
+	return executeJobWithRuntime(job, snapshot, defaultCacheDir())
+}
+
+func executeJobWithRuntime(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir string) (string, error) {
 	if err := validateWorkerCanRunJob(job, snapshot); err != nil {
 		return "", err
 	}
@@ -829,6 +838,12 @@ func executeJobWithResources(job jobs.Job, snapshot cluster.ResourceSnapshot) (s
 		return job.Input, nil
 	case "compute.matrix_multiply":
 		return executeMatrixMultiplyJob(job.Input)
+	case models.JobInstall:
+		return executeModelInstallJob(job.Input, cacheDir)
+	case models.JobDelete:
+		return executeModelDeleteJob(job.Input, cacheDir)
+	case models.JobGenerate:
+		return executeModelGenerateJob(job.Input, cacheDir)
 	default:
 		return "", fmt.Errorf("unsupported job type %q", job.Type)
 	}
@@ -860,6 +875,178 @@ func validateWorkerCanRunJob(job jobs.Job, snapshot cluster.ResourceSnapshot) er
 		return fmt.Errorf("worker resource guard rejected job: requires compute GPU with %.1f GB VRAM", bytesToGB(req.VRAMBytes))
 	}
 	return fmt.Errorf("worker resource guard rejected job: requires compute GPU")
+}
+
+type modelInstallResult struct {
+	Kind          string `json:"kind"`
+	ModelID       string `json:"model_id"`
+	ModelName     string `json:"model_name"`
+	Path          string `json:"path"`
+	Bytes         int64  `json:"bytes"`
+	Runtime       string `json:"runtime"`
+	WorkerRuntime string `json:"worker_runtime"`
+}
+
+type modelDeleteResult struct {
+	Kind          string `json:"kind"`
+	ModelID       string `json:"model_id"`
+	Removed       bool   `json:"removed"`
+	Path          string `json:"path"`
+	WorkerRuntime string `json:"worker_runtime"`
+}
+
+type modelGenerateResult struct {
+	Kind          string `json:"kind"`
+	ModelID       string `json:"model_id"`
+	Output        string `json:"output"`
+	Tokens        int    `json:"tokens,omitempty"`
+	WorkerRuntime string `json:"worker_runtime"`
+}
+
+func executeModelInstallJob(input string, cacheDir string) (string, error) {
+	var req models.InstallInput
+	if err := json.Unmarshal([]byte(input), &req); err != nil {
+		return "", fmt.Errorf("invalid model install input: %w", err)
+	}
+	model, err := models.MustFind(req.ModelID)
+	if err != nil {
+		return "", err
+	}
+	path := modelPath(cacheDir, model)
+	if stat, err := os.Stat(path); err == nil && stat.Size() > 0 {
+		return marshalModelInstallResult(model, path, stat.Size())
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+
+	tmp := path + ".tmp"
+	resp, err := http.Get(model.URL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("model download returned %s", resp.Status)
+	}
+	out, err := os.Create(tmp)
+	if err != nil {
+		return "", err
+	}
+	bytesWritten, copyErr := io.Copy(out, resp.Body)
+	closeErr := out.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmp)
+		return "", copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmp)
+		return "", closeErr
+	}
+	if bytesWritten == 0 {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("model download wrote 0 bytes")
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return marshalModelInstallResult(model, path, bytesWritten)
+}
+
+func marshalModelInstallResult(model models.Model, path string, size int64) (string, error) {
+	result := modelInstallResult{
+		Kind:          string(models.JobInstall),
+		ModelID:       model.ID,
+		ModelName:     model.Name,
+		Path:          path,
+		Bytes:         size,
+		Runtime:       string(model.Runtime),
+		WorkerRuntime: runtime.GOOS + "/" + runtime.GOARCH,
+	}
+	body, err := json.Marshal(result)
+	return string(body), err
+}
+
+func executeModelDeleteJob(input string, cacheDir string) (string, error) {
+	var req models.DeleteInput
+	if err := json.Unmarshal([]byte(input), &req); err != nil {
+		return "", fmt.Errorf("invalid model delete input: %w", err)
+	}
+	model, err := models.MustFind(req.ModelID)
+	if err != nil {
+		return "", err
+	}
+	path := modelPath(cacheDir, model)
+	err = os.Remove(path)
+	removed := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	result := modelDeleteResult{
+		Kind:          string(models.JobDelete),
+		ModelID:       model.ID,
+		Removed:       removed,
+		Path:          path,
+		WorkerRuntime: runtime.GOOS + "/" + runtime.GOARCH,
+	}
+	body, err := json.Marshal(result)
+	return string(body), err
+}
+
+func executeModelGenerateJob(input string, cacheDir string) (string, error) {
+	var req models.GenerateInput
+	if err := json.Unmarshal([]byte(input), &req); err != nil {
+		return "", fmt.Errorf("invalid model generate input: %w", err)
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		return "", fmt.Errorf("prompt is required")
+	}
+	model, err := models.MustFind(req.ModelID)
+	if err != nil {
+		return "", err
+	}
+	path := modelPath(cacheDir, model)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("model %s is not installed on this worker", model.ID)
+		}
+		return "", err
+	}
+	cli, err := exec.LookPath("llama-cli")
+	if err != nil {
+		return "", fmt.Errorf("model %s is installed, but llama-cli is not available on PATH", model.ID)
+	}
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 || maxTokens > 2048 {
+		maxTokens = 256
+	}
+	temperature := strings.TrimSpace(req.Temperature)
+	if temperature == "" {
+		temperature = "0.7"
+	}
+	cmd := exec.Command(cli, "-m", path, "-p", req.Prompt, "-n", strconv.Itoa(maxTokens), "--temp", temperature)
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("llama-cli failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	text := strings.TrimSpace(string(output))
+	result := modelGenerateResult{
+		Kind:          string(models.JobGenerate),
+		ModelID:       model.ID,
+		Output:        text,
+		WorkerRuntime: runtime.GOOS + "/" + runtime.GOARCH,
+	}
+	body, err := json.Marshal(result)
+	return string(body), err
+}
+
+func modelPath(cacheDir string, model models.Model) string {
+	if strings.TrimSpace(cacheDir) == "" {
+		cacheDir = defaultCacheDir()
+	}
+	return filepath.Join(cacheDir, "models", model.ID, model.File)
 }
 
 type matrixMultiplyInput struct {

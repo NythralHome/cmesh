@@ -14,6 +14,7 @@ import (
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
+	"github.com/cmesh/cmesh/internal/models"
 	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/cmesh/cmesh/internal/version"
 )
@@ -57,6 +58,8 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/v1/cluster-benchmarks", s.handleClusterBenchmarks)
+	mux.HandleFunc("/v1/models", s.handleModels)
+	mux.HandleFunc("/v1/models/", s.handleModel)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/jobs/", s.handleJob)
 	mux.HandleFunc("/v1/workers/", s.handleWorkerRoutes)
@@ -108,12 +111,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	nodes := s.state.Nodes()
 	allJobs := s.state.Jobs()
 	clusterBenchmarks := clusterBenchmarkSummaries(allJobs, 5)
+	modelCatalog := models.Catalog()
+	modelsView := modelSummaries(modelCatalog, allJobs, nodes)
 	data := struct {
 		Summary            ClusterSummary
 		OnlineNodes        []cluster.Node
 		OfflineWorkerCount int
 		Benchmarks         map[string]NodeBenchmarkSummary
 		ClusterBenchmarks  []ClusterBenchmarkSummary
+		Models             []ModelSummary
 		NodesByID          map[string]cluster.Node
 		WorkerActiveJobs   map[string]int
 		MaxClusterGFLOPS   float64
@@ -125,6 +131,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		OfflineWorkerCount: offlineWorkerCount(nodes),
 		Benchmarks:         s.state.BenchmarkSummaryByNode(),
 		ClusterBenchmarks:  clusterBenchmarks,
+		Models:             modelsView,
 		NodesByID:          nodesByID(nodes),
 		WorkerActiveJobs:   activeJobsByWorker(allJobs),
 		MaxClusterGFLOPS:   maxClusterBenchmarkGFLOPS(clusterBenchmarks),
@@ -499,6 +506,176 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"models": modelSummaries(models.Catalog(), s.state.Jobs(), s.state.Nodes()),
+	})
+}
+
+func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/v1/models/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	model, ok := models.Find(parts[0])
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	action := parts[1]
+	switch action {
+	case "install":
+		s.handleModelInstall(w, r, model)
+	case "delete":
+		s.handleModelDelete(w, r, model)
+	case "generate":
+		s.handleModelGenerate(w, r, model)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleModelInstall(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		NodeID string `json:"node_id"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	input, err := json.Marshal(models.InstallInput{ModelID: model.ID})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	job, err := s.state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobInstall,
+		Input:       string(input),
+		RequestedBy: "dashboard-models",
+		AssignedTo:  req.NodeID,
+		Requirements: jobs.Requirements{
+			CPUCores:    1,
+			MemoryBytes: model.MemoryBytes,
+			DiskBytes:   model.DiskBytes,
+			VRAMBytes:   model.VRAMBytes,
+		},
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, job)
+}
+
+func (s *Server) handleModelDelete(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		NodeID string `json:"node_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	input, err := json.Marshal(models.DeleteInput{ModelID: model.ID})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	job, err := s.state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobDelete,
+		Input:       string(input),
+		RequestedBy: "dashboard-models",
+		AssignedTo:  req.NodeID,
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, job)
+}
+
+func (s *Server) handleModelGenerate(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		NodeID      string `json:"node_id"`
+		Prompt      string `json:"prompt"`
+		MaxTokens   int    `json:"max_tokens"`
+		Temperature string `json:"temperature"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		http.Error(w, "prompt is required", http.StatusBadRequest)
+		return
+	}
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
+	if len(summaries) == 0 || !modelInstalledOn(summaries[0], req.NodeID) {
+		http.Error(w, "model is not installed on the selected worker", http.StatusConflict)
+		return
+	}
+	input, err := json.Marshal(models.GenerateInput{
+		ModelID:     model.ID,
+		Prompt:      req.Prompt,
+		MaxTokens:   req.MaxTokens,
+		Temperature: req.Temperature,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	job, err := s.state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerate,
+		Input:       string(input),
+		RequestedBy: "dashboard-chat",
+		AssignedTo:  req.NodeID,
+		Requirements: jobs.Requirements{
+			CPUCores:    1,
+			MemoryBytes: model.MemoryBytes,
+			DiskBytes:   model.DiskBytes,
+			VRAMBytes:   model.VRAMBytes,
+		},
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, job)
 }
 
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
@@ -898,6 +1075,20 @@ func jobTimeline(job jobs.Job) string {
 }
 
 func jobWorkload(job jobs.Job) string {
+	if modelID, ok := jobModelID(job); ok {
+		switch job.Type {
+		case models.JobInstall:
+			return "install " + modelID
+		case models.JobDelete:
+			return "delete " + modelID
+		case models.JobGenerate:
+			var input models.GenerateInput
+			if err := json.Unmarshal([]byte(job.Input), &input); err == nil && strings.TrimSpace(input.Prompt) != "" {
+				return "generate " + modelID + ": " + input.Prompt
+			}
+			return "generate " + modelID
+		}
+	}
 	size, iterations := computeJobInput(job.Input)
 	if size > 0 && iterations > 0 {
 		return fmt.Sprintf("%dx%d x %d", size, size, iterations)
@@ -1071,13 +1262,40 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		}
 		return percent
 	},
-	"hasActiveJobs":   hasActiveJobs,
-	"workerSlots":     workerJobSlots,
-	"jobCanCancel":    jobCanBeCanceled,
-	"jobDuration":     jobDuration,
-	"jobTimeline":     jobTimeline,
-	"jobWorkload":     jobWorkload,
-	"jobRequirements": jobRequirements,
+	"hasActiveJobs":    hasActiveJobs,
+	"workerSlots":      workerJobSlots,
+	"jobCanCancel":     jobCanBeCanceled,
+	"jobDuration":      jobDuration,
+	"jobTimeline":      jobTimeline,
+	"jobWorkload":      jobWorkload,
+	"jobRequirements":  jobRequirements,
+	"modelInstalledOn": modelInstalledOn,
+	"modelNodeOptions": func(nodes map[string]cluster.Node, summary ModelSummary) []cluster.Node {
+		out := make([]cluster.Node, 0, len(summary.InstalledOn))
+		for _, nodeID := range summary.InstalledOn {
+			if node, ok := nodes[nodeID]; ok {
+				out = append(out, node)
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		return out
+	},
+	"modelStatusClass": func(status string) string {
+		switch status {
+		case "installed":
+			return "pill"
+		case "installing", "deleting":
+			return "pill pill-job"
+		default:
+			return "pill pill-muted"
+		}
+	},
+	"modelCanInstall": func(summary ModelSummary) bool {
+		return summary.Status == "available" && summary.CapableNodes > 0
+	},
+	"modelCanGenerate": func(summary ModelSummary) bool {
+		return len(summary.InstalledOn) > 0 && summary.Status != "deleting"
+	},
 	"jobMetric": func(job jobs.Job, key string) string {
 		if job.Result == "" {
 			return "-"
@@ -1107,7 +1325,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="5">
   <title>CMesh Dashboard</title>
   <style>
     :root {
@@ -1481,6 +1698,84 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       color: var(--muted);
       font-size: 12px;
     }
+    .models-shell {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr);
+      gap: 16px;
+      padding: 16px;
+      background: #fbfcfd;
+    }
+    .model-catalog {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+    }
+    .model-card {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .model-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: start;
+    }
+    .model-title h3 {
+      margin: 0 0 4px;
+      font-size: 16px;
+    }
+    .model-specs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .model-specs div {
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+    .model-specs span {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .model-specs strong {
+      font-size: 13px;
+    }
+    .model-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .chat-panel {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .chat-panel h3 {
+      margin: 0;
+      font-size: 18px;
+    }
+    textarea {
+      min-height: 112px;
+      width: 100%;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      resize: vertical;
+      font: inherit;
+    }
     .result-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(88px, 1fr));
@@ -1524,6 +1819,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       .first-test-form { grid-template-columns: 1fr; }
       .first-test-form .wide { grid-column: auto; }
       .job-runner, .cluster-runner { grid-template-columns: 1fr; }
+      .models-shell { grid-template-columns: 1fr; }
+      .model-specs { grid-template-columns: 1fr; }
       .growth-row { grid-template-columns: 1fr; }
       .worker-result { grid-template-columns: 1fr 1fr; }
     }
@@ -1637,6 +1934,69 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       {{else}}
       <div class="empty">No workers are online right now.</div>
       {{end}}
+    </section>
+    <section id="models" style="margin-top: 20px;">
+      <div class="section-head">
+        <h2>Models</h2>
+        <code>{{len .Models}} catalog entries</code>
+      </div>
+      <div class="models-shell">
+        <div class="model-catalog">
+          {{range .Models}}
+          <article class="model-card" data-model-id="{{.Model.ID}}">
+            <div class="model-title">
+              <div>
+                <h3>{{.Model.Name}}</h3>
+                <p class="sub">{{.Model.Description}}</p>
+              </div>
+              <span class="{{modelStatusClass .Status}}">{{.Status}}</span>
+            </div>
+            <div class="model-specs">
+              <div><span>Model</span><strong>{{.Model.Parameters}} / {{.Model.Quant}}</strong></div>
+              <div><span>Required RAM</span><strong>{{printf "%.1f" (gb .Model.MemoryBytes)}} GB</strong></div>
+              <div><span>Required disk</span><strong>{{printf "%.1f" (gb .Model.DiskBytes)}} GB</strong></div>
+            </div>
+            <p class="sub">Runtime {{.Model.Runtime}} · context {{.Model.Context}} · {{.CapableNodes}} capable online workers</p>
+            {{if .InstalledOn}}
+            <p class="sub">Installed on {{range $index, $nodeID := .InstalledOn}}{{if $index}}, {{end}}<code>{{nodeLabel $.NodesByID $nodeID}}</code>{{end}}</p>
+            {{else if .LastError}}
+            <p class="sub">Last error: {{.LastError}}</p>
+            {{end}}
+            <div class="model-actions">
+              <button class="button primary model-install" type="button" data-model-id="{{.Model.ID}}" {{if not (modelCanInstall .)}}disabled{{end}}>Install</button>
+              {{$modelID := .Model.ID}}
+              {{range modelNodeOptions $.NodesByID .}}
+              <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.ID}}">Delete from {{.Name}}</button>
+              {{end}}
+            </div>
+          </article>
+          {{end}}
+        </div>
+        <form class="chat-panel" id="model-chat-form">
+          <h3>Chat test</h3>
+          <p class="sub">Submit one prompt to an installed model. The worker must have the GGUF file and a local llama.cpp runtime.</p>
+          <div class="field">
+            <label for="chat-model">Model</label>
+            <select id="chat-model" name="model_id">
+              {{range .Models}}{{if modelCanGenerate .}}<option value="{{.Model.ID}}">{{.Model.Name}}</option>{{end}}{{end}}
+            </select>
+          </div>
+          <div class="field">
+            <label for="chat-node">Worker</label>
+            <select id="chat-node" name="node_id">
+              {{range .Models}}{{$chatModelID := .Model.ID}}{{range modelNodeOptions $.NodesByID .}}<option value="{{.ID}}" data-model-id="{{$chatModelID}}">{{.Name}}</option>{{end}}{{end}}
+            </select>
+          </div>
+          <div class="field">
+            <label for="chat-prompt">Prompt</label>
+            <textarea id="chat-prompt" name="prompt" placeholder="Ask the local model something"></textarea>
+          </div>
+          <div class="model-actions">
+            <button class="button primary" type="submit">Generate</button>
+          </div>
+          <div class="runner-status" id="model-status">{{if .OnlineNodes}}Install a model first, then submit a prompt.{{else}}Connect a worker before installing models.{{end}}</div>
+        </form>
+      </div>
     </section>
     <section style="margin-top: 20px;">
       <div class="section-head">
@@ -1914,6 +2274,112 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       firstTestForm.addEventListener("submit", function(event) {
         event.preventDefault();
         startClusterBenchmark(firstTestForm, firstTestStatus, "first-test");
+      });
+    }
+    document.querySelectorAll(".model-install").forEach(function(button) {
+      button.addEventListener("click", function() {
+        var modelID = button.dataset.modelId;
+        if (!modelID) return;
+        button.disabled = true;
+        button.innerText = "Installing...";
+        fetch("/v1/models/" + encodeURIComponent(modelID) + "/install", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}"
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function(job) {
+          var statusElement = document.getElementById("model-status");
+          if (statusElement) statusElement.innerText = "Install job " + job.id + " submitted.";
+          setTimeout(function() { window.location.reload(); }, 1200);
+        }).catch(function(error) {
+          button.disabled = false;
+          button.innerText = "Install";
+          alert("Install failed: " + error.message);
+        });
+      });
+    });
+    document.querySelectorAll(".model-delete").forEach(function(button) {
+      button.addEventListener("click", function() {
+        var modelID = button.dataset.modelId;
+        var nodeID = button.dataset.nodeId;
+        if (!modelID || !nodeID) return;
+        button.disabled = true;
+        button.innerText = "Deleting...";
+        fetch("/v1/models/" + encodeURIComponent(modelID) + "/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ node_id: nodeID })
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function(job) {
+          var statusElement = document.getElementById("model-status");
+          if (statusElement) statusElement.innerText = "Delete job " + job.id + " submitted.";
+          setTimeout(function() { window.location.reload(); }, 1200);
+        }).catch(function(error) {
+          button.disabled = false;
+          button.innerText = "Delete";
+          alert("Delete failed: " + error.message);
+        });
+      });
+    });
+    var chatForm = document.getElementById("model-chat-form");
+    var chatModel = document.getElementById("chat-model");
+    var chatNode = document.getElementById("chat-node");
+    var modelStatus = document.getElementById("model-status");
+    function syncChatNodes() {
+      if (!chatModel || !chatNode) return;
+      var modelID = chatModel.value;
+      var firstVisible = "";
+      Array.prototype.forEach.call(chatNode.options, function(option) {
+        var matches = option.getAttribute("data-model-id") === modelID;
+        option.hidden = !matches;
+        option.disabled = !matches;
+        if (matches && !firstVisible) firstVisible = option.value;
+      });
+      if (firstVisible) chatNode.value = firstVisible;
+    }
+    if (chatModel) {
+      chatModel.addEventListener("change", syncChatNodes);
+      syncChatNodes();
+    }
+    if (chatForm) {
+      chatForm.addEventListener("submit", function(event) {
+        event.preventDefault();
+        if (!chatModel || !chatNode) return;
+        var modelID = chatModel.value;
+        var nodeID = chatNode.value;
+        var prompt = String(chatForm.elements.prompt.value || "").trim();
+        if (!modelID || !nodeID) {
+          modelStatus.innerText = "Install a model before generating.";
+          return;
+        }
+        if (!prompt) {
+          modelStatus.innerText = "Prompt is required.";
+          return;
+        }
+        modelStatus.innerText = "Submitting model job...";
+        fetch("/v1/models/" + encodeURIComponent(modelID) + "/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ node_id: nodeID, prompt: prompt, max_tokens: 256, temperature: "0.7" })
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function(job) {
+          modelStatus.innerText = "Generate job " + job.id + " submitted. Watch Compute Jobs for the answer.";
+          setTimeout(function() { window.location.reload(); }, 1200);
+        }).catch(function(error) {
+          modelStatus.innerText = "Generate failed: " + error.message;
+        });
       });
     }
     if (document.body.dataset.activeJobs === "true") {

@@ -12,6 +12,7 @@ import (
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
+	"github.com/cmesh/cmesh/internal/models"
 	"github.com/cmesh/cmesh/internal/resources"
 )
 
@@ -1205,6 +1206,61 @@ func TestClusterBenchmarkRequiresOnlineWorkers(t *testing.T) {
 	}
 	if !strings.Contains(dashboardRec.Body.String(), "Connect at least one worker") {
 		t.Fatalf("expected dashboard to explain benchmark worker requirement")
+	}
+}
+
+func TestModelCatalogAndInstallJob(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "model-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 16 * gb, FreeBytes: 80 * gb},
+	})
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	listRec := httptest.NewRecorder()
+	srv.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", listRec.Code, listRec.Body.String())
+	}
+	if !strings.Contains(listRec.Body.String(), "qwen2.5-0.5b-instruct-q4-k-m") {
+		t.Fatalf("expected model catalog to include qwen")
+	}
+
+	installReq := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/install", bytes.NewReader([]byte(`{}`)))
+	installRec := httptest.NewRecorder()
+	srv.ServeHTTP(installRec, installReq)
+	if installRec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", installRec.Code, installRec.Body.String())
+	}
+
+	var job jobs.Job
+	if err := json.NewDecoder(installRec.Body).Decode(&job); err != nil {
+		t.Fatal(err)
+	}
+	if job.Type != models.JobInstall {
+		t.Fatalf("expected model install job, got %s", job.Type)
+	}
+	if job.AssignedTo != worker.NodeID {
+		t.Fatalf("expected install assigned to worker, got %q", job.AssignedTo)
+	}
+	if job.Requirements.MemoryBytes == 0 || job.Requirements.DiskBytes == 0 {
+		t.Fatalf("expected model resource requirements, got %#v", job.Requirements)
+	}
+}
+
+func TestModelGenerateRequiresPrompt(t *testing.T) {
+	srv := NewServer(":0", NewState())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/generate", bytes.NewReader([]byte(`{"prompt":""}`)))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "prompt is required") {
+		t.Fatalf("expected prompt validation error, got %q", rec.Body.String())
 	}
 }
 
