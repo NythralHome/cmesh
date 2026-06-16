@@ -84,6 +84,9 @@ jobs:
           flutter build macos --dart-define=CMESH_WORKER_VERSION=${GITHUB_REF_NAME}
           app_bundle="build/macos/Build/Products/Release/CMesh Worker.app"
           cp ../../bin/cmesh "$app_bundle/Contents/Resources/cmesh"
+          codesign --force --sign - "$app_bundle/Contents/Resources/cmesh"
+          codesign --force --deep --sign - "$app_bundle"
+          codesign --verify --deep --strict --verbose=2 "$app_bundle"
           dmg_name="CMesh-Worker-Apple-Silicon.dmg"
           ../../scripts/package-macos-dmg.sh "$app_bundle" "../../dist/$dmg_name" "CMesh Worker ${GITHUB_REF_NAME}"
 
