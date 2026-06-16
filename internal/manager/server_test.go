@@ -241,6 +241,9 @@ func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, ok := state.NextJobForWorker(online.NodeID); !ok {
+		t.Fatal("expected job to start")
+	}
 	state.CompleteJob(job.ID, jobs.CompleteRequest{
 		NodeID: online.NodeID,
 		Result: `{"duration_ms":42,"gflops":1.23,"worker_runtime":"test/runtime"}`,
@@ -589,6 +592,81 @@ func TestJobLifecycle(t *testing.T) {
 	}
 }
 
+func TestOfflineWorkerFailsActiveJob(t *testing.T) {
+	state := NewState()
+	worker := joinWorkerForTest(t, NewServer(":0", state), "job-worker")
+
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:  "echo",
+		Input: "hello cluster",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.NextJobForWorker(worker.NodeID); !ok {
+		t.Fatal("expected job to start")
+	}
+
+	if !state.MarkWorkerOffline(worker.NodeID) {
+		t.Fatal("expected worker to be marked offline")
+	}
+
+	failed, ok := state.Job(job.ID)
+	if !ok {
+		t.Fatal("expected job")
+	}
+	if failed.Status != jobs.StatusFailed {
+		t.Fatalf("expected failed job, got %s", failed.Status)
+	}
+	if failed.Error != "worker went offline" {
+		t.Fatalf("unexpected error %q", failed.Error)
+	}
+	if failed.FinishedAt.IsZero() {
+		t.Fatal("expected finished_at on failed job")
+	}
+
+	if completed, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{
+		NodeID: worker.NodeID,
+		Result: "late result",
+	}); ok || completed.Status == jobs.StatusSucceeded {
+		t.Fatalf("late completion should not revive failed job: %#v", completed)
+	}
+}
+
+func TestStaleWorkerFailsActiveJob(t *testing.T) {
+	state := NewState()
+	worker := joinWorkerForTest(t, NewServer(":0", state), "stale-job-worker")
+
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:  "echo",
+		Input: "hello cluster",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.NextJobForWorker(worker.NodeID); !ok {
+		t.Fatal("expected job to start")
+	}
+	state.heartbeatTimeout = time.Nanosecond
+	time.Sleep(time.Millisecond)
+
+	nodes := state.Nodes()
+	if len(nodes) != 1 || nodes[0].Status != cluster.NodeStatusOffline {
+		t.Fatalf("expected stale worker offline, got %#v", nodes)
+	}
+
+	failed, ok := state.Job(job.ID)
+	if !ok {
+		t.Fatal("expected job")
+	}
+	if failed.Status != jobs.StatusFailed {
+		t.Fatalf("expected failed job, got %s", failed.Status)
+	}
+	if failed.Error != "worker heartbeat timed out" {
+		t.Fatalf("unexpected error %q", failed.Error)
+	}
+}
+
 func TestClusterBenchmarkCreatesJobPerOnlineWorker(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
@@ -634,6 +712,12 @@ func TestClusterBenchmarkCreatesJobPerOnlineWorker(t *testing.T) {
 	jobsByID := map[string]jobs.Job{}
 	for _, job := range summary.Jobs {
 		jobsByID[job.AssignedTo] = job
+	}
+	if _, ok := state.NextJobForWorker(workerA.NodeID); !ok {
+		t.Fatal("expected worker A job to start")
+	}
+	if _, ok := state.NextJobForWorker(workerB.NodeID); !ok {
+		t.Fatal("expected worker B job to start")
 	}
 	state.CompleteJob(jobsByID[workerA.NodeID].ID, jobs.CompleteRequest{
 		NodeID: workerA.NodeID,

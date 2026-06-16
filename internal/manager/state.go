@@ -76,16 +76,36 @@ func (s *State) Heartbeat(hb membership.Heartbeat) bool {
 func (s *State) MarkWorkerOffline(nodeID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.markWorkerOfflineLocked(nodeID, time.Now().UTC(), "worker went offline")
+}
 
+func (s *State) markWorkerOfflineLocked(nodeID string, now time.Time, reason string) bool {
 	node, ok := s.nodes[nodeID]
 	if !ok {
 		return false
 	}
 
 	node.Status = cluster.NodeStatusOffline
-	node.UpdatedAt = time.Now().UTC()
+	node.UpdatedAt = now
 	s.nodes[nodeID] = node
+	s.failActiveJobsForWorkerLocked(nodeID, now, reason)
 	return true
+}
+
+func (s *State) failActiveJobsForWorkerLocked(nodeID string, now time.Time, reason string) {
+	for id, job := range s.jobs {
+		if job.AssignedTo != nodeID {
+			continue
+		}
+		if job.Status != jobs.StatusScheduled && job.Status != jobs.StatusRunning {
+			continue
+		}
+		job.Status = jobs.StatusFailed
+		job.Error = reason
+		job.FinishedAt = now
+		job.UpdatedAt = now
+		s.jobs[id] = job
+	}
 }
 
 func (s *State) PutBenchmark(result resources.BenchmarkResult) bool {
@@ -212,7 +232,7 @@ func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, b
 	defer s.mu.Unlock()
 
 	job, ok := s.jobs[jobID]
-	if !ok || job.AssignedTo != req.NodeID {
+	if !ok || job.AssignedTo != req.NodeID || job.Status != jobs.StatusRunning {
 		return jobs.Job{}, false
 	}
 
@@ -261,12 +281,19 @@ func (s *State) nodeBenchmarkScoreLocked(nodeID string) float64 {
 }
 
 func (s *State) Nodes() []cluster.Node {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	nodes := make([]cluster.Node, 0, len(s.nodes))
+	now := time.Now().UTC()
 	for _, node := range s.nodes {
-		node = s.deriveNodeStatus(node, time.Now().UTC())
+		previousStatus := node.Status
+		node = s.deriveNodeStatus(node, now)
+		if previousStatus == cluster.NodeStatusOnline && node.Status == cluster.NodeStatusOffline {
+			node.UpdatedAt = now
+			s.nodes[node.ID] = node
+			s.failActiveJobsForWorkerLocked(node.ID, now, "worker heartbeat timed out")
+		}
 		nodes = append(nodes, node)
 	}
 

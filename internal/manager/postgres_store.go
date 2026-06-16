@@ -121,12 +121,25 @@ WHERE id = $1
 }
 
 func (s *PostgresStore) MarkWorkerOffline(nodeID string) bool {
+	now := time.Now().UTC()
 	tag, err := s.pool.Exec(context.Background(), `
 UPDATE nodes
 SET status = $2, updated_at = $3
 WHERE id = $1
-`, nodeID, string(cluster.NodeStatusOffline), time.Now().UTC())
-	return err == nil && tag.RowsAffected() > 0
+`, nodeID, string(cluster.NodeStatusOffline), now)
+	if err != nil || tag.RowsAffected() == 0 {
+		return false
+	}
+	s.failActiveJobsForWorker(nodeID, now, "worker went offline")
+	return true
+}
+
+func (s *PostgresStore) failActiveJobsForWorker(nodeID string, now time.Time, reason string) {
+	_, _ = s.pool.Exec(context.Background(), `
+UPDATE jobs
+SET status = $2, error = $3, finished_at = $4, updated_at = $4
+WHERE assigned_to = $1 AND status IN ($5, $6)
+`, nodeID, string(jobs.StatusFailed), reason, now, string(jobs.StatusScheduled), string(jobs.StatusRunning))
 }
 
 func (s *PostgresStore) PutBenchmark(result resources.BenchmarkResult) bool {
@@ -275,9 +288,9 @@ func (s *PostgresStore) CompleteJob(jobID string, req jobs.CompleteRequest) (job
 	row := s.pool.QueryRow(context.Background(), `
 UPDATE jobs
 SET status = $3, result = $4, error = $5, finished_at = $6, updated_at = $6
-WHERE id = $1 AND assigned_to = $2
+WHERE id = $1 AND assigned_to = $2 AND status = $7
 RETURNING id, type, status, requested_by, assigned_to, input, result, error, created_at, updated_at, started_at, finished_at
-`, jobID, req.NodeID, string(status), req.Result, req.Error, now)
+`, jobID, req.NodeID, string(status), req.Result, req.Error, now, string(jobs.StatusRunning))
 	return scanJob(row)
 }
 
@@ -293,6 +306,7 @@ ORDER BY joined_at ASC
 	defer rows.Close()
 
 	var nodes []cluster.Node
+	var staleWorkerIDs []string
 	now := time.Now().UTC()
 	for rows.Next() {
 		var node cluster.Node
@@ -304,7 +318,22 @@ ORDER BY joined_at ASC
 		node.Role = cluster.NodeRole(role)
 		node.Status = cluster.NodeStatus(status)
 		_ = json.Unmarshal(payload, &node.Resources)
-		nodes = append(nodes, s.deriveNodeStatus(node, now))
+		previousStatus := node.Status
+		node = s.deriveNodeStatus(node, now)
+		if previousStatus == cluster.NodeStatusOnline && node.Status == cluster.NodeStatusOffline {
+			node.UpdatedAt = now
+			staleWorkerIDs = append(staleWorkerIDs, node.ID)
+		}
+		nodes = append(nodes, node)
+	}
+	rows.Close()
+	for _, nodeID := range staleWorkerIDs {
+		_, _ = s.pool.Exec(context.Background(), `
+UPDATE nodes
+SET status = $2, updated_at = $3
+WHERE id = $1
+`, nodeID, string(cluster.NodeStatusOffline), now)
+		s.failActiveJobsForWorker(nodeID, now, "worker heartbeat timed out")
 	}
 	return nodes
 }
