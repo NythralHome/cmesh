@@ -283,12 +283,13 @@ class DesktopTrayController {
       Menu(
         items: [
           MenuItem(key: 'show', label: 'Show CMesh Worker'),
+          MenuItem(key: 'dashboard', label: 'Open Dashboard'),
+          MenuItem(key: 'check_updates', label: 'Check for Updates'),
           MenuItem.separator(),
           MenuItem(
             key: running ? 'stop' : 'start',
             label: running ? 'Stop Worker' : 'Start Worker',
           ),
-          MenuItem(key: 'status', label: 'Refresh Status'),
           MenuItem.separator(),
           MenuItem(key: 'quit', label: 'Quit'),
         ],
@@ -1084,7 +1085,12 @@ class _WorkerHomePageState extends State<WorkerHomePage>
 
   @override
   void onTrayIconMouseDown() {
-    _showWindow();
+    _showTrayMenu();
+  }
+
+  @override
+  void onTrayIconRightMouseDown() {
+    _showTrayMenu();
   }
 
   @override
@@ -1093,14 +1099,17 @@ class _WorkerHomePageState extends State<WorkerHomePage>
       case 'show':
         _showWindow();
         break;
+      case 'dashboard':
+        _openDashboardFromTray();
+        break;
+      case 'check_updates':
+        _checkForUpdates();
+        break;
       case 'start':
         _startWorker();
         break;
       case 'stop':
         _serviceAction('stop');
-        break;
-      case 'status':
-        _refreshStatus();
         break;
       case 'quit':
         _quitApp();
@@ -1119,6 +1128,15 @@ class _WorkerHomePageState extends State<WorkerHomePage>
     await windowManager.focus();
   }
 
+  Future<void> _showTrayMenu() async {
+    if (!DesktopTrayController._isDesktop) return;
+    try {
+      await trayManager.popUpContextMenu(bringAppToFront: false);
+    } on Object {
+      await _showWindow();
+    }
+  }
+
   Future<void> _hideWindow() async {
     if (!DesktopTrayController._isDesktop) return;
     await windowManager.hide();
@@ -1132,6 +1150,39 @@ class _WorkerHomePageState extends State<WorkerHomePage>
       return;
     }
     exit(0);
+  }
+
+  Future<void> _openDashboardFromTray() async {
+    final managerURL = _effectiveManagerUrl();
+    if (managerURL.isEmpty) {
+      await _showWindow();
+      _setLocalFailure(
+        'Open dashboard failed',
+        'Manager URL is empty. Save a connection first.',
+      );
+      return;
+    }
+    await _openExternalUrl(managerURL, successStatus: 'Dashboard opened');
+  }
+
+  Future<void> _checkForUpdates() async {
+    final result = await _run('Checking for updates', () async {
+      final latest = await _fetchLatestWorkerVersion();
+      if (latest == null || latest.trim().isEmpty) {
+        return const WorkerCommandResult(
+          exitCode: 1,
+          output: 'Could not read the latest CMesh release.',
+        );
+      }
+      final current = cmeshWorkerVersion.trim();
+      final sameVersion = current == latest || 'v$current' == latest;
+      final message = sameVersion
+          ? 'CMesh Worker is up to date: $current'
+          : 'Update available: $latest\nCurrent version: $current\nOpen the dashboard or GitHub releases to download the latest installer.';
+      return WorkerCommandResult(exitCode: 0, output: message);
+    });
+    if (!mounted || !result.ok) return;
+    await _showWindow();
   }
 
   List<TextEditingController> get _configControllers => [
@@ -1304,35 +1355,79 @@ class _WorkerHomePageState extends State<WorkerHomePage>
       return;
     }
     final inviteURL = '${managerURL.replaceAll(RegExp(r'/+$'), '')}/invite';
+    await _openExternalUrl(inviteURL, successStatus: 'Invite page opened');
+  }
+
+  Future<void> _openExternalUrl(
+    String url, {
+    required String successStatus,
+  }) async {
     String executable;
     List<String> args;
     if (Platform.isMacOS) {
       executable = 'open';
-      args = [inviteURL];
+      args = [url];
     } else if (Platform.isWindows) {
       executable = 'cmd';
-      args = ['/c', 'start', '', inviteURL];
+      args = ['/c', 'start', '', url];
     } else {
       executable = 'xdg-open';
-      args = [inviteURL];
+      args = [url];
     }
     try {
       final result = await Process.run(executable, args);
       if (!mounted) return;
       if (result.exitCode != 0) {
         _setLocalFailure(
-          'Open invite failed',
+          '$successStatus failed',
           '${result.stderr}${result.stdout}'.trim(),
         );
         return;
       }
       setState(() {
-        _status = 'Invite page opened';
-        _output = 'Opened $inviteURL';
+        _status = successStatus;
+        _output = 'Opened $url';
       });
     } on Object catch (error) {
       if (!mounted) return;
-      _setLocalFailure('Open invite failed', '$error');
+      _setLocalFailure('$successStatus failed', '$error');
+    }
+  }
+
+  String _effectiveManagerUrl() {
+    final current = _managerUrl.text.trim();
+    if (current.isNotEmpty) return current.replaceAll(RegExp(r'/+$'), '');
+    final saved = _savedConfig?.managerUrl.trim() ?? '';
+    if (saved.isNotEmpty) return saved.replaceAll(RegExp(r'/+$'), '');
+    final runtime = _runtimeStatus?.managerUrl.trim() ?? '';
+    return runtime.replaceAll(RegExp(r'/+$'), '');
+  }
+
+  Future<String?> _fetchLatestWorkerVersion() async {
+    final client = HttpClient();
+    try {
+      final request = await client.getUrl(
+        Uri.parse(
+          'https://api.github.com/repos/NythralHome/cmesh/releases/latest',
+        ),
+      );
+      request.headers.set(
+        HttpHeaders.acceptHeader,
+        'application/vnd.github+json',
+      );
+      request.headers.set(HttpHeaders.userAgentHeader, 'CMesh Worker');
+      final response = await request.close();
+      final body = await utf8.decodeStream(response);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        return decoded['tag_name'] as String?;
+      }
+      return null;
+    } finally {
+      client.close(force: true);
     }
   }
 
