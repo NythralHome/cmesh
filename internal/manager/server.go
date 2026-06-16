@@ -1188,6 +1188,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 	"gb": func(bytes uint64) float64 {
 		return float64(bytes) / 1024 / 1024 / 1024
 	},
+	"mb": func(bytes uint64) float64 {
+		return float64(bytes) / 1024 / 1024
+	},
 	"shortID": func(value string) string {
 		if len(value) <= 12 {
 			return value
@@ -2087,8 +2090,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
   <main>
     <nav class="console-tabs" aria-label="Dashboard sections">
       <button class="tab-button active" type="button" data-tab-target="overview"><svg class="icon"><use href="#icon-workers"></use></svg>Overview</button>
+      <button class="tab-button" type="button" data-tab-target="workers"><svg class="icon"><use href="#icon-workers"></use></svg>Workers</button>
       <button class="tab-button" type="button" data-tab-target="chat"><svg class="icon"><use href="#icon-send"></use></svg>Chat</button>
       <button class="tab-button" type="button" data-tab-target="models"><svg class="icon"><use href="#icon-brain"></use></svg>Models</button>
+      <button class="tab-button" type="button" data-tab-target="model-activity"><svg class="icon"><use href="#icon-terminal"></use></svg>Model Activity</button>
       <button class="tab-button" type="button" data-tab-target="jobs"><svg class="icon"><use href="#icon-terminal"></use></svg>Jobs</button>
       <button class="tab-button" type="button" data-tab-target="benchmarks"><svg class="icon"><use href="#icon-chart"></use></svg>Benchmarks</button>
     </nav>
@@ -2104,7 +2109,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <p class="sub">Invite machines, watch their usable capacity, then run compute jobs against the scheduler. This is the last cluster validation surface before adding model inference jobs.</p>
           <div class="actions">
             <a class="button primary" href="{{.InviteURL}}"><svg class="icon"><use href="#icon-plus"></use></svg>Invite worker</a>
-            <button class="button" type="button" data-tab-target="jobs"><svg class="icon"><use href="#icon-terminal"></use></svg>Open jobs</button>
+            <button class="button" type="button" data-tab-shortcut="jobs"><svg class="icon"><use href="#icon-terminal"></use></svg>Open jobs</button>
           </div>
           <div class="first-test-grid">
             <div class="first-test-stat"><span>Workers</span><strong>{{.Summary.WorkersOnline}} / {{.Summary.WorkersTotal}}</strong></div>
@@ -2149,9 +2154,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <div class="metric"><span>Allowed storage</span><strong>{{printf "%.1f" (gb .Summary.Resources.Storage.AllowedBytes)}} GB</strong></div>
       <div class="metric"><span>Benchmark score</span><strong>{{printf "%.0f" .Summary.BenchmarkScore}}</strong></div>
     </div>
+    </div>
+    <div class="tab-panel" id="tab-workers" hidden>
     <section>
       <div class="section-head">
-        <h2>Online Workers</h2>
+        <h2>Worker Inventory</h2>
         <code>{{.OfflineWorkerCount}} offline hidden</code>
       </div>
       {{if .OnlineNodes}}
@@ -2164,6 +2171,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <th>CPU</th>
               <th>Memory</th>
               <th>Storage</th>
+              <th>Installed models</th>
               <th>GPU</th>
               <th>Job slots</th>
               <th>Benchmark</th>
@@ -2177,7 +2185,14 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <td><span class="pill">{{.Status}}</span></td>
               <td>{{.Resources.CPU.CoresAllowed}} / {{.Resources.CPU.CoresTotal}} cores</td>
               <td>{{printf "%.1f" (gb .Resources.Memory.AllowedBytes)}} / {{printf "%.1f" (gb .Resources.Memory.TotalBytes)}} GB</td>
-              <td>{{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed</td>
+              <td>{{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed<br><span class="sub">{{printf "%.1f" (gb .Resources.Storage.FreeBytes)}} GB free</span></td>
+              <td>
+                {{range .Resources.Models}}
+                  <div><strong>{{.Name}}</strong><br><span class="sub">{{printf "%.0f" (mb .Bytes)}} MB</span></div>
+                {{else}}
+                  <span class="sub">No installed models reported</span>
+                {{end}}
+              </td>
               <td>{{range .Resources.GPU}}<div>{{.Name}}</div>{{else}}0{{end}}</td>
               <td>{{index $.WorkerActiveJobs .ID}} / {{workerSlots .}} active</td>
               <td>{{with index $.Benchmarks .ID}}{{printf "%.0f" .TotalScore}}{{else}}Not run{{end}}</td>
@@ -2254,50 +2269,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     <div class="tab-panel" id="tab-models" hidden>
     <section id="models">
       <div class="section-head">
-        <h2>Models Console</h2>
-        <code>{{len .Models}} catalog entries / {{modelJobCount .Jobs}} model jobs</code>
+        <h2>Model Catalog</h2>
+        <code>{{len .Models}} catalog entries</code>
       </div>
-      <div class="models-shell">
-        <div class="model-workspace">
-          <div class="model-block">
-            <div class="model-block-title">
-              <svg class="icon"><use href="#icon-terminal"></use></svg>
-              <div>
-                <h3>Model activity</h3>
-                <p class="sub">Recent install, delete, and generate jobs.</p>
-              </div>
-            </div>
-            {{if gt (modelJobCount .Jobs) 0}}
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Job</th>
-                    <th>Status</th>
-                    <th>Workload</th>
-                    <th>Worker</th>
-                    <th>Result</th>
-                  </tr>
-                </thead>
-                <tbody>
-                {{range .Jobs}}{{if isModelJob .}}
-                  <tr>
-                    <td><code>{{shortID .ID}}</code><br><span class="sub">{{.Type}}</span></td>
-                    <td><span class="{{jobPillClass .Status}}">{{.Status}}</span></td>
-                    <td><code>{{clip (jobWorkload .) 90}}</code></td>
-                    <td><code>{{jobWorkerLabel $.NodesByID .}}</code></td>
-                    <td class="mono-output"><code>{{clip (jobDetail .) 120}}</code></td>
-                  </tr>
-                {{end}}{{end}}
-                </tbody>
-              </table>
-            </div>
-            {{else}}
-            <div class="empty">No model activity yet.</div>
-            {{end}}
-          </div>
-        </div>
-        <div class="model-catalog">
+      <div class="model-catalog">
           {{range .Models}}
           <article class="model-card" data-model-id="{{.Model.ID}}">
             <div class="model-title">
@@ -2345,8 +2320,43 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             </div>
           </article>
           {{end}}
-        </div>
       </div>
+    </section>
+    </div>
+    <div class="tab-panel" id="tab-model-activity" hidden>
+    <section>
+      <div class="section-head">
+        <h2>Model Activity</h2>
+        <code>{{modelJobCount .Jobs}} model jobs</code>
+      </div>
+      {{if gt (modelJobCount .Jobs) 0}}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>Status</th>
+              <th>Workload</th>
+              <th>Worker</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody>
+          {{range .Jobs}}{{if isModelJob .}}
+            <tr>
+              <td><code>{{shortID .ID}}</code><br><span class="sub">{{.Type}}</span></td>
+              <td><span class="{{jobPillClass .Status}}">{{.Status}}</span></td>
+              <td><code>{{clip (jobWorkload .) 90}}</code></td>
+              <td><code>{{jobWorkerLabel $.NodesByID .}}</code></td>
+              <td class="mono-output"><code>{{clip (jobDetail .) 160}}</code></td>
+            </tr>
+          {{end}}{{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="empty">No model activity yet.</div>
+      {{end}}
     </section>
     </div>
     <div class="tab-panel" id="tab-benchmarks" hidden>
@@ -2536,7 +2546,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       document.querySelectorAll(".tab-panel").forEach(function(section) {
         section.hidden = section.id !== "tab-" + target;
       });
-      document.querySelectorAll("[data-tab-target]").forEach(function(button) {
+      document.querySelectorAll(".tab-button[data-tab-target]").forEach(function(button) {
         button.classList.toggle("active", button.dataset.tabTarget === target);
       });
       if (updateHash) {
@@ -2546,6 +2556,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     document.querySelectorAll("[data-tab-target]").forEach(function(button) {
       button.addEventListener("click", function() {
         activateTab(button.dataset.tabTarget, true);
+      });
+    });
+    document.querySelectorAll("[data-tab-shortcut]").forEach(function(button) {
+      button.addEventListener("click", function() {
+        activateTab(button.dataset.tabShortcut, true);
       });
     });
     activateTab((window.location.hash || "").replace("#", ""), false);

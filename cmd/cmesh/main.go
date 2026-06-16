@@ -819,7 +819,18 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapsh
 	} else {
 		fmt.Printf("job %s completed\n", resp.Job.ID)
 	}
+	if isModelJobType(resp.Job.Type) {
+		refreshed := snapshot
+		refreshed.Models = resources.DiscoverInstalledModels(cacheDir)
+		if err := sendHeartbeat(managerURL, nodeID, refreshed); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to refresh worker model inventory: %v\n", err)
+		}
+	}
 	return true, nil
+}
+
+func isModelJobType(jobType string) bool {
+	return jobType == models.JobInstall || jobType == models.JobDelete || jobType == models.JobGenerate
 }
 
 func executeJob(job jobs.Job) (string, error) {

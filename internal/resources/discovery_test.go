@@ -1,6 +1,8 @@
 package resources
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -28,5 +30,28 @@ func TestDiscoverLocalAppliesLimits(t *testing.T) {
 	}
 	if snapshot.Storage.AllowedBytes != 2048 {
 		t.Fatalf("expected disk limit to be applied")
+	}
+}
+
+func TestDiscoverInstalledModelsScansCache(t *testing.T) {
+	cacheDir := t.TempDir()
+	modelDir := filepath.Join(cacheDir, "models", "qwen2.5-0.5b-instruct-q4-k-m")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	modelPath := filepath.Join(modelDir, "qwen2.5-0.5b-instruct-q4_k_m.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	installed := DiscoverInstalledModels(cacheDir)
+	if len(installed) != 1 {
+		t.Fatalf("expected one installed model, got %#v", installed)
+	}
+	if installed[0].ID != "qwen2.5-0.5b-instruct-q4-k-m" {
+		t.Fatalf("unexpected model id %q", installed[0].ID)
+	}
+	if installed[0].Bytes != 5 {
+		t.Fatalf("unexpected model size %d", installed[0].Bytes)
 	}
 }

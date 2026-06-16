@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/config"
+	"github.com/cmesh/cmesh/internal/models"
 )
 
 type DiscoveryOptions struct {
@@ -42,7 +44,29 @@ func DiscoverLocal(options DiscoveryOptions) cluster.ResourceSnapshot {
 			FreeBytes:    freeStorage,
 		},
 		JobSlots: allowedInt(options.Limits.JobSlots, 1),
+		Models:   DiscoverInstalledModels(options.CacheDir),
 	}
+}
+
+func DiscoverInstalledModels(cacheDir string) []cluster.ModelResource {
+	if strings.TrimSpace(cacheDir) == "" {
+		return nil
+	}
+	out := make([]cluster.ModelResource, 0)
+	for _, model := range models.Catalog() {
+		path := filepath.Join(cacheDir, "models", model.ID, model.File)
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() || info.Size() <= 0 {
+			continue
+		}
+		out = append(out, cluster.ModelResource{
+			ID:    model.ID,
+			Name:  model.Name,
+			Path:  path,
+			Bytes: uint64(info.Size()),
+		})
+	}
+	return out
 }
 
 func discoverTotalMemory() uint64 {

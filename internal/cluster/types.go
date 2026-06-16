@@ -35,6 +35,14 @@ type ResourceSnapshot struct {
 	GPU      []GPUResources   `json:"gpu"`
 	Storage  StorageResources `json:"storage"`
 	JobSlots int              `json:"job_slots,omitempty"`
+	Models   []ModelResource  `json:"models,omitempty"`
+}
+
+type ModelResource struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	Bytes uint64 `json:"bytes"`
 }
 
 type CPUResources struct {

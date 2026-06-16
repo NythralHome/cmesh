@@ -45,6 +45,16 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 		}
 		summary.CapableNodes = capableModelNodes(summary.Capabilities)
 		installed := make(map[string]bool)
+		for _, node := range nodes {
+			if node.Role != cluster.NodeRoleWorker || node.Status != cluster.NodeStatusOnline {
+				continue
+			}
+			for _, installedModel := range node.Resources.Models {
+				if installedModel.ID == model.ID {
+					installed[node.ID] = true
+				}
+			}
+		}
 		var lastUpdated time.Time
 		for _, job := range jobsList {
 			modelID, ok := jobModelID(job)
@@ -63,16 +73,10 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 					summary.Status = "installing"
 					summary.ActiveJobID = job.ID
 				}
-				if job.Status == jobs.StatusSucceeded && job.AssignedTo != "" {
-					installed[job.AssignedTo] = true
-				}
 			case models.JobDelete:
 				if job.Status == jobs.StatusScheduled || job.Status == jobs.StatusRunning || job.Status == jobs.StatusQueued {
 					summary.Status = "deleting"
 					summary.ActiveJobID = job.ID
-				}
-				if job.Status == jobs.StatusSucceeded && job.AssignedTo != "" {
-					delete(installed, job.AssignedTo)
 				}
 			}
 		}

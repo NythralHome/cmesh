@@ -1486,6 +1486,13 @@ class _WorkerHomePageState extends State<WorkerHomePage>
 
   bool get _showWelcome => !_connectionReady && !_isWorkerRunning;
 
+  String get _headerStatus {
+    if (_busy) return _status;
+    if (_isWorkerRunning) return 'Worker running';
+    if (!_connectionSaved) return 'Connection not saved';
+    return 'Worker stopped';
+  }
+
   bool _validateConfigOrExplain(String status) {
     _welcomeFormKey.currentState?.validate();
     _connectionFormKey.currentState?.validate();
@@ -1660,7 +1667,7 @@ class _WorkerHomePageState extends State<WorkerHomePage>
             child: Column(
               children: [
                 _Header(
-                  status: _status,
+                  status: _headerStatus,
                   busy: _busy,
                   version: cmeshWorkerVersion,
                 ),
