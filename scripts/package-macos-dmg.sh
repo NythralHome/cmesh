@@ -26,6 +26,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
+retry() {
+  local attempts="$1"
+  local delay_seconds="$2"
+  shift 2
+
+  local attempt=1
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+
+    if (( attempt >= attempts )); then
+      return 1
+    fi
+
+    sleep "$delay_seconds"
+    attempt=$((attempt + 1))
+  done
+}
+
 staging="$tmp_dir/staging"
 mkdir -p "$staging"
 ditto "$app_bundle" "$staging/CMesh Worker.app"
@@ -126,7 +146,9 @@ mkdir -p "$mount_dir"
 hdiutil attach "$rw_dmg" -mountpoint "$mount_dir" -nobrowse -readwrite >/dev/null
 
 finish_mount() {
-  hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+  if [[ -d "$mount_dir" ]]; then
+    retry 5 2 hdiutil detach "$mount_dir" >/dev/null 2>&1 || hdiutil detach "$mount_dir" -force >/dev/null 2>&1 || true
+  fi
 }
 trap 'finish_mount; cleanup' EXIT
 
@@ -162,7 +184,7 @@ sync
 finish_mount
 trap cleanup EXIT
 
-hdiutil convert "$rw_dmg" \
+retry 5 3 hdiutil convert "$rw_dmg" \
   -format UDZO \
   -imagekey zlib-level=9 \
   -ov \
