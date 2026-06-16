@@ -835,6 +835,62 @@ func hasActiveJobs(in []jobs.Job) bool {
 	return false
 }
 
+func jobDuration(job jobs.Job) string {
+	if job.StartedAt.IsZero() {
+		return "-"
+	}
+	end := job.FinishedAt
+	if end.IsZero() {
+		end = job.UpdatedAt
+	}
+	if end.IsZero() || end.Before(job.StartedAt) {
+		return "-"
+	}
+	return formatDuration(end.Sub(job.StartedAt))
+}
+
+func jobTimeline(job jobs.Job) string {
+	parts := []string{"created " + formatClock(job.CreatedAt)}
+	if !job.StartedAt.IsZero() {
+		parts = append(parts, "started "+formatClock(job.StartedAt))
+	}
+	if !job.FinishedAt.IsZero() {
+		parts = append(parts, "finished "+formatClock(job.FinishedAt))
+	}
+	return strings.Join(parts, " / ")
+}
+
+func jobWorkload(job jobs.Job) string {
+	size, iterations := computeJobInput(job.Input)
+	if size > 0 && iterations > 0 {
+		return fmt.Sprintf("%dx%d x %d", size, size, iterations)
+	}
+	if strings.TrimSpace(job.Input) == "" {
+		return "-"
+	}
+	return job.Input
+}
+
+func formatClock(value time.Time) string {
+	if value.IsZero() {
+		return "-"
+	}
+	return value.Format("15:04:05 MST")
+}
+
+func formatDuration(value time.Duration) string {
+	if value < 0 {
+		return "-"
+	}
+	if value < time.Second {
+		return fmt.Sprintf("%d ms", value.Milliseconds())
+	}
+	if value < time.Minute {
+		return fmt.Sprintf("%.1f s", value.Seconds())
+	}
+	return value.Round(time.Second).String()
+}
+
 var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
 	"gb": func(bytes uint64) float64 {
 		return float64(bytes) / 1024 / 1024 / 1024
@@ -942,6 +998,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		return percent
 	},
 	"hasActiveJobs": hasActiveJobs,
+	"jobDuration":   jobDuration,
+	"jobTimeline":   jobTimeline,
+	"jobWorkload":   jobWorkload,
 	"jobMetric": func(job jobs.Job, key string) string {
 		if job.Result == "" {
 			return "-"
@@ -1351,6 +1410,19 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .result-grid strong {
       font-size: 13px;
     }
+    .timeline {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      max-width: 260px;
+    }
+    .job-main {
+      display: grid;
+      gap: 4px;
+    }
+    .job-main strong {
+      font-size: 13px;
+    }
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 13px;
@@ -1604,9 +1676,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <tr>
               <th>Job</th>
               <th>Status</th>
-              <th>Type</th>
+              <th>Workload</th>
               <th>Worker</th>
-              <th>Updated</th>
+              <th>Timeline</th>
               <th>Result</th>
               <th>Detail</th>
             </tr>
@@ -1614,14 +1686,19 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <tbody>
           {{range .Jobs}}
             <tr>
-              <td><code>{{shortID .ID}}</code></td>
+              <td>
+                <div class="job-main">
+                  <code>{{shortID .ID}}</code>
+                  <strong>{{.Type}}</strong>
+                </div>
+              </td>
               <td><span class="{{jobPillClass .Status}}">{{.Status}}</span></td>
-              <td><code>{{.Type}}</code></td>
+              <td><code>{{clip (jobWorkload .) 64}}</code></td>
               <td><code>{{jobWorkerLabel $.NodesByID .}}</code>{{if .AssignedTo}}<br><span class="sub">{{shortID .AssignedTo}}</span>{{end}}</td>
-              <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
+              <td><div class="timeline">{{jobTimeline .}}<br>duration {{jobDuration .}}</div></td>
               <td>
                 <div class="result-grid">
-                  <div><span>Duration</span><strong>{{jobMetric . "duration_ms"}} ms</strong></div>
+                  <div><span>Runtime ms</span><strong>{{jobMetric . "duration_ms"}}</strong></div>
                   <div><span>GFLOPS</span><strong>{{jobMetric . "gflops"}}</strong></div>
                   <div><span>Runtime</span><strong>{{jobMetric . "worker_runtime"}}</strong></div>
                 </div>

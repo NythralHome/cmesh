@@ -290,6 +290,12 @@ func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
 	if !strings.Contains(body, "Completed on test/runtime") {
 		t.Fatalf("expected human job detail in dashboard")
 	}
+	if !strings.Contains(body, "32x32 x 1") {
+		t.Fatalf("expected parsed workload in dashboard")
+	}
+	if !strings.Contains(body, "duration") || !strings.Contains(body, "created") || !strings.Contains(body, "finished") {
+		t.Fatalf("expected job timeline and duration in dashboard")
+	}
 }
 
 func TestReadAPIRequiresOperatorTokenWhenConfigured(t *testing.T) {

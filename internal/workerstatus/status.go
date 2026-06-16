@@ -59,11 +59,9 @@ func Write(cacheDir string, status JobStatus) error {
 }
 
 func MarkIdle(cacheDir string, nodeID string) error {
-	status, ok := Read(cacheDir)
-	if !ok {
-		status = JobStatus{}
+	status := JobStatus{
+		State:  "idle",
+		NodeID: nodeID,
 	}
-	status.State = "idle"
-	status.NodeID = nodeID
 	return Write(cacheDir, status)
 }
