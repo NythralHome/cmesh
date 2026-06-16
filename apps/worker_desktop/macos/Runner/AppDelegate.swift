@@ -8,6 +8,7 @@ class AppDelegate: FlutterAppDelegate {
 
   override func applicationDidFinishLaunching(_ notification: Notification) {
     super.applicationDidFinishLaunching(notification)
+    NSApp.setActivationPolicy(.accessory)
     configureStatusItem()
   }
 
@@ -47,7 +48,11 @@ class AppDelegate: FlutterAppDelegate {
   @objc private func showMainWindow() {
     NSApp.activate(ignoringOtherApps: true)
     if let window = NSApp.windows.first {
+      if window.isMiniaturized {
+        window.deminiaturize(nil)
+      }
       window.makeKeyAndOrderFront(nil)
+      window.orderFrontRegardless()
     }
   }
 }
