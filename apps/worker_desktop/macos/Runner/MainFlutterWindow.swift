@@ -13,7 +13,6 @@ class MainFlutterWindow: NSWindow {
     self.isOpaque = true
 
     InviteURLBridge.configure(controller: flutterViewController)
-    MacStatusItemBridge.configure(controller: flutterViewController)
     RegisterGeneratedPlugins(registry: flutterViewController)
 
     super.awakeFromNib()

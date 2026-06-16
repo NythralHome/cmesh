@@ -30,6 +30,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  tray_manager: ^0.5.3
+  window_manager: ^0.5.1
 
 dev_dependencies:
   flutter_test:
@@ -52,6 +54,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+  assets:
+    - assets/tray_icon.png
+    - assets/tray_icon.ico
 
   # To add assets to your application, add an assets section, like this:
   # assets:

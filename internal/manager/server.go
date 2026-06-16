@@ -1062,7 +1062,7 @@ func generatableModelCount(in []ModelSummary) int {
 
 func modelFailureHint(summary ModelSummary) string {
 	if strings.Contains(summary.LastError, "unsupported job type") {
-		return "Worker app is older than this manager. Quit CMesh Worker, install the latest worker app, then reconnect."
+		return ""
 	}
 	return ""
 }

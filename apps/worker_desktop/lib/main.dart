@@ -6,13 +6,20 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:tray_manager/tray_manager.dart';
+import 'package:window_manager/window_manager.dart';
 
 const cmeshWorkerVersion = String.fromEnvironment(
   'CMESH_WORKER_VERSION',
   defaultValue: 'dev',
 );
 
-void main(List<String> args) {
+Future<void> main(List<String> args) async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await windowManager.ensureInitialized();
+  await windowManager.setPreventClose(true);
+  await windowManager.setSkipTaskbar(Platform.isMacOS);
+
   runApp(CMeshWorkerApp(initialInvite: InviteConfig.fromArgs(args)));
 }
 
@@ -239,31 +246,58 @@ class PlatformInviteBridge {
   }
 }
 
-class MacStatusItemBridge {
-  static const MethodChannel _channel = MethodChannel(
-    'cmesh.worker_desktop/status_item',
-  );
+class DesktopTrayController {
+  const DesktopTrayController();
 
   static Future<void> configure() async {
-    if (!Platform.isMacOS) return;
+    if (!_isDesktop) return;
     try {
-      await _channel.invokeMethod<void>('configure');
-    } on MissingPluginException {
-      // Older builds do not expose the native status item channel.
+      await trayManager.setIcon(
+        Platform.isWindows ? 'assets/tray_icon.ico' : 'assets/tray_icon.png',
+        isTemplate: Platform.isMacOS,
+        iconSize: 18,
+      );
+      await trayManager.setTitle('CM');
+      await trayManager.setToolTip('CMesh Worker: Not running');
+      await _setMenu(running: false);
+    } on Object {
+      // Tray support is best-effort on Linux desktop environments.
     }
   }
 
   static Future<void> update(WorkerRuntimeStatus? status) async {
-    if (!Platform.isMacOS) return;
+    if (!_isDesktop) return;
+    final running = status?.running ?? false;
+    final label = status?.label ?? 'Not running';
     try {
-      await _channel.invokeMethod<void>('update', {
-        'running': status?.running ?? false,
-        'label': status?.label ?? 'Not running',
-      });
-    } on MissingPluginException {
-      // Best-effort menu bar status.
+      await trayManager.setTitle(running ? 'CM On' : 'CM');
+      await trayManager.setToolTip('CMesh Worker: $label');
+      await _setMenu(running: running);
+    } on Object {
+      // Tray support is best-effort on Linux desktop environments.
     }
   }
+
+  static Future<void> _setMenu({required bool running}) {
+    return trayManager.setContextMenu(
+      Menu(
+        items: [
+          MenuItem(key: 'show', label: 'Show CMesh Worker'),
+          MenuItem.separator(),
+          MenuItem(
+            key: running ? 'stop' : 'start',
+            label: running ? 'Stop Worker' : 'Start Worker',
+          ),
+          MenuItem(key: 'status', label: 'Refresh Status'),
+          MenuItem.separator(),
+          MenuItem(key: 'quit', label: 'Quit'),
+        ],
+      ),
+    );
+  }
+
+  static bool get _isDesktop =>
+      Platform.isMacOS || Platform.isWindows || Platform.isLinux;
 }
 
 class WorkerProtocolRegistrar {
@@ -450,7 +484,8 @@ MimeType=x-scheme-handler/cmesh;
 
 class WorkerConfigStore {
   Future<File> _file() async {
-    final home = Platform.environment['HOME'] ??
+    final home =
+        Platform.environment['HOME'] ??
         Platform.environment['USERPROFILE'] ??
         Directory.current.path;
     final dir = Directory('$home/.cmesh');
@@ -514,7 +549,8 @@ class WorkerControlTokenStore {
   }
 
   static File _file() {
-    final home = Platform.environment['HOME'] ??
+    final home =
+        Platform.environment['HOME'] ??
         Platform.environment['USERPROFILE'] ??
         Directory.current.path;
     return File('$home/.cmesh/worker-control-token');
@@ -842,7 +878,8 @@ class WorkerController {
   }
 
   Future<String?> _findControlBinary() async {
-    final configured = Platform.environment['CMESH_WORKER_CONTROL_BIN'] ??
+    final configured =
+        Platform.environment['CMESH_WORKER_CONTROL_BIN'] ??
         Platform.environment['CMESH_BIN'];
     if (configured != null && configured.trim().isNotEmpty) {
       final file = File(configured.trim());
@@ -931,7 +968,8 @@ class WorkerHomePage extends StatefulWidget {
   State<WorkerHomePage> createState() => _WorkerHomePageState();
 }
 
-class _WorkerHomePageState extends State<WorkerHomePage> {
+class _WorkerHomePageState extends State<WorkerHomePage>
+    with TrayListener, WindowListener {
   final _store = WorkerConfigStore();
   final _controller = WorkerController();
   final _protocolRegistrar = WorkerProtocolRegistrar();
@@ -964,8 +1002,10 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     for (final controller in _configControllers) {
       controller.addListener(_formStateChanged);
     }
+    trayManager.addListener(this);
+    windowManager.addListener(this);
     PlatformInviteBridge.setInviteHandler(_applyInvite);
-    MacStatusItemBridge.configure();
+    DesktopTrayController.configure();
     _loadConfig();
     if (widget.registerProtocolHandler) {
       _registerProtocolHandler();
@@ -978,6 +1018,8 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   @override
   void dispose() {
     _statusPoller?.cancel();
+    trayManager.removeListener(this);
+    windowManager.removeListener(this);
     for (final controller in _configControllers) {
       controller.removeListener(_formStateChanged);
     }
@@ -991,15 +1033,67 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     super.dispose();
   }
 
+  @override
+  void onTrayIconMouseDown() {
+    _showWindow();
+  }
+
+  @override
+  void onTrayMenuItemClick(MenuItem menuItem) {
+    switch (menuItem.key) {
+      case 'show':
+        _showWindow();
+        break;
+      case 'start':
+        _startWorker();
+        break;
+      case 'stop':
+        _serviceAction('stop');
+        break;
+      case 'status':
+        _refreshStatus();
+        break;
+      case 'quit':
+        _quitApp();
+        break;
+    }
+  }
+
+  @override
+  void onWindowClose() {
+    _hideWindow();
+  }
+
+  Future<void> _showWindow() async {
+    if (!DesktopTrayController._isDesktop) return;
+    await windowManager.show();
+    await windowManager.focus();
+  }
+
+  Future<void> _hideWindow() async {
+    if (!DesktopTrayController._isDesktop) return;
+    await windowManager.hide();
+  }
+
+  Future<void> _quitApp() async {
+    if (DesktopTrayController._isDesktop) {
+      await windowManager.setPreventClose(false);
+      await trayManager.destroy();
+      await windowManager.destroy();
+      return;
+    }
+    exit(0);
+  }
+
   List<TextEditingController> get _configControllers => [
-        _managerUrl,
-        _joinToken,
-        _cpu,
-        _memoryGb,
-        _diskGb,
-        _jobSlots,
-        _vramGb,
-      ];
+    _managerUrl,
+    _joinToken,
+    _cpu,
+    _memoryGb,
+    _diskGb,
+    _jobSlots,
+    _vramGb,
+  ];
 
   void _formStateChanged() {
     if (mounted) {
@@ -1227,7 +1321,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     setState(() {
       _runtimeStatus = runtimeStatus;
     });
-    await MacStatusItemBridge.update(runtimeStatus);
+    await DesktopTrayController.update(runtimeStatus);
   }
 
   bool get _hasJoinToken => _joinToken.text.trim().isNotEmpty;
@@ -1310,7 +1404,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _busy = false;
       if (runtimeStatus != null) {
         _runtimeStatus = runtimeStatus;
-        MacStatusItemBridge.update(runtimeStatus);
+        DesktopTrayController.update(runtimeStatus);
       }
       _status = result.ok ? runtimeStatus?.label ?? '$label complete' : label;
       _output = result.output.isEmpty
@@ -1969,22 +2063,22 @@ class _WorkerActionBar extends StatelessWidget {
     final statusLabel = running
         ? 'Worker running'
         : !hasJoinToken
-            ? 'Invite required'
-            : !connectionReady
-                ? 'Connection not saved'
-                : canStart
-                    ? 'Ready to start'
-                    : 'Check settings';
+        ? 'Invite required'
+        : !connectionReady
+        ? 'Connection not saved'
+        : canStart
+        ? 'Ready to start'
+        : 'Check settings';
     final statusIcon = running
         ? Icons.check_circle
         : !hasJoinToken
-            ? Icons.warning_amber_rounded
-            : Icons.radio_button_checked;
+        ? Icons.warning_amber_rounded
+        : Icons.radio_button_checked;
     final statusColor = running
         ? const Color(0xFF157A4A)
         : !hasJoinToken
-            ? colors.error
-            : colors.primary;
+        ? colors.error
+        : colors.primary;
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 1180),
@@ -2139,10 +2233,10 @@ class _ActionGroup extends StatelessWidget {
             child: Text(
               label.toUpperCase(),
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: colors.onSurfaceVariant,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.5,
-                  ),
+                color: colors.onSurfaceVariant,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.5,
+              ),
             ),
           ),
           Wrap(spacing: 8, runSpacing: 8, children: [...children]),
@@ -2344,8 +2438,8 @@ class _RuntimeStatusCard extends StatelessWidget {
     final color = running
         ? const Color(0xFF1B7F4B)
         : current?.lastError?.isNotEmpty == true
-            ? colors.error
-            : colors.outline;
+        ? colors.error
+        : colors.outline;
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -2385,8 +2479,8 @@ class _RuntimeStatusCard extends StatelessWidget {
             value: current == null
                 ? '-'
                 : current.joinTokenConfigured
-                    ? 'Configured'
-                    : 'Not configured',
+                ? 'Configured'
+                : 'Not configured',
           ),
           _StatusLine(
             label: 'PID',
@@ -2548,8 +2642,8 @@ class _StatusLine extends StatelessWidget {
             child: Text(
               label,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
           ),
           Expanded(
