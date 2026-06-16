@@ -33,13 +33,10 @@ final class MacStatusItemBridge {
   private static func update(running: Bool, label: String) {
     DispatchQueue.main.async {
       guard let button = statusItem?.button else { return }
-      button.title = running ? "CMesh On" : "CMesh"
+      button.title = ""
       button.toolTip = "CMesh Worker: \(label)"
-      if #available(macOS 11.0, *) {
-        button.image = NSImage(
-          systemSymbolName: running ? "bolt.horizontal.circle.fill" : "point.3.connected.trianglepath.dotted",
-          accessibilityDescription: "CMesh")
-      }
+      button.image = AppDelegate.statusImage(running: running)
+      button.imagePosition = .imageOnly
     }
   }
 }
