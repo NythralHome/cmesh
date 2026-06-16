@@ -13,6 +13,8 @@ const (
 	StatusCanceled  Status = "canceled"
 )
 
+const DefaultMaxAttempts = 3
+
 type Job struct {
 	ID          string    `json:"id"`
 	Type        string    `json:"type"`
@@ -22,6 +24,9 @@ type Job struct {
 	Input       string    `json:"input"`
 	Result      string    `json:"result"`
 	Error       string    `json:"error"`
+	Attempts    int       `json:"attempts"`
+	MaxAttempts int       `json:"max_attempts"`
+	LastFailure string    `json:"last_failure"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	StartedAt   time.Time `json:"started_at,omitempty"`
@@ -33,6 +38,7 @@ type CreateRequest struct {
 	Input       string `json:"input"`
 	RequestedBy string `json:"requested_by"`
 	AssignedTo  string `json:"assigned_to,omitempty"`
+	MaxAttempts int    `json:"max_attempts,omitempty"`
 }
 
 type CompleteRequest struct {

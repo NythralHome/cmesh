@@ -100,12 +100,36 @@ func (s *State) failActiveJobsForWorkerLocked(nodeID string, now time.Time, reas
 		if job.Status != jobs.StatusScheduled && job.Status != jobs.StatusRunning {
 			continue
 		}
-		job.Status = jobs.StatusFailed
-		job.Error = reason
-		job.FinishedAt = now
-		job.UpdatedAt = now
+		job = s.rescheduleOrFailJobLocked(job, nodeID, now, reason)
 		s.jobs[id] = job
 	}
+}
+
+func (s *State) rescheduleOrFailJobLocked(job jobs.Job, failedNodeID string, now time.Time, reason string) jobs.Job {
+	job.MaxAttempts = normalizeMaxAttempts(job.MaxAttempts)
+	if job.Attempts <= 0 {
+		job.Attempts = 1
+	}
+	if job.Attempts < job.MaxAttempts {
+		if nextWorkerID := s.pickWorkerExcludingLocked(map[string]bool{failedNodeID: true}); nextWorkerID != "" {
+			job.Status = jobs.StatusScheduled
+			job.AssignedTo = nextWorkerID
+			job.Attempts++
+			job.LastFailure = reason
+			job.Error = ""
+			job.Result = ""
+			job.StartedAt = time.Time{}
+			job.FinishedAt = time.Time{}
+			job.UpdatedAt = now
+			return job
+		}
+	}
+	job.Status = jobs.StatusFailed
+	job.Error = reason
+	job.LastFailure = reason
+	job.FinishedAt = now
+	job.UpdatedAt = now
+	return job
 }
 
 func (s *State) PutBenchmark(result resources.BenchmarkResult) bool {
@@ -169,6 +193,7 @@ func (s *State) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 		Status:      jobs.StatusQueued,
 		RequestedBy: req.RequestedBy,
 		Input:       req.Input,
+		MaxAttempts: normalizeMaxAttempts(req.MaxAttempts),
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -179,9 +204,11 @@ func (s *State) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 	if req.AssignedTo != "" {
 		job.AssignedTo = req.AssignedTo
 		job.Status = jobs.StatusScheduled
+		job.Attempts = 1
 	} else if workerID := s.pickWorkerLocked(); workerID != "" {
 		job.AssignedTo = workerID
 		job.Status = jobs.StatusScheduled
+		job.Attempts = 1
 	}
 
 	s.jobs[job.ID] = job
@@ -252,11 +279,18 @@ func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, b
 }
 
 func (s *State) pickWorkerLocked() string {
+	return s.pickWorkerExcludingLocked(nil)
+}
+
+func (s *State) pickWorkerExcludingLocked(excluded map[string]bool) string {
 	now := time.Now().UTC()
 	var bestID string
 	var bestScore float64
 
 	for _, node := range s.nodes {
+		if excluded[node.ID] {
+			continue
+		}
 		node = s.deriveNodeStatus(node, now)
 		if node.Role != cluster.NodeRoleWorker || node.Status != cluster.NodeStatusOnline {
 			continue
@@ -359,6 +393,13 @@ func newJobID() string {
 		return "job-unknown"
 	}
 	return "job-" + hex.EncodeToString(buf[:])
+}
+
+func normalizeMaxAttempts(value int) int {
+	if value <= 0 {
+		return jobs.DefaultMaxAttempts
+	}
+	return value
 }
 
 func newClusterBenchmarkID() string {

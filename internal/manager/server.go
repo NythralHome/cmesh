@@ -1690,6 +1690,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 <div class="job-main">
                   <code>{{shortID .ID}}</code>
                   <strong>{{.Type}}</strong>
+                  <span class="sub">attempt {{.Attempts}} / {{.MaxAttempts}}</span>
                 </div>
               </td>
               <td><span class="{{jobPillClass .Status}}">{{.Status}}</span></td>
@@ -1705,6 +1706,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               </td>
               <td class="mono-output"><code>{{clip (jobDetail .) 180}}</code></td>
             </tr>
+            {{if .LastFailure}}
+            <tr>
+              <td></td>
+              <td colspan="6"><span class="sub">Last failure: {{.LastFailure}}</span></td>
+            </tr>
+            {{end}}
           {{end}}
           </tbody>
         </table>

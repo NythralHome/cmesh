@@ -633,6 +633,118 @@ func TestOfflineWorkerFailsActiveJob(t *testing.T) {
 	}
 }
 
+func TestOfflineWorkerReschedulesActiveJob(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	workerA := joinWorkerForTest(t, srv, "job-worker-a")
+	workerB := joinWorkerForTest(t, srv, "job-worker-b")
+
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:        "echo",
+		Input:       "hello cluster",
+		AssignedTo:  workerA.NodeID,
+		MaxAttempts: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Attempts != 1 || job.MaxAttempts != 3 {
+		t.Fatalf("expected first attempt metadata, got attempts=%d max=%d", job.Attempts, job.MaxAttempts)
+	}
+	if _, ok := state.NextJobForWorker(workerA.NodeID); !ok {
+		t.Fatal("expected worker A job to start")
+	}
+
+	if !state.MarkWorkerOffline(workerA.NodeID) {
+		t.Fatal("expected worker A to be marked offline")
+	}
+
+	rescheduled, ok := state.Job(job.ID)
+	if !ok {
+		t.Fatal("expected job")
+	}
+	if rescheduled.Status != jobs.StatusScheduled {
+		t.Fatalf("expected rescheduled job, got %s", rescheduled.Status)
+	}
+	if rescheduled.AssignedTo != workerB.NodeID {
+		t.Fatalf("expected job assigned to worker B, got %s", rescheduled.AssignedTo)
+	}
+	if rescheduled.Attempts != 2 {
+		t.Fatalf("expected second attempt, got %d", rescheduled.Attempts)
+	}
+	if rescheduled.LastFailure != "worker went offline" {
+		t.Fatalf("unexpected last failure %q", rescheduled.LastFailure)
+	}
+
+	if completed, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{
+		NodeID: workerA.NodeID,
+		Result: "late result",
+	}); ok || completed.Status == jobs.StatusSucceeded {
+		t.Fatalf("old worker should not complete rescheduled job: %#v", completed)
+	}
+
+	if _, ok := state.NextJobForWorker(workerB.NodeID); !ok {
+		t.Fatal("expected worker B job to start")
+	}
+	completed, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{
+		NodeID: workerB.NodeID,
+		Result: "hello cluster",
+	})
+	if !ok {
+		t.Fatal("expected worker B to complete job")
+	}
+	if completed.Status != jobs.StatusSucceeded || completed.Result != "hello cluster" {
+		t.Fatalf("unexpected completed job: %#v", completed)
+	}
+}
+
+func TestOfflineWorkerFailsJobAfterMaxAttempts(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	workerA := joinWorkerForTest(t, srv, "job-worker-a")
+	workerB := joinWorkerForTest(t, srv, "job-worker-b")
+
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:        "echo",
+		Input:       "hello cluster",
+		AssignedTo:  workerA.NodeID,
+		MaxAttempts: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.NextJobForWorker(workerA.NodeID); !ok {
+		t.Fatal("expected worker A job to start")
+	}
+	state.MarkWorkerOffline(workerA.NodeID)
+
+	rescheduled, ok := state.Job(job.ID)
+	if !ok {
+		t.Fatal("expected job")
+	}
+	if rescheduled.Status != jobs.StatusScheduled || rescheduled.AssignedTo != workerB.NodeID || rescheduled.Attempts != 2 {
+		t.Fatalf("expected second attempt on worker B, got %#v", rescheduled)
+	}
+	if _, ok := state.NextJobForWorker(workerB.NodeID); !ok {
+		t.Fatal("expected worker B job to start")
+	}
+	state.MarkWorkerOffline(workerB.NodeID)
+
+	failed, ok := state.Job(job.ID)
+	if !ok {
+		t.Fatal("expected job")
+	}
+	if failed.Status != jobs.StatusFailed {
+		t.Fatalf("expected failed after max attempts, got %s", failed.Status)
+	}
+	if failed.Attempts != 2 || failed.MaxAttempts != 2 {
+		t.Fatalf("unexpected attempts metadata: attempts=%d max=%d", failed.Attempts, failed.MaxAttempts)
+	}
+	if failed.Error != "worker went offline" {
+		t.Fatalf("unexpected error %q", failed.Error)
+	}
+}
+
 func TestStaleWorkerFailsActiveJob(t *testing.T) {
 	state := NewState()
 	worker := joinWorkerForTest(t, NewServer(":0", state), "stale-job-worker")
