@@ -58,6 +58,20 @@ if [[ -f "$app_icon" ]]; then
   cp "$app_icon" "$staging/.VolumeIcon.icns"
 fi
 
+mkdir -p "$(dirname "$output_dmg")"
+rm -f "$output_dmg"
+
+if [[ "${CMESH_PLAIN_DMG:-}" == "1" ]]; then
+  hdiutil create \
+    -volname "$volume_name" \
+    -srcfolder "$staging" \
+    -ov \
+    -format UDZO \
+    -fs HFS+ \
+    "$output_dmg" >/dev/null
+  exit 0
+fi
+
 background="$staging/.background/background.png"
 background_script="$tmp_dir/make-dmg-background.swift"
 cat > "$background_script" <<'SWIFT'
@@ -127,9 +141,6 @@ else {
 try png.write(to: URL(fileURLWithPath: outputPath))
 SWIFT
 swift "$background_script" "$background"
-
-mkdir -p "$(dirname "$output_dmg")"
-rm -f "$output_dmg"
 
 rw_dmg="$tmp_dir/worker-rw.dmg"
 hdiutil create \
