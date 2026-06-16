@@ -1013,9 +1013,9 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 		}
 		return "", err
 	}
-	cli, err := exec.LookPath("llama-cli")
+	cli, err := findLlamaCLI()
 	if err != nil {
-		return "", fmt.Errorf("model %s is installed, but llama-cli is not available on PATH", model.ID)
+		return "", fmt.Errorf("model %s is installed, but llama-cli is not available. Install llama.cpp or add llama-cli to PATH", model.ID)
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 || maxTokens > 2048 {
@@ -1040,6 +1040,30 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	}
 	body, err := json.Marshal(result)
 	return string(body), err
+}
+
+func findLlamaCLI() (string, error) {
+	if cli, err := exec.LookPath("llama-cli"); err == nil {
+		return cli, nil
+	}
+	candidates := []string{
+		"/opt/homebrew/bin/llama-cli",
+		"/usr/local/bin/llama-cli",
+		"/opt/local/bin/llama-cli",
+		"/usr/bin/llama-cli",
+	}
+	if runtime.GOOS == "windows" {
+		candidates = append([]string{
+			`C:\Program Files\llama.cpp\llama-cli.exe`,
+			`C:\Program Files\CMesh\llama-cli.exe`,
+		}, candidates...)
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", exec.ErrNotFound
 }
 
 func modelPath(cacheDir string, model models.Model) string {

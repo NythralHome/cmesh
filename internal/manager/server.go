@@ -1791,6 +1791,96 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       padding: 16px;
       background: #fbfcfd;
     }
+    .chat-shell {
+      min-height: calc(100vh - 230px);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 16px;
+      padding: 18px;
+      background: #fbfcfd;
+    }
+    .chat-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .chat-selectors {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) minmax(180px, .7fr);
+      gap: 10px;
+      min-width: min(560px, 100%);
+    }
+    .chat-thread {
+      display: grid;
+      align-content: end;
+      gap: 12px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: auto;
+    }
+    .chat-empty {
+      align-self: center;
+      justify-self: center;
+      max-width: 640px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .chat-empty h3 {
+      margin: 0 0 8px;
+      color: var(--text);
+      font-size: 30px;
+    }
+    .chat-message {
+      max-width: min(820px, 88%);
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      white-space: pre-wrap;
+      line-height: 1.45;
+    }
+    .chat-message.user {
+      justify-self: end;
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+    .chat-message.assistant {
+      justify-self: start;
+      background: #f8fafc;
+    }
+    .chat-message.system {
+      justify-self: center;
+      max-width: min(720px, 100%);
+      background: #fff7ed;
+      border-color: #fed7aa;
+      color: #9a3412;
+      font-weight: 600;
+    }
+    .chat-composer {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .chat-composer textarea {
+      min-height: 92px;
+      border-radius: 8px;
+    }
+    .chat-composer-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
     .model-workspace {
       display: grid;
       gap: 16px;
@@ -1962,6 +2052,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       .job-runner, .cluster-runner { grid-template-columns: 1fr; }
       .console-tabs { overflow-x: auto; }
       .models-shell { grid-template-columns: 1fr; }
+      .chat-topbar { display: grid; }
+      .chat-selectors { grid-template-columns: 1fr; }
+      .chat-message { max-width: 100%; }
       .model-specs { grid-template-columns: 1fr; }
       .growth-row { grid-template-columns: 1fr; }
       .worker-result { grid-template-columns: 1fr 1fr; }
@@ -1994,6 +2087,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
   <main>
     <nav class="console-tabs" aria-label="Dashboard sections">
       <button class="tab-button active" type="button" data-tab-target="overview"><svg class="icon"><use href="#icon-workers"></use></svg>Overview</button>
+      <button class="tab-button" type="button" data-tab-target="chat"><svg class="icon"><use href="#icon-send"></use></svg>Chat</button>
       <button class="tab-button" type="button" data-tab-target="models"><svg class="icon"><use href="#icon-brain"></use></svg>Models</button>
       <button class="tab-button" type="button" data-tab-target="jobs"><svg class="icon"><use href="#icon-terminal"></use></svg>Jobs</button>
       <button class="tab-button" type="button" data-tab-target="benchmarks"><svg class="icon"><use href="#icon-chart"></use></svg>Benchmarks</button>
@@ -2098,6 +2192,65 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       {{end}}
     </section>
     </div>
+    <div class="tab-panel" id="tab-chat" hidden>
+    <section id="chat">
+      <div class="section-head">
+        <h2>Model Chat</h2>
+        <code>{{generatableCount .Models}} ready models</code>
+      </div>
+      <form class="chat-shell" id="model-chat-form">
+        <div class="chat-topbar">
+          <div>
+            <h3>Ask the cluster</h3>
+            <p class="sub">Choose an installed model and worker, then run a prompt.</p>
+          </div>
+          <div class="chat-selectors">
+            <div class="field">
+              <label for="chat-model">Model</label>
+              <select id="chat-model" name="model_id">
+                {{if eq (generatableCount .Models) 0}}<option value="">Install a model first</option>{{end}}
+                {{range .Models}}{{if modelCanGenerate .}}<option value="{{.Model.ID}}">{{.Model.Name}}</option>{{end}}{{end}}
+              </select>
+            </div>
+            <div class="field">
+              <label for="chat-node">Worker</label>
+              <select id="chat-node" name="node_id">
+                {{if eq (generatableCount .Models) 0}}<option value="">No installed model worker</option>{{end}}
+                {{range .Models}}{{$chatModelID := .Model.ID}}{{range modelNodeOptions $.NodesByID .}}<option value="{{.ID}}" data-model-id="{{$chatModelID}}">{{.Name}}</option>{{end}}{{end}}
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="chat-thread" id="chat-thread">
+          {{if eq (generatableCount .Models) 0}}
+          <div class="chat-empty">
+            <h3>No model is ready yet</h3>
+            <p>Install a model from the Models tab before chatting.</p>
+          </div>
+          {{else}}
+          <div class="chat-empty">
+            <h3>What should this cluster answer?</h3>
+            <p>Responses run on your selected worker, not an external API.</p>
+          </div>
+          {{end}}
+          {{range .Jobs}}{{if eq .Type "model.generate"}}
+            {{if .Error}}
+            <div class="chat-message system">{{jobDetail .}}</div>
+            {{else if .Result}}
+            <div class="chat-message assistant">{{jobDetail .}}</div>
+            {{end}}
+          {{end}}{{end}}
+        </div>
+        <div class="chat-composer">
+          <textarea id="chat-prompt" name="prompt" placeholder="Message the selected local model"></textarea>
+          <div class="chat-composer-actions">
+            <div class="runner-status" id="model-status">{{if eq (generatableCount .Models) 0}}Install a model first, then submit a prompt.{{else}}Ready.{{end}}</div>
+            <button class="button primary" type="submit" {{if or (not .OnlineNodes) (eq (generatableCount .Models) 0)}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Generate</button>
+          </div>
+        </div>
+      </form>
+    </section>
+    </div>
     <div class="tab-panel" id="tab-models" hidden>
     <section id="models">
       <div class="section-head">
@@ -2106,41 +2259,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
       <div class="models-shell">
         <div class="model-workspace">
-          <div class="model-block">
-            <div class="model-block-head">
-              <div class="model-block-title">
-                <svg class="icon"><use href="#icon-send"></use></svg>
-                <div>
-                  <h3>Prompt workspace</h3>
-                  <p class="sub">Run a prompt against a model that is already installed on a worker.</p>
-                </div>
-              </div>
-            </div>
-            <form class="chat-panel" id="model-chat-form">
-              <div class="field">
-                <label for="chat-model">Model</label>
-                <select id="chat-model" name="model_id">
-                  {{if eq (generatableCount .Models) 0}}<option value="">Install a model first</option>{{end}}
-                  {{range .Models}}{{if modelCanGenerate .}}<option value="{{.Model.ID}}">{{.Model.Name}}</option>{{end}}{{end}}
-                </select>
-              </div>
-              <div class="field">
-                <label for="chat-node">Worker</label>
-                <select id="chat-node" name="node_id">
-                  {{if eq (generatableCount .Models) 0}}<option value="">No installed model worker</option>{{end}}
-                  {{range .Models}}{{$chatModelID := .Model.ID}}{{range modelNodeOptions $.NodesByID .}}<option value="{{.ID}}" data-model-id="{{$chatModelID}}">{{.Name}}</option>{{end}}{{end}}
-                </select>
-              </div>
-              <div class="field">
-                <label for="chat-prompt">Prompt</label>
-                <textarea id="chat-prompt" name="prompt" placeholder="Ask the local model something"></textarea>
-              </div>
-              <div class="model-actions">
-                <button class="button primary" type="submit" {{if or (not .OnlineNodes) (eq (generatableCount .Models) 0)}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Generate</button>
-              </div>
-              <div class="runner-status" id="model-status">{{if .OnlineNodes}}Install a model first, then submit a prompt.{{else}}Connect a worker before installing models.{{end}}</div>
-            </form>
-          </div>
           <div class="model-block">
             <div class="model-block-title">
               <svg class="icon"><use href="#icon-terminal"></use></svg>
@@ -2214,7 +2332,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             {{end}}
             {{if .InstalledOn}}
             <p class="sub">Installed on {{range $index, $nodeID := .InstalledOn}}{{if $index}}, {{end}}<code>{{nodeLabel $.NodesByID $nodeID}}</code>{{end}}</p>
-            {{else if .LastError}}
+            {{end}}
+            {{if .LastError}}
             <p class="sub">Last error: {{.LastError}}</p>
             {{end}}
             <div class="model-actions">
@@ -2596,25 +2715,81 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var chatForm = document.getElementById("model-chat-form");
     var chatModel = document.getElementById("chat-model");
     var chatNode = document.getElementById("chat-node");
+    var chatThread = document.getElementById("chat-thread");
     var modelStatus = document.getElementById("model-status");
-	function syncChatNodes() {
-		if (!chatModel || !chatNode) return;
-		var modelID = chatModel.value;
-		if (!modelID) {
-			Array.prototype.forEach.call(chatNode.options, function(option) {
-				option.hidden = false;
-				option.disabled = false;
-			});
-			return;
-		}
-		var firstVisible = "";
-		Array.prototype.forEach.call(chatNode.options, function(option) {
+    function syncChatNodes() {
+      if (!chatModel || !chatNode) return;
+      var modelID = chatModel.value;
+      if (!modelID) {
+        Array.prototype.forEach.call(chatNode.options, function(option) {
+          option.hidden = false;
+          option.disabled = false;
+        });
+        return;
+      }
+      var firstVisible = "";
+      Array.prototype.forEach.call(chatNode.options, function(option) {
         var matches = option.getAttribute("data-model-id") === modelID;
         option.hidden = !matches;
         option.disabled = !matches;
         if (matches && !firstVisible) firstVisible = option.value;
       });
       if (firstVisible) chatNode.value = firstVisible;
+    }
+    function clearChatEmpty() {
+      if (!chatThread) return;
+      chatThread.querySelectorAll(".chat-empty").forEach(function(element) {
+        element.remove();
+      });
+    }
+    function appendChatMessage(kind, text) {
+      if (!chatThread) return;
+      clearChatEmpty();
+      var message = document.createElement("div");
+      message.className = "chat-message " + kind;
+      message.textContent = text || "";
+      chatThread.appendChild(message);
+      chatThread.scrollTop = chatThread.scrollHeight;
+    }
+    function modelJobText(job) {
+      if (job.error) return job.error;
+      if (!job.result) return "Waiting for worker result...";
+      try {
+        var parsed = JSON.parse(job.result);
+        if (parsed.output) return String(parsed.output).trim();
+        if (parsed.worker_runtime) return "Completed on " + parsed.worker_runtime;
+      } catch (error) {
+        return job.result;
+      }
+      return "Completed.";
+    }
+    function pollModelJob(jobID, attempt) {
+      if (!jobID) return;
+      fetch("/v1/jobs/" + encodeURIComponent(jobID)).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(job) {
+        if (job.status === "succeeded") {
+          if (modelStatus) modelStatus.innerText = "Completed " + job.id + ".";
+          appendChatMessage("assistant", modelJobText(job));
+          return;
+        }
+        if (job.status === "failed" || job.status === "canceled") {
+          if (modelStatus) modelStatus.innerText = "Model job " + job.status + ".";
+          appendChatMessage("system", modelJobText(job));
+          return;
+        }
+        if (modelStatus) modelStatus.innerText = "Running " + job.id + " (" + job.status + ")...";
+        if (attempt < 80) {
+          setTimeout(function() { pollModelJob(jobID, attempt + 1); }, 1500);
+        } else if (modelStatus) {
+          modelStatus.innerText = "Job is still running. Check Jobs for details.";
+        }
+      }).catch(function(error) {
+        if (modelStatus) modelStatus.innerText = "Could not read model job: " + error.message;
+      });
     }
     if (chatModel) {
       chatModel.addEventListener("change", syncChatNodes);
@@ -2635,6 +2810,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           modelStatus.innerText = "Prompt is required.";
           return;
         }
+        appendChatMessage("user", prompt);
+        chatForm.elements.prompt.value = "";
         modelStatus.innerText = "Submitting model job...";
         fetch("/v1/models/" + encodeURIComponent(modelID) + "/generate", {
           method: "POST",
@@ -2646,14 +2823,15 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           }
           return response.json();
         }).then(function(job) {
-          modelStatus.innerText = "Generate job " + job.id + " submitted. Watch Compute Jobs for the answer.";
-          setTimeout(function() { window.location.reload(); }, 1200);
+          modelStatus.innerText = "Generate job " + job.id + " submitted.";
+          pollModelJob(job.id, 0);
         }).catch(function(error) {
           modelStatus.innerText = "Generate failed: " + error.message;
+          appendChatMessage("system", error.message);
         });
       });
     }
-    if (document.body.dataset.activeJobs === "true") {
+    if (document.body.dataset.activeJobs === "true" && window.location.hash !== "#chat") {
       setTimeout(function() { window.location.reload(); }, 5000);
     }
   </script>
