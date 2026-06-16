@@ -89,23 +89,19 @@ send_deploy_command() {
   binary_url="$(asset_url cmesh-linux-amd64)"
 
   local commands
-  commands=$(cat <<EOF
-[
-  "set -eu",
-  "tmp=\\$(mktemp)",
-  "curl -fsSL '$binary_url' -o \\$tmp",
-  "chmod +x \\$tmp",
-  "install -m 0755 \\$tmp /usr/local/bin/cmesh",
-  "rm -f \\$tmp",
-  "systemctl restart cmesh.service",
-  "sleep 2",
-  "systemctl is-active cmesh.service",
-  "/usr/local/bin/cmesh version",
-  "systemctl is-active battleshift.service || true",
-  "systemctl is-active battleshift-develop.service || true"
-]
-EOF
-)
+  commands=$(printf '%s' "[
+  \"set -eu\",
+  \"curl -fsSL '$binary_url' -o /tmp/cmesh-linux-amd64\",
+  \"chmod +x /tmp/cmesh-linux-amd64\",
+  \"install -m 0755 /tmp/cmesh-linux-amd64 /usr/local/bin/cmesh\",
+  \"rm -f /tmp/cmesh-linux-amd64\",
+  \"systemctl restart cmesh.service\",
+  \"sleep 2\",
+  \"systemctl is-active cmesh.service\",
+  \"/usr/local/bin/cmesh version\",
+  \"systemctl is-active battleshift.service || true\",
+  \"systemctl is-active battleshift-develop.service || true\"
+]")
 
   command_id="$(aws ssm send-command \
     --region "$CMESH_AWS_REGION" \
