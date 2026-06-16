@@ -280,7 +280,13 @@ func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, b
 	defer s.mu.Unlock()
 
 	job, ok := s.jobs[jobID]
-	if !ok || job.AssignedTo != req.NodeID || job.Status != jobs.StatusRunning {
+	if !ok || job.AssignedTo != req.NodeID {
+		return jobs.Job{}, false
+	}
+	if job.Status == jobs.StatusCanceled {
+		return job, true
+	}
+	if job.Status != jobs.StatusRunning {
 		return jobs.Job{}, false
 	}
 
@@ -297,6 +303,26 @@ func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, b
 	s.jobs[job.ID] = job
 	s.scheduleQueuedJobsLocked(now)
 
+	return job, true
+}
+
+func (s *State) CancelJob(jobID string) (jobs.Job, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, ok := s.jobs[jobID]
+	if !ok || !jobCanBeCanceled(job) {
+		return jobs.Job{}, false
+	}
+
+	now := time.Now().UTC()
+	job.Status = jobs.StatusCanceled
+	job.Error = "canceled by operator"
+	job.LastFailure = ""
+	job.UpdatedAt = now
+	job.FinishedAt = now
+	s.jobs[job.ID] = job
+	s.scheduleQueuedJobsLocked(now)
 	return job, true
 }
 
@@ -350,7 +376,7 @@ func (s *State) pickWorkerExcludingLocked(req jobs.Requirements, excluded map[st
 		if !nodeMeetsRequirements(node, req) {
 			continue
 		}
-		if s.activeJobsForWorkerLocked(node.ID) >= defaultWorkerJobSlots {
+		if s.activeJobsForWorkerLocked(node.ID) >= workerJobSlots(node) {
 			continue
 		}
 
@@ -369,7 +395,7 @@ func (s *State) nodeCanAcceptJobLocked(node cluster.Node, req jobs.Requirements,
 	return node.Role == cluster.NodeRoleWorker &&
 		node.Status == cluster.NodeStatusOnline &&
 		nodeMeetsRequirements(node, req) &&
-		s.activeJobsForWorkerLocked(node.ID) < defaultWorkerJobSlots
+		s.activeJobsForWorkerLocked(node.ID) < workerJobSlots(node)
 }
 
 func (s *State) waitingReasonLocked(req jobs.Requirements, now time.Time) string {
@@ -395,6 +421,19 @@ func (s *State) activeJobsForWorkerLocked(nodeID string) int {
 		}
 	}
 	return active
+}
+
+func workerJobSlots(node cluster.Node) int {
+	if node.Resources.JobSlots > 0 {
+		return node.Resources.JobSlots
+	}
+	return defaultWorkerJobSlots
+}
+
+func jobCanBeCanceled(job jobs.Job) bool {
+	return job.Status == jobs.StatusQueued ||
+		job.Status == jobs.StatusScheduled ||
+		job.Status == jobs.StatusRunning
 }
 
 func nodeMeetsRequirements(node cluster.Node, req jobs.Requirements) bool {

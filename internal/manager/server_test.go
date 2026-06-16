@@ -165,8 +165,11 @@ func TestInvitePageRequiresOperatorToken(t *testing.T) {
 	if !strings.Contains(body, "CMesh-Worker-Apple-Silicon.dmg") {
 		t.Fatalf("expected invite page to contain Apple Silicon installer download")
 	}
-	if !strings.Contains(body, "Download installer for macOS Apple Silicon") {
+	if !strings.Contains(body, "Download for Apple Silicon") {
 		t.Fatalf("expected invite page to contain platform-specific download label")
+	}
+	if !strings.Contains(body, "Install worker app") || !strings.Contains(body, "Manual invite link") {
+		t.Fatalf("expected invite page to contain installer-first worker flow")
 	}
 	if !strings.Contains(body, "manager=https%3A%2F%2Fcmesh.example.com") {
 		t.Fatalf("expected invite page to contain encoded manager URL")
@@ -278,14 +281,14 @@ func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
 	if !strings.Contains(body, "Run compute job") {
 		t.Fatalf("expected compute job runner in dashboard")
 	}
-	if !strings.Contains(body, "Run cluster benchmark") {
-		t.Fatalf("expected cluster benchmark runner in dashboard")
+	if !strings.Contains(body, "Benchmark History") {
+		t.Fatalf("expected benchmark history in dashboard")
 	}
-	if !strings.Contains(body, "First Cluster Test") {
-		t.Fatalf("expected first test onboarding in dashboard")
+	if !strings.Contains(body, "Cluster Console") {
+		t.Fatalf("expected cluster console in dashboard")
 	}
-	if !strings.Contains(body, "Run first cluster test") {
-		t.Fatalf("expected first test action in dashboard")
+	if !strings.Contains(body, "Run cluster test") {
+		t.Fatalf("expected cluster test action in dashboard")
 	}
 	if !strings.Contains(body, "1.23") || !strings.Contains(body, "test/runtime") {
 		t.Fatalf("expected parsed compute result metrics in dashboard")
@@ -796,6 +799,95 @@ func TestWorkerSlotQueuesUntilActiveJobCompletes(t *testing.T) {
 	}
 	if scheduled.LastFailure != "" {
 		t.Fatalf("expected capacity reason cleared after scheduling, got %q", scheduled.LastFailure)
+	}
+}
+
+func TestWorkerConfiguredSlotsAllowMultipleActiveJobs(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "two-slot-worker", cluster.ResourceSnapshot{
+		CPU:      cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:   cluster.MemoryResources{TotalBytes: 8 * gb, AllowedBytes: 4 * gb},
+		Storage:  cluster.StorageResources{TotalBytes: 20 * gb, AllowedBytes: 8 * gb, FreeBytes: 12 * gb},
+		JobSlots: 2,
+	})
+
+	first, err := state.CreateJob(jobs.CreateRequest{Type: "echo", Input: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := state.CreateJob(jobs.CreateRequest{Type: "echo", Input: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := state.CreateJob(jobs.CreateRequest{Type: "echo", Input: "third"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first.Status != jobs.StatusScheduled || second.Status != jobs.StatusScheduled {
+		t.Fatalf("expected first two jobs scheduled, got %#v %#v", first, second)
+	}
+	if first.AssignedTo != worker.NodeID || second.AssignedTo != worker.NodeID {
+		t.Fatalf("expected first two jobs assigned to worker, got %q %q", first.AssignedTo, second.AssignedTo)
+	}
+	if third.Status != jobs.StatusQueued || third.AssignedTo != "" {
+		t.Fatalf("expected third job queued, got %#v", third)
+	}
+}
+
+func TestCancelJobFreesWorkerSlot(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerForTest(t, srv, "cancel-slot-worker")
+
+	first, err := state.CreateJob(jobs.CreateRequest{Type: "echo", Input: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := state.CreateJob(jobs.CreateRequest{Type: "echo", Input: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Status != jobs.StatusQueued {
+		t.Fatalf("expected second queued, got %#v", second)
+	}
+
+	canceled, ok := state.CancelJob(first.ID)
+	if !ok || canceled.Status != jobs.StatusCanceled || canceled.FinishedAt.IsZero() {
+		t.Fatalf("expected first canceled, got %#v ok=%v", canceled, ok)
+	}
+	scheduled, ok := state.Job(second.ID)
+	if !ok {
+		t.Fatal("expected second job")
+	}
+	if scheduled.Status != jobs.StatusScheduled || scheduled.AssignedTo != worker.NodeID {
+		t.Fatalf("expected second scheduled after cancel frees slot, got %#v", scheduled)
+	}
+}
+
+func TestCanceledRunningJobAcceptsLateWorkerCompletion(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerForTest(t, srv, "late-cancel-worker")
+
+	job, err := state.CreateJob(jobs.CreateRequest{Type: "echo", Input: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next, ok := state.NextJobForWorker(worker.NodeID); !ok || next.ID != job.ID {
+		t.Fatalf("expected worker to start job, got %#v ok=%v", next, ok)
+	}
+	canceled, ok := state.CancelJob(job.ID)
+	if !ok || canceled.Status != jobs.StatusCanceled {
+		t.Fatalf("expected canceled job, got %#v ok=%v", canceled, ok)
+	}
+	completed, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{
+		NodeID: worker.NodeID,
+		Result: "late result",
+	})
+	if !ok || completed.Status != jobs.StatusCanceled || completed.Result != "" {
+		t.Fatalf("expected late completion to keep job canceled, got %#v ok=%v", completed, ok)
 	}
 }
 

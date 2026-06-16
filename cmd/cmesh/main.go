@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -242,6 +243,7 @@ func parseWorkerOptions(name string, args []string) (workerOptions, error) {
 	diskGB := fs.Uint64("disk-gb", 10, "allowed disk in GB")
 	gpu := fs.Bool("gpu", true, "allow GPU discovery and use")
 	vramGB := fs.Uint64("vram-gb", 0, "allowed VRAM in GB")
+	jobSlots := fs.Int("job-slots", 1, "maximum active jobs this worker can accept")
 	benchmark := fs.Bool("benchmark", false, "run benchmarks after joining")
 	once := fs.Bool("once", false, "join, send one heartbeat, optionally benchmark, then exit")
 	if err := fs.Parse(args); err != nil {
@@ -261,6 +263,7 @@ func parseWorkerOptions(name string, args []string) (workerOptions, error) {
 			DiskBytes:   gbToBytes(*diskGB),
 			GPUEnabled:  *gpu,
 			VRAMBytes:   gbToBytes(*vramGB),
+			JobSlots:    *jobSlots,
 		},
 	}, nil
 }
@@ -307,12 +310,17 @@ func workerRun(ctx context.Context, options workerOptions) error {
 			return err
 		}
 	}
-	if err := pollAndExecuteJob(options.managerURL, resp.NodeID, options.cacheDir, snapshot); err != nil {
-		return err
-	}
 	if options.runOnce {
+		if _, err := pollAndExecuteJob(options.managerURL, resp.NodeID, options.cacheDir, snapshot); err != nil {
+			return err
+		}
 		fmt.Printf("worker %s completed one-shot run\n", resp.NodeID)
 		return nil
+	}
+
+	jobRunner := newWorkerJobRunner(options.managerURL, resp.NodeID, options.cacheDir, snapshot.JobSlots)
+	if err := jobRunner.PollAvailable(snapshot); err != nil {
+		return err
 	}
 
 	for {
@@ -320,11 +328,14 @@ func workerRun(ctx context.Context, options workerOptions) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			if err := jobRunner.LastError(); err != nil {
+				return err
+			}
 			snapshot := discoverWorkerResources(options)
 			if err := sendHeartbeat(options.managerURL, resp.NodeID, snapshot); err != nil {
 				return err
 			}
-			if err := pollAndExecuteJob(options.managerURL, resp.NodeID, options.cacheDir, snapshot); err != nil {
+			if err := jobRunner.PollAvailable(snapshot); err != nil {
 				return err
 			}
 			fmt.Printf("heartbeat sent for %s\n", resp.NodeID)
@@ -656,28 +667,88 @@ func setOperatorToken(req *http.Request, token string) {
 	req.Header.Set("X-CMesh-Operator-Token", token)
 }
 
-func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapshot cluster.ResourceSnapshot) error {
+type workerJobRunner struct {
+	managerURL string
+	nodeID     string
+	cacheDir   string
+	slots      int
+
+	mu      sync.Mutex
+	active  int
+	lastErr error
+}
+
+func newWorkerJobRunner(managerURL string, nodeID string, cacheDir string, slots int) *workerJobRunner {
+	if slots <= 0 {
+		slots = 1
+	}
+	return &workerJobRunner{
+		managerURL: managerURL,
+		nodeID:     nodeID,
+		cacheDir:   cacheDir,
+		slots:      slots,
+	}
+}
+
+func (r *workerJobRunner) PollAvailable(snapshot cluster.ResourceSnapshot) error {
+	r.mu.Lock()
+	available := r.slots - r.active
+	if r.lastErr != nil {
+		err := r.lastErr
+		r.mu.Unlock()
+		return err
+	}
+	if available <= 0 {
+		r.mu.Unlock()
+		return nil
+	}
+	r.active += available
+	r.mu.Unlock()
+
+	for range available {
+		go r.pollOne(snapshot)
+	}
+	return nil
+}
+
+func (r *workerJobRunner) LastError() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastErr
+}
+
+func (r *workerJobRunner) pollOne(snapshot cluster.ResourceSnapshot) {
+	_, err := pollAndExecuteJob(r.managerURL, r.nodeID, r.cacheDir, snapshot)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.active--
+	if err != nil && r.lastErr == nil {
+		r.lastErr = err
+	}
+}
+
+func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapshot cluster.ResourceSnapshot) (bool, error) {
 	httpResp, err := http.Get(managerURL + "/v1/workers/" + nodeID + "/jobs/next")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return fmt.Errorf("manager returned %s", httpResp.Status)
+		return false, fmt.Errorf("manager returned %s", httpResp.Status)
 	}
 
 	var resp struct {
 		Job *jobs.Job `json:"job"`
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
-		return err
+		return false, err
 	}
 	if resp.Job == nil {
 		if err := workerstatus.MarkIdle(cacheDir, nodeID); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to write worker job status: %v\n", err)
 		}
-		return nil
+		return false, nil
 	}
 
 	startedAt := time.Now().UTC()
@@ -703,17 +774,17 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapsh
 
 	body, err := json.Marshal(complete)
 	if err != nil {
-		return err
+		return true, err
 	}
 
 	completeResp, err := http.Post(managerURL+"/v1/jobs/"+resp.Job.ID+"/complete", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return true, err
 	}
 	defer completeResp.Body.Close()
 
 	if completeResp.StatusCode < 200 || completeResp.StatusCode >= 300 {
-		return fmt.Errorf("manager returned %s", completeResp.Status)
+		return true, fmt.Errorf("manager returned %s", completeResp.Status)
 	}
 
 	finishedAt := time.Now().UTC()
@@ -742,7 +813,7 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapsh
 	} else {
 		fmt.Printf("job %s completed\n", resp.Job.ID)
 	}
-	return nil
+	return true, nil
 }
 
 func executeJob(job jobs.Job) (string, error) {

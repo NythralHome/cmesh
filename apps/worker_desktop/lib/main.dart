@@ -67,6 +67,7 @@ class WorkerConfig {
     required this.cpu,
     required this.memoryGb,
     required this.diskGb,
+    required this.jobSlots,
     required this.gpuEnabled,
     required this.vramGb,
     required this.benchmark,
@@ -78,6 +79,7 @@ class WorkerConfig {
   final int cpu;
   final int memoryGb;
   final int diskGb;
+  final int jobSlots;
   final bool gpuEnabled;
   final int vramGb;
   final bool benchmark;
@@ -90,6 +92,7 @@ class WorkerConfig {
       cpu: Platform.numberOfProcessors.clamp(1, 64),
       memoryGb: 8,
       diskGb: 50,
+      jobSlots: 1,
       gpuEnabled: true,
       vramGb: 0,
       benchmark: true,
@@ -107,6 +110,7 @@ class WorkerConfig {
       cpu: json['cpu'] as int? ?? Platform.numberOfProcessors,
       memoryGb: json['memoryGb'] as int? ?? json['memory_gb'] as int? ?? 8,
       diskGb: json['diskGb'] as int? ?? json['disk_gb'] as int? ?? 50,
+      jobSlots: json['jobSlots'] as int? ?? json['job_slots'] as int? ?? 1,
       gpuEnabled:
           json['gpuEnabled'] as bool? ?? json['gpu_enabled'] as bool? ?? true,
       vramGb: json['vramGb'] as int? ?? json['vram_gb'] as int? ?? 0,
@@ -122,6 +126,7 @@ class WorkerConfig {
       'cpu': cpu,
       'memoryGb': memoryGb,
       'diskGb': diskGb,
+      'jobSlots': jobSlots,
       'gpuEnabled': gpuEnabled,
       'vramGb': vramGb,
       'benchmark': benchmark,
@@ -137,6 +142,7 @@ class WorkerConfig {
       'cpu': cpu,
       'memory_gb': memoryGb,
       'disk_gb': diskGb,
+      'job_slots': jobSlots,
       'gpu_enabled': gpuEnabled,
       'vram_gb': vramGb,
       'benchmark': benchmark,
@@ -149,6 +155,7 @@ class WorkerConfig {
     int? cpu,
     int? memoryGb,
     int? diskGb,
+    int? jobSlots,
     bool? gpuEnabled,
     int? vramGb,
     bool? benchmark,
@@ -160,6 +167,7 @@ class WorkerConfig {
       cpu: cpu ?? this.cpu,
       memoryGb: memoryGb ?? this.memoryGb,
       diskGb: diskGb ?? this.diskGb,
+      jobSlots: jobSlots ?? this.jobSlots,
       gpuEnabled: gpuEnabled ?? this.gpuEnabled,
       vramGb: vramGb ?? this.vramGb,
       benchmark: benchmark ?? this.benchmark,
@@ -442,8 +450,7 @@ MimeType=x-scheme-handler/cmesh;
 
 class WorkerConfigStore {
   Future<File> _file() async {
-    final home =
-        Platform.environment['HOME'] ??
+    final home = Platform.environment['HOME'] ??
         Platform.environment['USERPROFILE'] ??
         Directory.current.path;
     final dir = Directory('$home/.cmesh');
@@ -507,8 +514,7 @@ class WorkerControlTokenStore {
   }
 
   static File _file() {
-    final home =
-        Platform.environment['HOME'] ??
+    final home = Platform.environment['HOME'] ??
         Platform.environment['USERPROFILE'] ??
         Directory.current.path;
     return File('$home/.cmesh/worker-control-token');
@@ -836,8 +842,7 @@ class WorkerController {
   }
 
   Future<String?> _findControlBinary() async {
-    final configured =
-        Platform.environment['CMESH_WORKER_CONTROL_BIN'] ??
+    final configured = Platform.environment['CMESH_WORKER_CONTROL_BIN'] ??
         Platform.environment['CMESH_BIN'];
     if (configured != null && configured.trim().isNotEmpty) {
       final file = File(configured.trim());
@@ -937,6 +942,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
   final _cpu = TextEditingController();
   final _memoryGb = TextEditingController();
   final _diskGb = TextEditingController();
+  final _jobSlots = TextEditingController();
   final _vramGb = TextEditingController();
 
   bool _gpuEnabled = true;
@@ -980,18 +986,20 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     _cpu.dispose();
     _memoryGb.dispose();
     _diskGb.dispose();
+    _jobSlots.dispose();
     _vramGb.dispose();
     super.dispose();
   }
 
   List<TextEditingController> get _configControllers => [
-    _managerUrl,
-    _joinToken,
-    _cpu,
-    _memoryGb,
-    _diskGb,
-    _vramGb,
-  ];
+        _managerUrl,
+        _joinToken,
+        _cpu,
+        _memoryGb,
+        _diskGb,
+        _jobSlots,
+        _vramGb,
+      ];
 
   void _formStateChanged() {
     if (mounted) {
@@ -1010,6 +1018,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       _cpu.text = '${config.cpu}';
       _memoryGb.text = '${config.memoryGb}';
       _diskGb.text = '${config.diskGb}';
+      _jobSlots.text = '${config.jobSlots}';
       _vramGb.text = '${config.vramGb}';
       _gpuEnabled = config.gpuEnabled;
       _benchmark = config.benchmark;
@@ -1079,6 +1088,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
       cpu: int.parse(_cpu.text),
       memoryGb: int.parse(_memoryGb.text),
       diskGb: int.parse(_diskGb.text),
+      jobSlots: int.parse(_jobSlots.text),
       gpuEnabled: _gpuEnabled,
       vramGb: int.parse(_vramGb.text),
       benchmark: _benchmark,
@@ -1269,6 +1279,9 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
     if (_positiveInt(_diskGb.text) != null) {
       return 'Storage must be 1 GB or more.';
     }
+    if (_positiveInt(_jobSlots.text) != null) {
+      return 'Job slots must be 1 or more.';
+    }
     if (_nonNegativeInt(_vramGb.text) != null) {
       return 'VRAM must be 0 GB or more.';
     }
@@ -1345,6 +1358,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
         cpu: _cpu,
         memoryGb: _memoryGb,
         diskGb: _diskGb,
+        jobSlots: _jobSlots,
         vramGb: _vramGb,
         gpuEnabled: _gpuEnabled,
         benchmark: _benchmark,
@@ -1365,6 +1379,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
         cpu: _cpu,
         memoryGb: _memoryGb,
         diskGb: _diskGb,
+        jobSlots: _jobSlots,
         vramGb: _vramGb,
         gpuEnabled: _gpuEnabled,
         benchmark: _benchmark,
@@ -1441,6 +1456,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
                                           cpu: _cpu,
                                           memoryGb: _memoryGb,
                                           diskGb: _diskGb,
+                                          jobSlots: _jobSlots,
                                           gpuEnabled: _gpuEnabled,
                                           runtimeStatus: _runtimeStatus,
                                         ),
@@ -1464,6 +1480,7 @@ class _WorkerHomePageState extends State<WorkerHomePage> {
                                           cpu: _cpu,
                                           memoryGb: _memoryGb,
                                           diskGb: _diskGb,
+                                          jobSlots: _jobSlots,
                                           gpuEnabled: _gpuEnabled,
                                           runtimeStatus: _runtimeStatus,
                                         ),
@@ -1629,6 +1646,7 @@ class _WelcomeConnectionPanel extends StatelessWidget {
     required this.cpu,
     required this.memoryGb,
     required this.diskGb,
+    required this.jobSlots,
     required this.vramGb,
     required this.gpuEnabled,
     required this.benchmark,
@@ -1646,6 +1664,7 @@ class _WelcomeConnectionPanel extends StatelessWidget {
   final TextEditingController cpu;
   final TextEditingController memoryGb;
   final TextEditingController diskGb;
+  final TextEditingController jobSlots;
   final TextEditingController vramGb;
   final bool gpuEnabled;
   final bool benchmark;
@@ -1717,6 +1736,11 @@ class _WelcomeConnectionPanel extends StatelessWidget {
                     icon: Icons.folder,
                   ),
                   _NumberField(
+                    controller: jobSlots,
+                    label: 'Job slots',
+                    icon: Icons.account_tree_outlined,
+                  ),
+                  _NumberField(
                     controller: vramGb,
                     label: 'VRAM GB',
                     icon: Icons.view_in_ar,
@@ -1775,6 +1799,7 @@ class _ConnectionPanel extends StatelessWidget {
     required this.cpu,
     required this.memoryGb,
     required this.diskGb,
+    required this.jobSlots,
     required this.vramGb,
     required this.gpuEnabled,
     required this.benchmark,
@@ -1791,6 +1816,7 @@ class _ConnectionPanel extends StatelessWidget {
   final TextEditingController cpu;
   final TextEditingController memoryGb;
   final TextEditingController diskGb;
+  final TextEditingController jobSlots;
   final TextEditingController vramGb;
   final bool gpuEnabled;
   final bool benchmark;
@@ -1849,6 +1875,11 @@ class _ConnectionPanel extends StatelessWidget {
                     controller: diskGb,
                     label: 'Disk GB',
                     icon: Icons.folder,
+                  ),
+                  _NumberField(
+                    controller: jobSlots,
+                    label: 'Job slots',
+                    icon: Icons.account_tree_outlined,
                   ),
                   _NumberField(
                     controller: vramGb,
@@ -1938,22 +1969,22 @@ class _WorkerActionBar extends StatelessWidget {
     final statusLabel = running
         ? 'Worker running'
         : !hasJoinToken
-        ? 'Invite required'
-        : !connectionReady
-        ? 'Connection not saved'
-        : canStart
-        ? 'Ready to start'
-        : 'Check settings';
+            ? 'Invite required'
+            : !connectionReady
+                ? 'Connection not saved'
+                : canStart
+                    ? 'Ready to start'
+                    : 'Check settings';
     final statusIcon = running
         ? Icons.check_circle
         : !hasJoinToken
-        ? Icons.warning_amber_rounded
-        : Icons.radio_button_checked;
+            ? Icons.warning_amber_rounded
+            : Icons.radio_button_checked;
     final statusColor = running
         ? const Color(0xFF157A4A)
         : !hasJoinToken
-        ? colors.error
-        : colors.primary;
+            ? colors.error
+            : colors.primary;
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 1180),
@@ -2108,10 +2139,10 @@ class _ActionGroup extends StatelessWidget {
             child: Text(
               label.toUpperCase(),
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: colors.onSurfaceVariant,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 0.5,
-              ),
+                    color: colors.onSurfaceVariant,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.5,
+                  ),
             ),
           ),
           Wrap(spacing: 8, runSpacing: 8, children: [...children]),
@@ -2176,6 +2207,7 @@ class _QuickResourceSummary extends StatelessWidget {
     required this.cpu,
     required this.memoryGb,
     required this.diskGb,
+    required this.jobSlots,
     required this.gpuEnabled,
     required this.runtimeStatus,
   });
@@ -2183,6 +2215,7 @@ class _QuickResourceSummary extends StatelessWidget {
   final TextEditingController cpu;
   final TextEditingController memoryGb;
   final TextEditingController diskGb;
+  final TextEditingController jobSlots;
   final bool gpuEnabled;
   final WorkerRuntimeStatus? runtimeStatus;
 
@@ -2207,6 +2240,11 @@ class _QuickResourceSummary extends StatelessWidget {
             icon: Icons.folder,
             label: 'Storage',
             value: diskGb.text.isEmpty ? '-' : '${diskGb.text} GB',
+          ),
+          _SummaryTile(
+            icon: Icons.account_tree_outlined,
+            label: 'Job slots',
+            value: jobSlots.text.isEmpty ? '-' : jobSlots.text,
           ),
           _SummaryTile(
             icon: Icons.view_in_ar,
@@ -2306,8 +2344,8 @@ class _RuntimeStatusCard extends StatelessWidget {
     final color = running
         ? const Color(0xFF1B7F4B)
         : current?.lastError?.isNotEmpty == true
-        ? colors.error
-        : colors.outline;
+            ? colors.error
+            : colors.outline;
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -2347,8 +2385,8 @@ class _RuntimeStatusCard extends StatelessWidget {
             value: current == null
                 ? '-'
                 : current.joinTokenConfigured
-                ? 'Configured'
-                : 'Not configured',
+                    ? 'Configured'
+                    : 'Not configured',
           ),
           _StatusLine(
             label: 'PID',
@@ -2510,8 +2548,8 @@ class _StatusLine extends StatelessWidget {
             child: Text(
               label,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
             ),
           ),
           Expanded(

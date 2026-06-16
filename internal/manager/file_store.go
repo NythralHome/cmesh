@@ -90,6 +90,14 @@ func (s *FileStore) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Jo
 	return job, ok
 }
 
+func (s *FileStore) CancelJob(jobID string) (jobs.Job, bool) {
+	job, ok := s.State.CancelJob(jobID)
+	if ok {
+		_ = s.save()
+	}
+	return job, ok
+}
+
 func (s *FileStore) load() error {
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {

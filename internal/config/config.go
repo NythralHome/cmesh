@@ -19,4 +19,5 @@ type ResourceLimits struct {
 	DiskBytes   uint64
 	GPUEnabled  bool
 	VRAMBytes   uint64
+	JobSlots    int
 }

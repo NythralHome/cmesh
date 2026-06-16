@@ -29,6 +29,7 @@ type Config struct {
 	DiskGB         int    `json:"disk_gb"`
 	GPUEnabled     bool   `json:"gpu_enabled"`
 	VRAMGB         int    `json:"vram_gb"`
+	JobSlots       int    `json:"job_slots"`
 	Benchmark      bool   `json:"benchmark"`
 	WorkerBinary   string `json:"worker_binary"`
 	WorkerCacheDir string `json:"worker_cache_dir"`
@@ -411,6 +412,7 @@ func defaultConfig() Config {
 		DiskGB:         50,
 		GPUEnabled:     true,
 		VRAMGB:         0,
+		JobSlots:       1,
 		Benchmark:      true,
 		WorkerCacheDir: defaultCacheDir(),
 	}
@@ -438,6 +440,9 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.DiskGB == 0 {
 		cfg.DiskGB = defaults.DiskGB
 	}
+	if cfg.JobSlots == 0 {
+		cfg.JobSlots = defaults.JobSlots
+	}
 	if cfg.WorkerCacheDir == "" {
 		cfg.WorkerCacheDir = defaults.WorkerCacheDir
 	}
@@ -460,6 +465,9 @@ func validateConfig(cfg Config) error {
 	if cfg.DiskGB <= 0 {
 		return fmt.Errorf("disk_gb must be greater than zero")
 	}
+	if cfg.JobSlots <= 0 {
+		return fmt.Errorf("job_slots must be greater than zero")
+	}
 	return nil
 }
 
@@ -480,6 +488,7 @@ func workerArgs(cfg Config) []string {
 		"--memory-gb", strconv.Itoa(cfg.MemoryGB),
 		"--disk-gb", strconv.Itoa(cfg.DiskGB),
 		"--vram-gb", strconv.Itoa(cfg.VRAMGB),
+		"--job-slots", strconv.Itoa(cfg.JobSlots),
 		"--gpu=" + strconv.FormatBool(cfg.GPUEnabled),
 		"--cache-dir", cfg.WorkerCacheDir,
 	}

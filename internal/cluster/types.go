@@ -30,10 +30,11 @@ type Node struct {
 }
 
 type ResourceSnapshot struct {
-	CPU     CPUResources     `json:"cpu"`
-	Memory  MemoryResources  `json:"memory"`
-	GPU     []GPUResources   `json:"gpu"`
-	Storage StorageResources `json:"storage"`
+	CPU      CPUResources     `json:"cpu"`
+	Memory   MemoryResources  `json:"memory"`
+	GPU      []GPUResources   `json:"gpu"`
+	Storage  StorageResources `json:"storage"`
+	JobSlots int              `json:"job_slots,omitempty"`
 }
 
 type CPUResources struct {

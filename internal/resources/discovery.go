@@ -41,6 +41,7 @@ func DiscoverLocal(options DiscoveryOptions) cluster.ResourceSnapshot {
 			AllowedBytes: allowedBytes(options.Limits.DiskBytes, freeStorage),
 			FreeBytes:    freeStorage,
 		},
+		JobSlots: allowedInt(options.Limits.JobSlots, 1),
 	}
 }
 

@@ -514,6 +514,10 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		s.handleJobComplete(w, r, jobID)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "cancel" {
+		s.handleJobCancel(w, r, jobID)
+		return
+	}
 	if len(parts) != 1 || r.Method != http.MethodGet {
 		http.NotFound(w, r)
 		return
@@ -523,6 +527,23 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job, ok := s.state.Job(jobID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+
+	job, ok := s.state.CancelJob(jobID)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -1051,7 +1072,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		return percent
 	},
 	"hasActiveJobs":   hasActiveJobs,
-	"workerSlots":     func() int { return defaultWorkerJobSlots },
+	"workerSlots":     workerJobSlots,
+	"jobCanCancel":    jobCanBeCanceled,
 	"jobDuration":     jobDuration,
 	"jobTimeline":     jobTimeline,
 	"jobWorkload":     jobWorkload,
@@ -1385,6 +1407,14 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       border-color: var(--accent);
       color: #ffffff;
     }
+    .danger {
+      background: #fff1f2;
+      border-color: #fecdd3;
+      color: #be123c;
+    }
+    .job-cancel-form {
+      margin-top: 10px;
+    }
     .runner-status {
       padding: 0 16px 14px;
       color: var(--muted);
@@ -1510,38 +1540,29 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     </div>
   </header>
   <main>
-    <section class="onboarding" aria-label="First cluster test">
+    <section class="onboarding" aria-label="Cluster console">
       <div class="section-head">
-        <h2>First Cluster Test</h2>
-        <code>{{if .OnlineNodes}}ready{{else}}waiting for worker{{end}}</code>
+        <h2>Cluster Console</h2>
+        <code>{{if .OnlineNodes}}ready for compute{{else}}connect a worker{{end}}</code>
       </div>
       <div class="onboarding-body">
-        <ol class="step-list">
-          <li class="step done">
-            <span class="step-index">1</span>
-            <div><strong>Open invite</strong><span>Download the worker app or open the registered cmesh:// link.</span></div>
-            <a class="button" href="{{.InviteURL}}">Invite</a>
-          </li>
-          <li class="step {{if .OnlineNodes}}done{{end}}">
-            <span class="step-index">2</span>
-            <div><strong>Connect at least one worker</strong><span>Worker should show online after Save and Start in the desktop app.</span></div>
-            <span class="{{if .OnlineNodes}}pill{{else}}pill pill-muted{{end}}">{{.Summary.WorkersOnline}} online</span>
-          </li>
-          <li class="step {{if .ClusterBenchmarks}}done{{end}}">
-            <span class="step-index">3</span>
-            <div><strong>Run a cluster benchmark</strong><span>Starts one compute task per online worker and aggregates throughput.</span></div>
-            <span class="{{if .ClusterBenchmarks}}pill{{else}}pill pill-muted{{end}}">{{len .ClusterBenchmarks}} runs</span>
-          </li>
-          <li class="step {{if .Jobs}}done{{end}}">
-            <span class="step-index">4</span>
-            <div><strong>Inspect results</strong><span>Use the jobs and benchmark tables below to prove real work completed.</span></div>
-            <span class="{{if .Jobs}}pill{{else}}pill pill-muted{{end}}">{{len .Jobs}} jobs</span>
-          </li>
-        </ol>
         <div class="first-test-panel">
-          <h3>Current test signal</h3>
+          <h3>{{if .OnlineNodes}}Cluster is ready{{else}}Waiting for workers{{end}}</h3>
+          <p class="sub">Invite machines, watch their usable capacity, then run compute jobs against the scheduler. This is the last cluster validation surface before adding model inference jobs.</p>
+          <div class="actions">
+            <a class="button primary" href="{{.InviteURL}}">Invite worker</a>
+            <a class="button" href="#jobs">Open jobs</a>
+          </div>
           <div class="first-test-grid">
-            <div class="first-test-stat"><span>Workers</span><strong>{{.Summary.WorkersOnline}}</strong></div>
+            <div class="first-test-stat"><span>Workers</span><strong>{{.Summary.WorkersOnline}} / {{.Summary.WorkersTotal}}</strong></div>
+            <div class="first-test-stat"><span>CPU cores</span><strong>{{.Summary.Resources.CPU.CoresAllowed}}</strong></div>
+            <div class="first-test-stat"><span>Memory</span><strong>{{printf "%.1f" (gb .Summary.Resources.Memory.AllowedBytes)}} GB</strong></div>
+            <div class="first-test-stat"><span>Jobs</span><strong>{{len .Jobs}}</strong></div>
+          </div>
+        </div>
+        <div class="first-test-panel">
+          <h3>Run cluster compute test</h3>
+          <div class="first-test-grid">
             <div class="first-test-stat"><span>Score</span><strong>{{printf "%.0f" .Summary.BenchmarkScore}}</strong></div>
             {{if .ClusterBenchmarks}}{{with index .ClusterBenchmarks 0}}
             <div class="first-test-stat"><span>Last run</span><strong>{{.Status}}</strong></div>
@@ -1560,7 +1581,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <label for="first-test-iterations">Iterations</label>
               <input id="first-test-iterations" name="iterations" type="number" min="1" max="100" step="1" value="6">
             </div>
-            <button class="button primary wide" type="submit" {{if not .OnlineNodes}}disabled{{end}}>Run first cluster test</button>
+            <button class="button primary wide" type="submit" {{if not .OnlineNodes}}disabled{{end}}>Run cluster test</button>
           </form>
           <div class="runner-status" id="first-test-status">{{if .OnlineNodes}}Ready to run one task on each online worker.{{else}}Connect a worker first, then this button becomes available.{{end}}</div>
         </div>
@@ -1605,7 +1626,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <td>{{printf "%.1f" (gb .Resources.Memory.AllowedBytes)}} / {{printf "%.1f" (gb .Resources.Memory.TotalBytes)}} GB</td>
               <td>{{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed</td>
               <td>{{range .Resources.GPU}}<div>{{.Name}}</div>{{else}}0{{end}}</td>
-              <td>{{index $.WorkerActiveJobs .ID}} / {{workerSlots}} active</td>
+              <td>{{index $.WorkerActiveJobs .ID}} / {{workerSlots .}} active</td>
               <td>{{with index $.Benchmarks .ID}}{{printf "%.0f" .TotalScore}}{{else}}Not run{{end}}</td>
               <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
             </tr>
@@ -1619,28 +1640,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     </section>
     <section style="margin-top: 20px;">
       <div class="section-head">
-        <h2>Cluster Benchmark</h2>
+        <h2>Benchmark History</h2>
         <code>{{len .ClusterBenchmarks}} recent runs</code>
       </div>
-      <form class="cluster-runner" id="cluster-benchmark-form">
-        <div class="field">
-          <label for="cluster-size">Matrix size</label>
-          <input id="cluster-size" name="size" type="number" min="16" max="2048" step="16" value="512">
-        </div>
-        <div class="field">
-          <label for="cluster-iterations">Iterations</label>
-          <input id="cluster-iterations" name="iterations" type="number" min="1" max="100" step="1" value="6">
-        </div>
-        <div class="field">
-          <label for="cluster-requested-by">Label</label>
-          <input id="cluster-requested-by" name="requested_by" value="dashboard">
-        </div>
-        <div class="field">
-          <label>&nbsp;</label>
-          <button class="button primary" type="submit" {{if not .OnlineNodes}}disabled{{end}}>Run cluster benchmark</button>
-        </div>
-      </form>
-      <div class="runner-status" id="cluster-benchmark-status">{{if .OnlineNodes}}Run one compute job on each online worker and aggregate total GFLOPS.{{else}}Connect at least one worker to run a cluster benchmark.{{end}}</div>
       {{if .ClusterBenchmarks}}
       <div class="growth-list">
         {{range .ClusterBenchmarks}}
@@ -1702,9 +1704,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <div class="empty">No cluster benchmark runs yet.</div>
       {{end}}
     </section>
-    <section style="margin-top: 20px;">
+    <section id="jobs" style="margin-top: 20px;">
       <div class="section-head">
-        <h2>Jobs</h2>
+        <h2>Compute Jobs</h2>
         <code>{{len .Jobs}} recent</code>
       </div>
       <form class="job-runner" id="compute-job-form">
@@ -1741,7 +1743,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <button class="button primary" type="submit" {{if not .OnlineNodes}}disabled{{end}}>Run compute job</button>
         </div>
       </form>
-      <div class="runner-status" id="compute-job-status">{{if .OnlineNodes}}Submit a benchmark-style compute job to the current online worker pool.{{else}}Connect at least one worker before submitting a compute job.{{end}}</div>
+      <div class="runner-status" id="compute-job-status">{{if .OnlineNodes}}Submit one compute job to the scheduler. Capacity, requirements, and job slots decide where it runs.{{else}}Connect at least one worker before submitting a compute job.{{end}}</div>
       {{if .Jobs}}
       <div class="table-wrap">
         <table>
@@ -1779,7 +1781,14 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                   <div><span>Runtime</span><strong>{{jobMetric . "worker_runtime"}}</strong></div>
                 </div>
               </td>
-              <td class="mono-output"><code>{{clip (jobDetail .) 180}}</code></td>
+              <td class="mono-output">
+                <code>{{clip (jobDetail .) 180}}</code>
+                {{if jobCanCancel .}}
+                <form class="job-cancel-form" data-job-id="{{.ID}}">
+                  <button class="button danger" type="submit">Cancel</button>
+                </form>
+                {{end}}
+              </td>
             </tr>
             {{if .LastFailure}}
             <tr>
@@ -1843,6 +1852,34 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         });
       });
     }
+    document.querySelectorAll(".job-cancel-form").forEach(function(cancelForm) {
+      cancelForm.addEventListener("submit", function(event) {
+        event.preventDefault();
+        var jobID = cancelForm.dataset.jobId;
+        if (!jobID) return;
+        var button = cancelForm.querySelector("button");
+        if (button) {
+          button.disabled = true;
+          button.innerText = "Canceling...";
+        }
+        fetch("/v1/jobs/" + encodeURIComponent(jobID) + "/cancel", {
+          method: "POST"
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function() {
+          window.location.reload();
+        }).catch(function(error) {
+          if (button) {
+            button.disabled = false;
+            button.innerText = "Cancel";
+          }
+          alert("Cancel failed: " + error.message);
+        });
+      });
+    });
     function startClusterBenchmark(sourceForm, statusElement, label) {
       var size = parseInt(sourceForm.elements.size.value, 10);
       var iterations = parseInt(sourceForm.elements.iterations.value, 10);
@@ -1877,15 +1914,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       firstTestForm.addEventListener("submit", function(event) {
         event.preventDefault();
         startClusterBenchmark(firstTestForm, firstTestStatus, "first-test");
-      });
-    }
-    var clusterForm = document.getElementById("cluster-benchmark-form");
-    var clusterStatus = document.getElementById("cluster-benchmark-status");
-    if (clusterForm) {
-      clusterForm.addEventListener("submit", function(event) {
-        event.preventDefault();
-        var requestedBy = String(clusterForm.elements.requested_by.value || "dashboard").trim();
-        startClusterBenchmark(clusterForm, clusterStatus, requestedBy);
       });
     }
     if (document.body.dataset.activeJobs === "true") {
@@ -1992,6 +2020,46 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
       display: grid;
       align-content: start;
     }
+    .desktop-primary {
+      display: grid;
+      gap: 14px;
+      padding: 16px;
+    }
+    .desktop-primary h3 {
+      margin: 0;
+      font-size: 18px;
+    }
+    .desktop-primary p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .desktop-primary .hint {
+      margin: 0;
+    }
+    .manual-invite {
+      margin: 0 16px 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #fbfcfd;
+    }
+    .manual-invite summary {
+      padding: 12px 14px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .manual-invite .manual-body {
+      display: grid;
+      gap: 10px;
+      padding: 0 14px 14px;
+    }
+    .manual-invite pre {
+      border-radius: 6px;
+    }
     .section-head {
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
@@ -2092,16 +2160,26 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
 
       <section class="desktop-card">
         <div class="section-head">
-          <h2>Worker desktop app</h2>
-          <button type="button" data-copy="desktop-invite">Copy invite link</button>
+          <h2>Install worker app</h2>
+          <code>recommended</code>
         </div>
-        <pre><code id="desktop-invite">{{.DesktopInviteURL}}</code></pre>
-        <div class="actions">
-          <a class="button primary" href="{{.DesktopInviteHref}}">Open Worker App</a>
-          <a class="button secondary" id="worker-download" href="{{.DownloadURL}}">Download Worker App</a>
-          <a class="button" href="https://github.com/NythralHome/cmesh/releases/latest">Other platforms</a>
+        <div class="desktop-primary">
+          <h3>Use the installer first</h3>
+          <p>Install CMesh Worker on this machine, then open the invite so the app can prefill the manager URL and join token.</p>
+          <div class="actions">
+            <a class="button primary" id="worker-download" href="{{.DownloadURL}}">Download Worker App</a>
+            <a class="button secondary" href="{{.DesktopInviteHref}}">Open installed app</a>
+            <a class="button" href="https://github.com/NythralHome/cmesh/releases/latest">Other platforms</a>
+          </div>
+          <p class="hint" id="worker-download-hint">Direct downloads use the latest CMesh release.</p>
         </div>
-        <p class="hint" id="worker-download-hint">Direct downloads use the latest CMesh release.</p>
+        <details class="manual-invite">
+          <summary>Manual invite link</summary>
+          <div class="manual-body">
+            <pre><code id="desktop-invite">{{.DesktopInviteURL}}</code></pre>
+            <button type="button" data-copy="desktop-invite">Copy manual invite link</button>
+          </div>
+        </details>
       </section>
     </div>
 
@@ -2175,14 +2253,14 @@ iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-wor
       var releaseBase = "{{.ReleaseDownloadBase}}";
       var options = {
         macApple: {
-          label: "Download installer for macOS Apple Silicon",
+          label: "Download for Apple Silicon",
           asset: "CMesh-Worker-Apple-Silicon.dmg",
-          hint: "Open the DMG, drag CMesh Worker to Applications, then use Open Worker App."
+          hint: "Install CMesh Worker, then open the invite to prefill this cluster."
         },
         macIntel: {
-          label: "Download installer for macOS Intel",
+          label: "Download for Intel Mac",
           asset: "CMesh-Worker-Intel-Mac.dmg",
-          hint: "Open the DMG, drag CMesh Worker to Applications, then use Open Worker App."
+          hint: "Install CMesh Worker, then open the invite to prefill this cluster."
         },
         windows: {
           label: "Download for Windows",

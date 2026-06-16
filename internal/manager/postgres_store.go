@@ -367,11 +367,14 @@ func (s *PostgresStore) CompleteJob(jobID string, req jobs.CompleteRequest) (job
 	selectRow := s.pool.QueryRow(context.Background(), `
 SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
 FROM jobs
-WHERE id = $1 AND assigned_to = $2 AND status = $3
-`, jobID, req.NodeID, string(jobs.StatusRunning))
+WHERE id = $1 AND assigned_to = $2 AND status IN ($3, $4)
+`, jobID, req.NodeID, string(jobs.StatusRunning), string(jobs.StatusCanceled))
 	job, ok := scanJob(selectRow)
 	if !ok {
 		return jobs.Job{}, false
+	}
+	if job.Status == jobs.StatusCanceled {
+		return job, true
 	}
 
 	job.Result = req.Result
@@ -404,6 +407,25 @@ RETURNING id, type, status, requested_by, assigned_to, input, requirements, resu
 		s.scheduleQueuedJobs(now)
 	}
 	return updated, ok
+}
+
+func (s *PostgresStore) CancelJob(jobID string) (jobs.Job, bool) {
+	now := time.Now().UTC()
+	row := s.pool.QueryRow(context.Background(), `
+UPDATE jobs
+SET status = $2,
+    error = $3,
+    last_failure = '',
+    updated_at = $4,
+    finished_at = $4
+WHERE id = $1 AND status IN ($5, $6, $7)
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+`, jobID, string(jobs.StatusCanceled), "canceled by operator", now, string(jobs.StatusQueued), string(jobs.StatusScheduled), string(jobs.StatusRunning))
+	job, ok := scanJob(row)
+	if ok {
+		s.scheduleQueuedJobs(now)
+	}
+	return job, ok
 }
 
 func (s *PostgresStore) Nodes() []cluster.Node {
@@ -556,7 +578,7 @@ func (s *PostgresStore) pickWorkerExcept(req jobs.Requirements, excluded map[str
 		if !nodeMeetsRequirements(node, req) {
 			continue
 		}
-		if s.activeJobsForWorker(node.ID) >= defaultWorkerJobSlots {
+		if s.activeJobsForWorker(node.ID) >= workerJobSlots(node) {
 			continue
 		}
 		score := benchmarks[node.ID].TotalScore
@@ -574,7 +596,7 @@ func (s *PostgresStore) workerCanAccept(nodeID string, req jobs.Requirements) bo
 			return node.Role == cluster.NodeRoleWorker &&
 				node.Status == cluster.NodeStatusOnline &&
 				nodeMeetsRequirements(node, req) &&
-				s.activeJobsForWorker(node.ID) < defaultWorkerJobSlots
+				s.activeJobsForWorker(node.ID) < workerJobSlots(node)
 		}
 	}
 	return false
@@ -599,7 +621,7 @@ FROM jobs
 WHERE assigned_to = $1 AND status IN ($2, $3)
 `, nodeID, string(jobs.StatusScheduled), string(jobs.StatusRunning))
 	if err := row.Scan(&count); err != nil {
-		return defaultWorkerJobSlots
+		return workerJobSlots(cluster.Node{})
 	}
 	return count
 }

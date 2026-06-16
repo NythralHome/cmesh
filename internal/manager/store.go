@@ -19,6 +19,7 @@ type Store interface {
 	Job(id string) (jobs.Job, bool)
 	NextJobForWorker(nodeID string) (jobs.Job, bool)
 	CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, bool)
+	CancelJob(jobID string) (jobs.Job, bool)
 	Nodes() []cluster.Node
 	ClusterSummary() ClusterSummary
 }
