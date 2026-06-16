@@ -158,7 +158,7 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 		JoinToken:           s.joinToken,
 		DesktopInviteURL:    desktopInviteURL(managerURL, s.joinToken),
 		DesktopInviteHref:   template.URL(desktopInviteURL(managerURL, s.joinToken)),
-		DownloadURL:         releaseDownloadBase(version.Version) + "CMesh-Worker-macos-arm64.zip",
+		DownloadURL:         releaseDownloadBase(version.Version) + "CMesh-Worker-macos-arm64.dmg",
 		ReleaseDownloadBase: releaseDownloadBase(version.Version),
 	}
 
@@ -1913,8 +1913,8 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
         <h2>Recommended flow</h2>
         <p class="sub">Install the worker app on the machine that will share resources. The invite link pre-fills this manager URL and one-time join token.</p>
         <div class="steps">
-          <div class="step-card"><strong>1. Download</strong><span>Use the platform-specific worker app for this machine.</span></div>
-          <div class="step-card"><strong>2. Open invite</strong><span>The app receives the manager URL and join token automatically.</span></div>
+          <div class="step-card"><strong>1. Install</strong><span>Download the worker installer and move the app to Applications.</span></div>
+          <div class="step-card"><strong>2. Open invite</strong><span>The installed app receives the manager URL and join token automatically.</span></div>
           <div class="step-card"><strong>3. Start worker</strong><span>Choose resource limits, save settings, then connect to the cluster.</span></div>
         </div>
       </div>
@@ -2004,14 +2004,14 @@ iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-wor
       var releaseBase = "{{.ReleaseDownloadBase}}";
       var options = {
         macApple: {
-          label: "Download for macOS Apple Silicon",
-          asset: "CMesh-Worker-macos-arm64.zip",
-          hint: "Best for M1, M2, M3, and newer Apple Silicon Macs."
+          label: "Download installer for macOS Apple Silicon",
+          asset: "CMesh-Worker-macos-arm64.dmg",
+          hint: "Open the DMG, drag CMesh Worker to Applications, then use Open Worker App."
         },
         macIntel: {
-          label: "Download for macOS Intel",
-          asset: "CMesh-Worker-macos-amd64.zip",
-          hint: "Best for older Intel-based Macs."
+          label: "Download installer for macOS Intel",
+          asset: "CMesh-Worker-macos-amd64.dmg",
+          hint: "Open the DMG, drag CMesh Worker to Applications, then use Open Worker App."
         },
         windows: {
           label: "Download for Windows",

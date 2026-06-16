@@ -86,14 +86,14 @@ jobs:
           flutter build macos --dart-define=CMESH_WORKER_VERSION=${GITHUB_REF_NAME}
           app_bundle="build/macos/Build/Products/Release/CMesh Worker.app"
           cp ../../bin/cmesh "$app_bundle/Contents/Resources/cmesh"
-          ditto -c -k --keepParent "$app_bundle" ../../dist/CMesh-Worker-macos-${{ matrix.goarch }}.zip
+          ../../scripts/package-macos-dmg.sh "$app_bundle" ../../dist/CMesh-Worker-macos-${{ matrix.goarch }}.dmg "CMesh Worker ${GITHUB_REF_NAME}"
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
           files: |
-            dist/CMesh-Worker-macos-*.zip
+            dist/CMesh-Worker-macos-*.dmg
 
   worker-desktop-windows:
     name: Build Worker Desktop Windows
