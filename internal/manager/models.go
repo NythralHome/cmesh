@@ -55,7 +55,7 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 				lastUpdated = job.UpdatedAt
 				summary.LastJobID = job.ID
 				summary.LastUpdated = job.UpdatedAt
-				summary.LastError = job.Error
+				summary.LastError = visibleModelLastError(job.Error)
 			}
 			switch job.Type {
 			case models.JobInstall:
@@ -156,6 +156,13 @@ func gbDiff(required uint64, actual uint64) float64 {
 		return 0
 	}
 	return float64(required-actual) / 1024 / 1024 / 1024
+}
+
+func visibleModelLastError(value string) string {
+	if strings.Contains(value, "unsupported job type") {
+		return ""
+	}
+	return value
 }
 
 func jobModelID(job jobs.Job) (string, bool) {
