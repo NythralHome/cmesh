@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/runtimes"
 	"github.com/cmesh/cmesh/internal/workerstatus"
 )
 
@@ -43,6 +44,7 @@ type Status struct {
 	LastError  string                  `json:"last_error,omitempty"`
 	LogTail    string                  `json:"log_tail"`
 	JobStatus  *workerstatus.JobStatus `json:"job_status,omitempty"`
+	Runtime    runtimes.RuntimeStatus  `json:"runtime_status"`
 	Config     Config                  `json:"config"`
 	ConfigPath string                  `json:"config_path"`
 }
@@ -364,6 +366,7 @@ func (s *Server) status() Status {
 		ExitCode:   s.exitCode,
 		LastError:  s.lastError,
 		LogTail:    s.logTail.String(),
+		Runtime:    runtimes.LlamaCPPStatus(s.config.WorkerCacheDir),
 		Config:     s.config,
 		ConfigPath: s.configPath,
 	}

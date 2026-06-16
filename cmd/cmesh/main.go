@@ -27,6 +27,7 @@ import (
 	"github.com/cmesh/cmesh/internal/membership"
 	"github.com/cmesh/cmesh/internal/models"
 	"github.com/cmesh/cmesh/internal/resources"
+	"github.com/cmesh/cmesh/internal/runtimes"
 	"github.com/cmesh/cmesh/internal/version"
 	"github.com/cmesh/cmesh/internal/workercontrol"
 	"github.com/cmesh/cmesh/internal/workerstatus"
@@ -896,11 +897,13 @@ type modelDeleteResult struct {
 }
 
 type modelGenerateResult struct {
-	Kind          string `json:"kind"`
-	ModelID       string `json:"model_id"`
-	Output        string `json:"output"`
-	Tokens        int    `json:"tokens,omitempty"`
-	WorkerRuntime string `json:"worker_runtime"`
+	Kind           string `json:"kind"`
+	ModelID        string `json:"model_id"`
+	Output         string `json:"output"`
+	Tokens         int    `json:"tokens,omitempty"`
+	WorkerRuntime  string `json:"worker_runtime"`
+	ModelRuntime   string `json:"model_runtime"`
+	RuntimeVersion string `json:"runtime_version,omitempty"`
 }
 
 func executeModelInstallJob(input string, cacheDir string) (string, error) {
@@ -1013,9 +1016,9 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 		}
 		return "", err
 	}
-	cli, err := findLlamaCLI()
+	cli, runtimeStatus, err := ensureModelRuntime(model.Runtime, cacheDir)
 	if err != nil {
-		return "", fmt.Errorf("model %s is installed, but llama-cli is not available. Install llama.cpp or add llama-cli to PATH", model.ID)
+		return "", fmt.Errorf("model %s is installed, but %s runtime is not ready: %w", model.ID, model.Runtime, err)
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 || maxTokens > 2048 {
@@ -1027,43 +1030,31 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	}
 	cmd := exec.Command(cli, "-m", path, "-p", req.Prompt, "-n", strconv.Itoa(maxTokens), "--temp", temperature)
 	cmd.Env = os.Environ()
+	cmd.Dir = filepath.Dir(cli)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("llama-cli failed: %w: %s", err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("%s failed: %w: %s", model.Runtime, err, strings.TrimSpace(string(output)))
 	}
 	text := strings.TrimSpace(string(output))
 	result := modelGenerateResult{
-		Kind:          string(models.JobGenerate),
-		ModelID:       model.ID,
-		Output:        text,
-		WorkerRuntime: runtime.GOOS + "/" + runtime.GOARCH,
+		Kind:           string(models.JobGenerate),
+		ModelID:        model.ID,
+		Output:         text,
+		WorkerRuntime:  runtime.GOOS + "/" + runtime.GOARCH,
+		ModelRuntime:   string(model.Runtime),
+		RuntimeVersion: runtimeStatus.Version,
 	}
 	body, err := json.Marshal(result)
 	return string(body), err
 }
 
-func findLlamaCLI() (string, error) {
-	if cli, err := exec.LookPath("llama-cli"); err == nil {
-		return cli, nil
+func ensureModelRuntime(modelRuntime models.Runtime, cacheDir string) (string, runtimes.RuntimeStatus, error) {
+	switch modelRuntime {
+	case models.RuntimeLlamaCPP:
+		return runtimes.EnsureLlamaCPP(context.Background(), cacheDir)
+	default:
+		return "", runtimes.RuntimeStatus{}, fmt.Errorf("unsupported runtime %q", modelRuntime)
 	}
-	candidates := []string{
-		"/opt/homebrew/bin/llama-cli",
-		"/usr/local/bin/llama-cli",
-		"/opt/local/bin/llama-cli",
-		"/usr/bin/llama-cli",
-	}
-	if runtime.GOOS == "windows" {
-		candidates = append([]string{
-			`C:\Program Files\llama.cpp\llama-cli.exe`,
-			`C:\Program Files\CMesh\llama-cli.exe`,
-		}, candidates...)
-	}
-	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-	return "", exec.ErrNotFound
 }
 
 func modelPath(cacheDir string, model models.Model) string {

@@ -65,6 +65,12 @@ void main() {
       'pid': 4120,
       'started_at': '2026-06-15T05:30:00Z',
       'log_tail': 'started worker pid=4120\n',
+      'runtime_status': {
+        'name': 'llama.cpp',
+        'ready': true,
+        'version': 'b9672',
+        'platform': 'darwin/arm64',
+      },
       'job_status': {
         'state': 'running',
         'job_id': 'job-123',
@@ -78,6 +84,7 @@ void main() {
     expect(status.label, 'Running');
     expect(status.jobStatus?.label, 'Running job');
     expect(status.jobStatus?.jobId, 'job-123');
+    expect(status.modelRuntime?.label, 'llama.cpp b9672 ready');
     expect(
       status.startedAt?.toUtc().toIso8601String(),
       '2026-06-15T05:30:00.000Z',

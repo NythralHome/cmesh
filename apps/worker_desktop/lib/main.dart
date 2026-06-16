@@ -569,6 +569,7 @@ class WorkerRuntimeStatus {
     this.configPath = '',
     this.logTail = '',
     this.jobStatus,
+    this.modelRuntime,
   });
 
   final bool running;
@@ -581,6 +582,7 @@ class WorkerRuntimeStatus {
   final String configPath;
   final String logTail;
   final WorkerJobStatus? jobStatus;
+  final WorkerModelRuntimeStatus? modelRuntime;
 
   factory WorkerRuntimeStatus.fromJson(Map<String, dynamic> json) {
     final startedAtRaw = json['started_at'] as String?;
@@ -591,6 +593,11 @@ class WorkerRuntimeStatus {
     final joinToken = config['join_token'] as String? ?? '';
     final parsedJobStatus = json['job_status'] is Map<String, dynamic>
         ? WorkerJobStatus.fromJson(json['job_status'] as Map<String, dynamic>)
+        : null;
+    final parsedModelRuntime = json['runtime_status'] is Map<String, dynamic>
+        ? WorkerModelRuntimeStatus.fromJson(
+            json['runtime_status'] as Map<String, dynamic>,
+          )
         : null;
     return WorkerRuntimeStatus(
       running: json['running'] as bool? ?? false,
@@ -603,6 +610,7 @@ class WorkerRuntimeStatus {
       configPath: json['config_path'] as String? ?? '',
       logTail: logTail,
       jobStatus: parsedJobStatus ?? WorkerJobStatus.fromLogTail(logTail),
+      modelRuntime: parsedModelRuntime,
     );
   }
 
@@ -611,6 +619,47 @@ class WorkerRuntimeStatus {
     if (lastError != null && lastError!.isNotEmpty) return 'Error';
     if (exitCode != null) return 'Stopped';
     return 'Not running';
+  }
+}
+
+class WorkerModelRuntimeStatus {
+  const WorkerModelRuntimeStatus({
+    required this.name,
+    required this.ready,
+    this.version = '',
+    this.platform = '',
+    this.binaryPath = '',
+    this.source = '',
+    this.error = '',
+  });
+
+  final String name;
+  final bool ready;
+  final String version;
+  final String platform;
+  final String binaryPath;
+  final String source;
+  final String error;
+
+  factory WorkerModelRuntimeStatus.fromJson(Map<String, dynamic> json) {
+    return WorkerModelRuntimeStatus(
+      name: json['name'] as String? ?? 'runtime',
+      ready: json['ready'] as bool? ?? false,
+      version: json['version'] as String? ?? '',
+      platform: json['platform'] as String? ?? '',
+      binaryPath: json['binary_path'] as String? ?? '',
+      source: json['source'] as String? ?? '',
+      error: json['error'] as String? ?? '',
+    );
+  }
+
+  String get label {
+    if (ready) {
+      final suffix = version.isEmpty ? '' : ' $version';
+      return '$name$suffix ready';
+    }
+    if (error.isNotEmpty) return '$name missing';
+    return '$name unknown';
   }
 }
 
@@ -2481,6 +2530,10 @@ class _RuntimeStatusCard extends StatelessWidget {
                 : current.joinTokenConfigured
                 ? 'Configured'
                 : 'Not configured',
+          ),
+          _StatusLine(
+            label: 'AI runtime',
+            value: current?.modelRuntime?.label ?? '-',
           ),
           _StatusLine(
             label: 'PID',
