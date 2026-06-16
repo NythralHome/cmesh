@@ -16,7 +16,6 @@ required_assets=(
   "cmesh-darwin-arm64"
   "cmesh-windows-amd64.exe"
   "CMesh-Worker-Apple-Silicon.dmg"
-  "CMesh-Worker-Intel-Mac.dmg"
   "CMesh-Worker-linux-amd64.tar.gz"
   "CMesh-Worker-windows-amd64.zip"
   "checksums.txt"

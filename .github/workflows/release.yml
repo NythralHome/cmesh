@@ -48,8 +48,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-intel
-            goarch: amd64
           - runner: macos-latest
             goarch: arm64
     steps:
@@ -86,12 +84,7 @@ jobs:
           flutter build macos --dart-define=CMESH_WORKER_VERSION=${GITHUB_REF_NAME}
           app_bundle="build/macos/Build/Products/Release/CMesh Worker.app"
           cp ../../bin/cmesh "$app_bundle/Contents/Resources/cmesh"
-          dmg_name="CMesh-Worker-Intel-Mac.dmg"
-          if [ "${{ matrix.goarch }}" = "arm64" ]; then
-            dmg_name="CMesh-Worker-Apple-Silicon.dmg"
-          else
-            export CMESH_PLAIN_DMG=1
-          fi
+          dmg_name="CMesh-Worker-Apple-Silicon.dmg"
           ../../scripts/package-macos-dmg.sh "$app_bundle" "../../dist/$dmg_name" "CMesh Worker ${GITHUB_REF_NAME}"
 
       - name: Upload Release Asset
