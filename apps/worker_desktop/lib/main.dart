@@ -333,9 +333,16 @@ class WorkerProtocolRegistrar {
     final appBundle = _macOSAppBundle();
     if (appBundle == null) {
       return const WorkerCommandResult(
-        exitCode: 1,
+        exitCode: 0,
         output:
-            'Cannot register cmesh:// protocol because the app bundle was not found.',
+            'Skipping cmesh:// registration because the app bundle was not found.',
+      );
+    }
+    if (appBundle.path.contains('/build/macos/')) {
+      return WorkerCommandResult(
+        exitCode: 0,
+        output:
+            'Skipping cmesh:// registration for local development build at ${appBundle.path}.',
       );
     }
 
@@ -353,9 +360,9 @@ class WorkerProtocolRegistrar {
     final result = await Process.run(lsregister.path, ['-f', appBundle.path]);
     if (result.exitCode != 0) {
       return WorkerCommandResult(
-        exitCode: result.exitCode,
+        exitCode: 0,
         output:
-            'Failed to register cmesh:// protocol with LaunchServices.\n\n${result.stderr}${result.stdout}',
+            'LaunchServices could not refresh cmesh:// registration. macOS should still use the app bundle registration.\n\n${result.stderr}${result.stdout}',
       );
     }
     return WorkerCommandResult(
@@ -2407,6 +2414,14 @@ class _WorkerJobStatusCard extends StatelessWidget {
       'failed' => Icons.error_outline,
       _ => Icons.work_outline,
     };
+    final hasJob = current?.jobId.isNotEmpty == true;
+    final hasType = current?.type.isNotEmpty == true;
+    final timeLabel = state == 'running' ? 'Started' : 'Finished';
+    final timeValue = state == 'running'
+        ? _formatJobTime(current?.startedAt)
+        : _formatJobTime(current?.finishedAt ?? current?.updatedAt);
+    final hasTime = timeValue != '-';
+    final hasStructuredDetails = hasType || hasTime;
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -2431,20 +2446,17 @@ class _WorkerJobStatusCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          _StatusLine(
-            label: 'Job',
-            value: current?.jobId.isNotEmpty == true ? current!.jobId : '-',
-          ),
-          _StatusLine(
-            label: 'Type',
-            value: current?.type.isNotEmpty == true ? current!.type : '-',
-          ),
-          _StatusLine(
-            label: state == 'running' ? 'Started' : 'Finished',
-            value: state == 'running'
-                ? _formatJobTime(current?.startedAt)
-                : _formatJobTime(current?.finishedAt ?? current?.updatedAt),
-          ),
+          _StatusLine(label: 'Job', value: hasJob ? current!.jobId : '-'),
+          if (hasType) _StatusLine(label: 'Type', value: current!.type),
+          if (hasTime) _StatusLine(label: timeLabel, value: timeValue),
+          if (hasJob && !hasStructuredDetails)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'Only the legacy log entry is available for this job. Run a new job to capture type and timing.',
+                style: TextStyle(color: colors.onSurfaceVariant, fontSize: 12),
+              ),
+            ),
           if (current?.error.isNotEmpty == true) ...[
             const SizedBox(height: 8),
             Text(
