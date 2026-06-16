@@ -1060,6 +1060,13 @@ func generatableModelCount(in []ModelSummary) int {
 	return count
 }
 
+func modelFailureHint(summary ModelSummary) string {
+	if strings.Contains(summary.LastError, "unsupported job type") {
+		return "Worker app is older than this manager. Quit CMesh Worker, install the latest worker app, then reconnect."
+	}
+	return ""
+}
+
 func activeJobsByWorker(in []jobs.Job) map[string]int {
 	out := make(map[string]int)
 	for _, job := range in {
@@ -1290,6 +1297,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 	"isModelJob":       isModelJob,
 	"modelJobCount":    modelJobCount,
 	"generatableCount": generatableModelCount,
+	"modelFailureHint": modelFailureHint,
 	"workerSlots":      workerJobSlots,
 	"jobCanCancel":     jobCanBeCanceled,
 	"jobDuration":      jobDuration,
@@ -1860,6 +1868,37 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       gap: 8px;
       flex-wrap: wrap;
     }
+    .capability-list {
+      display: grid;
+      gap: 6px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+    .capability-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: start;
+      font-size: 12px;
+    }
+    .capability-row strong {
+      font-size: 12px;
+    }
+    .capability-row span {
+      color: var(--muted);
+      text-align: right;
+    }
+    .hint {
+      padding: 10px;
+      border: 1px solid #fed7aa;
+      border-radius: 8px;
+      background: #fff7ed;
+      color: #9a3412;
+      font-size: 13px;
+      font-weight: 600;
+    }
     .chat-panel {
       display: grid;
       gap: 12px;
@@ -2156,6 +2195,23 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <div><span>Required disk</span><strong>{{printf "%.1f" (gb .Model.DiskBytes)}} GB</strong></div>
             </div>
             <p class="sub">Runtime {{.Model.Runtime}} · context {{.Model.Context}} · {{.CapableNodes}} capable online workers</p>
+            {{if modelFailureHint .}}<div class="hint">{{modelFailureHint .}}</div>{{end}}
+            {{if .Capabilities}}
+            <div class="capability-list">
+              {{range .Capabilities}}
+              <div class="capability-row">
+                <strong>{{.Name}}</strong>
+                {{if .Capable}}
+                <span>ready</span>
+                {{else}}
+                <span>{{range $index, $reason := .Reasons}}{{if $index}}; {{end}}{{$reason}}{{end}}</span>
+                {{end}}
+              </div>
+              {{end}}
+            </div>
+            {{else}}
+            <p class="sub">No online workers are reporting resources for this model.</p>
+            {{end}}
             {{if .InstalledOn}}
             <p class="sub">Installed on {{range $index, $nodeID := .InstalledOn}}{{if $index}}, {{end}}<code>{{nodeLabel $.NodesByID $nodeID}}</code>{{end}}</p>
             {{else if .LastError}}

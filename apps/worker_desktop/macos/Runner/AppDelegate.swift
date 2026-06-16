@@ -5,17 +5,25 @@ import FlutterMacOS
 class AppDelegate: FlutterAppDelegate {
   private var statusItem: NSStatusItem?
   private var statusMenu: NSMenu?
+  private var openedFromInviteURL = false
 
   override func applicationDidFinishLaunching(_ notification: Notification) {
     super.applicationDidFinishLaunching(notification)
     NSApp.setActivationPolicy(.accessory)
     configureStatusItem()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+      if !self.openedFromInviteURL {
+        self.hideMainWindow()
+      }
+    }
   }
 
   override func application(_ application: NSApplication, open urls: [URL]) {
+    openedFromInviteURL = true
     for url in urls {
       InviteURLBridge.handle(url: url)
     }
+    showMainWindow()
   }
 
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -53,6 +61,12 @@ class AppDelegate: FlutterAppDelegate {
       }
       window.makeKeyAndOrderFront(nil)
       window.orderFrontRegardless()
+    }
+  }
+
+  private func hideMainWindow() {
+    if let window = NSApp.windows.first {
+      window.orderOut(nil)
     }
   }
 }

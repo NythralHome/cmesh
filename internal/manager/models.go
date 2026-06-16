@@ -2,6 +2,7 @@ package manager
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -12,14 +13,22 @@ import (
 )
 
 type ModelSummary struct {
-	Model        models.Model `json:"model"`
-	Status       string       `json:"status"`
-	InstalledOn  []string     `json:"installed_on"`
-	ActiveJobID  string       `json:"active_job_id,omitempty"`
-	LastJobID    string       `json:"last_job_id,omitempty"`
-	LastError    string       `json:"last_error,omitempty"`
-	LastUpdated  time.Time    `json:"last_updated,omitempty"`
-	CapableNodes int          `json:"capable_nodes"`
+	Model        models.Model      `json:"model"`
+	Status       string            `json:"status"`
+	InstalledOn  []string          `json:"installed_on"`
+	ActiveJobID  string            `json:"active_job_id,omitempty"`
+	LastJobID    string            `json:"last_job_id,omitempty"`
+	LastError    string            `json:"last_error,omitempty"`
+	LastUpdated  time.Time         `json:"last_updated,omitempty"`
+	CapableNodes int               `json:"capable_nodes"`
+	Capabilities []ModelCapability `json:"capabilities,omitempty"`
+}
+
+type ModelCapability struct {
+	NodeID  string   `json:"node_id"`
+	Name    string   `json:"name"`
+	Capable bool     `json:"capable"`
+	Reasons []string `json:"reasons,omitempty"`
 }
 
 func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster.Node) []ModelSummary {
@@ -32,8 +41,9 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 		summary := ModelSummary{
 			Model:        model,
 			Status:       "available",
-			CapableNodes: capableModelNodes(model, nodes),
+			Capabilities: modelCapabilities(model, nodes),
 		}
+		summary.CapableNodes = capableModelNodes(summary.Capabilities)
 		installed := make(map[string]bool)
 		var lastUpdated time.Time
 		for _, job := range jobsList {
@@ -78,18 +88,74 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 	return out
 }
 
-func capableModelNodes(model models.Model, nodes []cluster.Node) int {
-	var total int
+func modelCapabilities(model models.Model, nodes []cluster.Node) []ModelCapability {
+	out := make([]ModelCapability, 0, len(nodes))
 	for _, node := range nodes {
 		if node.Role != cluster.NodeRoleWorker || node.Status != cluster.NodeStatusOnline {
 			continue
 		}
-		if node.Resources.Memory.AllowedBytes >= model.MemoryBytes &&
-			node.Resources.Storage.AllowedBytes >= model.DiskBytes {
+		item := ModelCapability{
+			NodeID: node.ID,
+			Name:   node.Name,
+		}
+		if strings.TrimSpace(item.Name) == "" {
+			item.Name = node.ID
+		}
+		if node.Resources.Memory.AllowedBytes < model.MemoryBytes {
+			item.Reasons = append(item.Reasons, fmt.Sprintf("RAM short by %.1f GB", gbDiff(model.MemoryBytes, node.Resources.Memory.AllowedBytes)))
+		}
+		if node.Resources.Storage.AllowedBytes < model.DiskBytes {
+			item.Reasons = append(item.Reasons, fmt.Sprintf("disk short by %.1f GB", gbDiff(model.DiskBytes, node.Resources.Storage.AllowedBytes)))
+		}
+		if model.VRAMBytes > 0 && !hasAllowedVRAM(node.Resources.GPU, model.VRAMBytes) {
+			item.Reasons = append(item.Reasons, fmt.Sprintf("VRAM short by %.1f GB", gbDiff(model.VRAMBytes, maxAllowedVRAM(node.Resources.GPU))))
+		}
+		item.Capable = len(item.Reasons) == 0
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Capable != out[j].Capable {
+			return out[i].Capable
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func capableModelNodes(capabilities []ModelCapability) int {
+	var total int
+	for _, capability := range capabilities {
+		if capability.Capable {
 			total++
 		}
 	}
 	return total
+}
+
+func hasAllowedVRAM(gpus []cluster.GPUResources, required uint64) bool {
+	for _, gpu := range gpus {
+		if gpu.ComputeCompatible && gpu.AllowedVRAMBytes >= required {
+			return true
+		}
+	}
+	return false
+}
+
+func maxAllowedVRAM(gpus []cluster.GPUResources) uint64 {
+	var maxValue uint64
+	for _, gpu := range gpus {
+		if gpu.ComputeCompatible && gpu.AllowedVRAMBytes > maxValue {
+			maxValue = gpu.AllowedVRAMBytes
+		}
+	}
+	return maxValue
+}
+
+func gbDiff(required uint64, actual uint64) float64 {
+	if required <= actual {
+		return 0
+	}
+	return float64(required-actual) / 1024 / 1024 / 1024
 }
 
 func jobModelID(job jobs.Job) (string, bool) {
