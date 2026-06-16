@@ -452,10 +452,11 @@ func (s *Server) handleClusterBenchmarks(w http.ResponseWriter, r *http.Request)
 		created := make([]jobs.Job, 0, len(nodes))
 		for _, node := range nodes {
 			job, err := s.state.CreateJob(jobs.CreateRequest{
-				Type:        "compute.matrix_multiply",
-				Input:       string(input),
-				RequestedBy: requestedBy,
-				AssignedTo:  node.ID,
+				Type:         "compute.matrix_multiply",
+				Input:        string(input),
+				RequestedBy:  requestedBy,
+				AssignedTo:   node.ID,
+				Requirements: matrixJobRequirements(req.Size),
 			})
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -871,6 +872,40 @@ func jobWorkload(job jobs.Job) string {
 	return job.Input
 }
 
+func matrixJobRequirements(size int) jobs.Requirements {
+	requirements := jobs.Requirements{CPUCores: 1}
+	if size <= 0 {
+		return requirements
+	}
+	matrixBytes := uint64(size) * uint64(size) * 8
+	requirements.MemoryBytes = matrixBytes * 3
+	return requirements
+}
+
+func jobRequirements(job jobs.Job) string {
+	req := job.Requirements
+	parts := make([]string, 0, 5)
+	if req.CPUCores > 0 {
+		parts = append(parts, fmt.Sprintf("%d CPU", req.CPUCores))
+	}
+	if req.MemoryBytes > 0 {
+		parts = append(parts, fmt.Sprintf("%.1f GB RAM", float64(req.MemoryBytes)/1024/1024/1024))
+	}
+	if req.DiskBytes > 0 {
+		parts = append(parts, fmt.Sprintf("%.1f GB disk", float64(req.DiskBytes)/1024/1024/1024))
+	}
+	if req.GPURequired {
+		parts = append(parts, "GPU")
+	}
+	if req.VRAMBytes > 0 {
+		parts = append(parts, fmt.Sprintf("%.1f GB VRAM", float64(req.VRAMBytes)/1024/1024/1024))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ", ")
+}
+
 func formatClock(value time.Time) string {
 	if value.IsZero() {
 		return "-"
@@ -928,7 +963,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		}
 		if job.Result == "" {
 			if job.AssignedTo == "" {
-				return "Waiting for an online worker."
+				if job.LastFailure != "" {
+					return job.LastFailure
+				}
+				return "Waiting for a capable worker."
 			}
 			return "Waiting for worker result."
 		}
@@ -997,10 +1035,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		}
 		return percent
 	},
-	"hasActiveJobs": hasActiveJobs,
-	"jobDuration":   jobDuration,
-	"jobTimeline":   jobTimeline,
-	"jobWorkload":   jobWorkload,
+	"hasActiveJobs":   hasActiveJobs,
+	"jobDuration":     jobDuration,
+	"jobTimeline":     jobTimeline,
+	"jobWorkload":     jobWorkload,
+	"jobRequirements": jobRequirements,
 	"jobMetric": func(job jobs.Job, key string) string {
 		if job.Result == "" {
 			return "-"
@@ -1291,7 +1330,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .job-runner,
     .cluster-runner {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 12px;
       padding: 16px;
       border-bottom: 1px solid var(--line);
@@ -1307,7 +1346,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       font-weight: 700;
       text-transform: uppercase;
     }
-    input {
+    input,
+    select {
       min-height: 36px;
       width: 100%;
       padding: 0 10px;
@@ -1664,6 +1704,21 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <input id="job-requested-by" name="requested_by" value="dashboard">
         </div>
         <div class="field">
+          <label for="job-cpu-cores">CPU cores</label>
+          <input id="job-cpu-cores" name="cpu_cores" type="number" min="1" max="256" step="1" value="1">
+        </div>
+        <div class="field">
+          <label for="job-memory-gb">RAM GB</label>
+          <input id="job-memory-gb" name="memory_gb" type="number" min="0" max="2048" step="0.1" value="0">
+        </div>
+        <div class="field">
+          <label for="job-gpu-required">GPU</label>
+          <select id="job-gpu-required" name="gpu_required">
+            <option value="false" selected>Not required</option>
+            <option value="true">Required</option>
+          </select>
+        </div>
+        <div class="field">
           <label>&nbsp;</label>
           <button class="button primary" type="submit" {{if not .OnlineNodes}}disabled{{end}}>Run compute job</button>
         </div>
@@ -1677,6 +1732,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <th>Job</th>
               <th>Status</th>
               <th>Workload</th>
+              <th>Requirements</th>
               <th>Worker</th>
               <th>Timeline</th>
               <th>Result</th>
@@ -1695,6 +1751,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               </td>
               <td><span class="{{jobPillClass .Status}}">{{.Status}}</span></td>
               <td><code>{{clip (jobWorkload .) 64}}</code></td>
+              <td><code>{{jobRequirements .}}</code></td>
               <td><code>{{jobWorkerLabel $.NodesByID .}}</code>{{if .AssignedTo}}<br><span class="sub">{{shortID .AssignedTo}}</span>{{end}}</td>
               <td><div class="timeline">{{jobTimeline .}}<br>duration {{jobDuration .}}</div></td>
               <td>
@@ -1709,7 +1766,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             {{if .LastFailure}}
             <tr>
               <td></td>
-              <td colspan="6"><span class="sub">Last failure: {{.LastFailure}}</span></td>
+              <td colspan="7"><span class="sub">Last failure: {{.LastFailure}}</span></td>
             </tr>
             {{end}}
           {{end}}
@@ -1730,8 +1787,15 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         var size = parseInt(form.elements.size.value, 10);
         var iterations = parseInt(form.elements.iterations.value, 10);
         var requestedBy = String(form.elements.requested_by.value || "dashboard").trim();
+        var cpuCores = parseInt(form.elements.cpu_cores.value, 10);
+        var memoryGB = parseFloat(form.elements.memory_gb.value);
+        var gpuRequired = String(form.elements.gpu_required.value) === "true";
         if (!Number.isFinite(size) || size < 16 || !Number.isFinite(iterations) || iterations < 1) {
           status.innerText = "Use a valid matrix size and iteration count.";
+          return;
+        }
+        if (!Number.isFinite(cpuCores) || cpuCores < 1 || !Number.isFinite(memoryGB) || memoryGB < 0) {
+          status.innerText = "Use valid resource requirements.";
           return;
         }
         status.innerText = "Submitting compute job...";
@@ -1741,7 +1805,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           body: JSON.stringify({
             type: "compute.matrix_multiply",
             input: JSON.stringify({ size: size, iterations: iterations }),
-            requested_by: requestedBy
+            requested_by: requestedBy,
+            requirements: {
+              cpu_cores: cpuCores,
+              memory_bytes: Math.round(memoryGB * 1024 * 1024 * 1024),
+              gpu_required: gpuRequired
+            }
           })
         }).then(function(response) {
           if (!response.ok) {

@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_failure TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS requirements JSONB NOT NULL DEFAULT '{}';
 `)
 	return err
 }
@@ -106,6 +107,7 @@ func (s *PostgresStore) RegisterWorker(req membership.JoinRequest) membership.Jo
 INSERT INTO nodes (id, name, role, status, endpoint, resources, joined_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `, node.ID, node.Name, string(node.Role), string(node.Status), node.Endpoint, payload, node.JoinedAt, node.UpdatedAt)
+	s.scheduleQueuedJobs(now)
 
 	return membership.JoinResponse{
 		NodeID:         nodeID,
@@ -116,12 +118,17 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 
 func (s *PostgresStore) Heartbeat(hb membership.Heartbeat) bool {
 	payload, _ := json.Marshal(hb.Resources)
+	now := time.Now().UTC()
 	tag, err := s.pool.Exec(context.Background(), `
 UPDATE nodes
 SET status = $2, resources = $3, updated_at = $4
 WHERE id = $1
-`, hb.NodeID, string(cluster.NodeStatusOnline), payload, time.Now().UTC())
-	return err == nil && tag.RowsAffected() > 0
+`, hb.NodeID, string(cluster.NodeStatusOnline), payload, now)
+	ok := err == nil && tag.RowsAffected() > 0
+	if ok {
+		s.scheduleQueuedJobs(now)
+	}
+	return ok
 }
 
 func (s *PostgresStore) MarkWorkerOffline(nodeID string) bool {
@@ -140,7 +147,7 @@ WHERE id = $1
 
 func (s *PostgresStore) failActiveJobsForWorker(nodeID string, now time.Time, reason string) {
 	rows, err := s.pool.Query(context.Background(), `
-SELECT id, type, status, requested_by, assigned_to, input, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
 FROM jobs
 WHERE assigned_to = $1 AND status IN ($2, $3)
 `, nodeID, string(jobs.StatusScheduled), string(jobs.StatusRunning))
@@ -178,7 +185,7 @@ func (s *PostgresStore) rescheduleOrFailJob(job jobs.Job, failedNodeID string, n
 		job.Attempts = 1
 	}
 	if job.Attempts < job.MaxAttempts {
-		if nextWorkerID := s.pickWorkerExcept(map[string]bool{failedNodeID: true}); nextWorkerID != "" {
+		if nextWorkerID := s.pickWorkerExcept(job.Requirements, map[string]bool{failedNodeID: true}); nextWorkerID != "" {
 			job.Status = jobs.StatusScheduled
 			job.AssignedTo = nextWorkerID
 			job.Attempts++
@@ -190,6 +197,15 @@ func (s *PostgresStore) rescheduleOrFailJob(job jobs.Job, failedNodeID string, n
 			job.UpdatedAt = now
 			return job
 		}
+		job.Status = jobs.StatusQueued
+		job.AssignedTo = ""
+		job.LastFailure = reason + "; waiting for capable worker"
+		job.Error = ""
+		job.Result = ""
+		job.StartedAt = time.Time{}
+		job.FinishedAt = time.Time{}
+		job.UpdatedAt = now
+		return job
 	}
 	job.Status = jobs.StatusFailed
 	job.Error = reason
@@ -266,35 +282,43 @@ func (s *PostgresStore) BenchmarkSummaryByNode() map[string]NodeBenchmarkSummary
 func (s *PostgresStore) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 	now := time.Now().UTC()
 	job := jobs.Job{
-		ID:          newJobID(),
-		Type:        req.Type,
-		Status:      jobs.StatusQueued,
-		RequestedBy: req.RequestedBy,
-		Input:       req.Input,
-		MaxAttempts: normalizeMaxAttempts(req.MaxAttempts),
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           newJobID(),
+		Type:         req.Type,
+		Status:       jobs.StatusQueued,
+		RequestedBy:  req.RequestedBy,
+		Input:        req.Input,
+		Requirements: req.Requirements,
+		MaxAttempts:  normalizeMaxAttempts(req.MaxAttempts),
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 	if req.AssignedTo != "" {
-		job.AssignedTo = req.AssignedTo
-		job.Status = jobs.StatusScheduled
-		job.Attempts = 1
-	} else if workerID := s.pickWorker(); workerID != "" {
+		if s.workerCanRun(req.AssignedTo, job.Requirements) {
+			job.AssignedTo = req.AssignedTo
+			job.Status = jobs.StatusScheduled
+			job.Attempts = 1
+		} else {
+			job.LastFailure = "waiting for capable worker"
+		}
+	} else if workerID := s.pickWorker(job.Requirements); workerID != "" {
 		job.AssignedTo = workerID
 		job.Status = jobs.StatusScheduled
 		job.Attempts = 1
+	} else {
+		job.LastFailure = "waiting for capable worker"
 	}
 
+	requirements, _ := json.Marshal(job.Requirements)
 	_, err := s.pool.Exec(context.Background(), `
-INSERT INTO jobs (id, type, status, requested_by, assigned_to, input, result, error, attempts, max_attempts, last_failure, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-`, job.ID, job.Type, string(job.Status), job.RequestedBy, job.AssignedTo, job.Input, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.CreatedAt, job.UpdatedAt)
+INSERT INTO jobs (id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+`, job.ID, job.Type, string(job.Status), job.RequestedBy, job.AssignedTo, job.Input, requirements, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.CreatedAt, job.UpdatedAt)
 	return job, err
 }
 
 func (s *PostgresStore) Jobs() []jobs.Job {
 	rows, err := s.pool.Query(context.Background(), `
-SELECT id, type, status, requested_by, assigned_to, input, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
 FROM jobs
 ORDER BY created_at DESC
 `)
@@ -315,7 +339,7 @@ ORDER BY created_at DESC
 
 func (s *PostgresStore) Job(id string) (jobs.Job, bool) {
 	row := s.pool.QueryRow(context.Background(), `
-SELECT id, type, status, requested_by, assigned_to, input, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
 FROM jobs
 WHERE id = $1
 `, id)
@@ -333,25 +357,49 @@ WHERE id = (
   ORDER BY created_at ASC
   LIMIT 1
 )
-RETURNING id, type, status, requested_by, assigned_to, input, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
 `, nodeID, string(jobs.StatusScheduled), string(jobs.StatusRunning), now)
 	return scanJob(row)
 }
 
 func (s *PostgresStore) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, bool) {
 	now := time.Now().UTC()
-	status := jobs.StatusSucceeded
-	if req.Error != "" {
-		status = jobs.StatusFailed
+	selectRow := s.pool.QueryRow(context.Background(), `
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+FROM jobs
+WHERE id = $1 AND assigned_to = $2 AND status = $3
+`, jobID, req.NodeID, string(jobs.StatusRunning))
+	job, ok := scanJob(selectRow)
+	if !ok {
+		return jobs.Job{}, false
 	}
 
-	row := s.pool.QueryRow(context.Background(), `
+	job.Result = req.Result
+	job.Error = req.Error
+	job.UpdatedAt = now
+	if req.Error != "" {
+		job = s.rescheduleOrFailJob(job, req.NodeID, now, req.Error)
+	} else {
+		job.Status = jobs.StatusSucceeded
+		job.FinishedAt = now
+	}
+
+	updatedRow := s.pool.QueryRow(context.Background(), `
 UPDATE jobs
-SET status = $3, result = $4, error = $5, finished_at = $6, updated_at = $6
-WHERE id = $1 AND assigned_to = $2 AND status = $7
-RETURNING id, type, status, requested_by, assigned_to, input, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
-`, jobID, req.NodeID, string(status), req.Result, req.Error, now, string(jobs.StatusRunning))
-	return scanJob(row)
+SET status = $2,
+    assigned_to = $3,
+    result = $4,
+    error = $5,
+    attempts = $6,
+    max_attempts = $7,
+    last_failure = $8,
+    updated_at = $9,
+    started_at = $10,
+    finished_at = $11
+WHERE id = $1
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+`, job.ID, string(job.Status), job.AssignedTo, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.UpdatedAt, nullableTime(job.StartedAt), nullableTime(job.FinishedAt))
+	return scanJob(updatedRow)
 }
 
 func (s *PostgresStore) Nodes() []cluster.Node {
@@ -437,11 +485,59 @@ func (s *PostgresStore) deriveNodeStatus(node cluster.Node, now time.Time) clust
 	return node
 }
 
-func (s *PostgresStore) pickWorker() string {
-	return s.pickWorkerExcept(nil)
+func (s *PostgresStore) scheduleQueuedJobs(now time.Time) {
+	rows, err := s.pool.Query(context.Background(), `
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+FROM jobs
+WHERE status = $1 AND assigned_to = ''
+ORDER BY created_at ASC
+`, string(jobs.StatusQueued))
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		job, ok := scanJob(rows)
+		if !ok {
+			continue
+		}
+		workerID := s.pickWorker(job.Requirements)
+		if workerID == "" {
+			if job.LastFailure == "" {
+				_, _ = s.pool.Exec(context.Background(), `
+UPDATE jobs
+SET last_failure = $2, updated_at = $3
+WHERE id = $1
+`, job.ID, "waiting for capable worker", now)
+			}
+			continue
+		}
+		lastFailure := job.LastFailure
+		if lastFailure == "waiting for capable worker" {
+			lastFailure = ""
+		}
+		_, _ = s.pool.Exec(context.Background(), `
+UPDATE jobs
+SET status = $2,
+    assigned_to = $3,
+    attempts = attempts + 1,
+    last_failure = $6,
+    error = '',
+    result = '',
+    started_at = NULL,
+    finished_at = NULL,
+    updated_at = $4
+WHERE id = $1 AND status = $5 AND assigned_to = ''
+`, job.ID, string(jobs.StatusScheduled), workerID, now, string(jobs.StatusQueued), lastFailure)
+	}
 }
 
-func (s *PostgresStore) pickWorkerExcept(excluded map[string]bool) string {
+func (s *PostgresStore) pickWorker(req jobs.Requirements) string {
+	return s.pickWorkerExcept(req, nil)
+}
+
+func (s *PostgresStore) pickWorkerExcept(req jobs.Requirements, excluded map[string]bool) string {
 	nodes := s.Nodes()
 	benchmarks := s.BenchmarkSummaryByNode()
 	var bestID string
@@ -453,6 +549,9 @@ func (s *PostgresStore) pickWorkerExcept(excluded map[string]bool) string {
 		if node.Role != cluster.NodeRoleWorker || node.Status != cluster.NodeStatusOnline {
 			continue
 		}
+		if !nodeMeetsRequirements(node, req) {
+			continue
+		}
 		score := benchmarks[node.ID].TotalScore
 		if bestID == "" || score > bestScore {
 			bestID = node.ID
@@ -460,6 +559,17 @@ func (s *PostgresStore) pickWorkerExcept(excluded map[string]bool) string {
 		}
 	}
 	return bestID
+}
+
+func (s *PostgresStore) workerCanRun(nodeID string, req jobs.Requirements) bool {
+	for _, node := range s.Nodes() {
+		if node.ID == nodeID {
+			return node.Role == cluster.NodeRoleWorker &&
+				node.Status == cluster.NodeStatusOnline &&
+				nodeMeetsRequirements(node, req)
+		}
+	}
+	return false
 }
 
 type jobScanner interface {
@@ -471,6 +581,7 @@ func scanJob(row jobScanner) (jobs.Job, bool) {
 	var status string
 	var startedAt *time.Time
 	var finishedAt *time.Time
+	var requirements []byte
 	if err := row.Scan(
 		&job.ID,
 		&job.Type,
@@ -478,6 +589,7 @@ func scanJob(row jobScanner) (jobs.Job, bool) {
 		&job.RequestedBy,
 		&job.AssignedTo,
 		&job.Input,
+		&requirements,
 		&job.Result,
 		&job.Error,
 		&job.Attempts,
@@ -496,6 +608,9 @@ func scanJob(row jobScanner) (jobs.Job, bool) {
 	}
 	if finishedAt != nil {
 		job.FinishedAt = *finishedAt
+	}
+	if len(requirements) > 0 {
+		_ = json.Unmarshal(requirements, &job.Requirements)
 	}
 	job.MaxAttempts = normalizeMaxAttempts(job.MaxAttempts)
 	return job, true

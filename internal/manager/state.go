@@ -48,6 +48,7 @@ func (s *State) RegisterWorker(req membership.JoinRequest) membership.JoinRespon
 
 	s.mu.Lock()
 	s.nodes[nodeID] = node
+	s.scheduleQueuedJobsLocked(now)
 	s.mu.Unlock()
 
 	return membership.JoinResponse{
@@ -68,8 +69,10 @@ func (s *State) Heartbeat(hb membership.Heartbeat) bool {
 
 	node.Status = cluster.NodeStatusOnline
 	node.Resources = hb.Resources
-	node.UpdatedAt = time.Now().UTC()
+	now := time.Now().UTC()
+	node.UpdatedAt = now
 	s.nodes[hb.NodeID] = node
+	s.scheduleQueuedJobsLocked(now)
 	return true
 }
 
@@ -111,7 +114,7 @@ func (s *State) rescheduleOrFailJobLocked(job jobs.Job, failedNodeID string, now
 		job.Attempts = 1
 	}
 	if job.Attempts < job.MaxAttempts {
-		if nextWorkerID := s.pickWorkerExcludingLocked(map[string]bool{failedNodeID: true}); nextWorkerID != "" {
+		if nextWorkerID := s.pickWorkerExcludingLocked(job.Requirements, map[string]bool{failedNodeID: true}); nextWorkerID != "" {
 			job.Status = jobs.StatusScheduled
 			job.AssignedTo = nextWorkerID
 			job.Attempts++
@@ -123,6 +126,15 @@ func (s *State) rescheduleOrFailJobLocked(job jobs.Job, failedNodeID string, now
 			job.UpdatedAt = now
 			return job
 		}
+		job.Status = jobs.StatusQueued
+		job.AssignedTo = ""
+		job.LastFailure = reason + "; waiting for capable worker"
+		job.Error = ""
+		job.Result = ""
+		job.StartedAt = time.Time{}
+		job.FinishedAt = time.Time{}
+		job.UpdatedAt = now
+		return job
 	}
 	job.Status = jobs.StatusFailed
 	job.Error = reason
@@ -188,27 +200,34 @@ func (s *State) BenchmarkSummaryByNode() map[string]NodeBenchmarkSummary {
 func (s *State) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 	now := time.Now().UTC()
 	job := jobs.Job{
-		ID:          newJobID(),
-		Type:        req.Type,
-		Status:      jobs.StatusQueued,
-		RequestedBy: req.RequestedBy,
-		Input:       req.Input,
-		MaxAttempts: normalizeMaxAttempts(req.MaxAttempts),
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           newJobID(),
+		Type:         req.Type,
+		Status:       jobs.StatusQueued,
+		RequestedBy:  req.RequestedBy,
+		Input:        req.Input,
+		Requirements: req.Requirements,
+		MaxAttempts:  normalizeMaxAttempts(req.MaxAttempts),
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if req.AssignedTo != "" {
-		job.AssignedTo = req.AssignedTo
-		job.Status = jobs.StatusScheduled
-		job.Attempts = 1
-	} else if workerID := s.pickWorkerLocked(); workerID != "" {
+		if node, ok := s.nodes[req.AssignedTo]; ok && s.nodeCanRunJobLocked(node, job.Requirements, now) {
+			job.AssignedTo = req.AssignedTo
+			job.Status = jobs.StatusScheduled
+			job.Attempts = 1
+		} else {
+			job.LastFailure = "waiting for capable worker"
+		}
+	} else if workerID := s.pickWorkerLocked(job.Requirements); workerID != "" {
 		job.AssignedTo = workerID
 		job.Status = jobs.StatusScheduled
 		job.Attempts = 1
+	} else {
+		job.LastFailure = "waiting for capable worker"
 	}
 
 	s.jobs[job.ID] = job
@@ -266,23 +285,52 @@ func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, b
 	now := time.Now().UTC()
 	job.Result = req.Result
 	job.Error = req.Error
-	job.FinishedAt = now
 	job.UpdatedAt = now
 	if req.Error != "" {
-		job.Status = jobs.StatusFailed
+		job = s.rescheduleOrFailJobLocked(job, req.NodeID, now, req.Error)
 	} else {
 		job.Status = jobs.StatusSucceeded
+		job.FinishedAt = now
 	}
 	s.jobs[job.ID] = job
 
 	return job, true
 }
 
-func (s *State) pickWorkerLocked() string {
-	return s.pickWorkerExcludingLocked(nil)
+func (s *State) scheduleQueuedJobsLocked(now time.Time) {
+	for id, job := range s.jobs {
+		if job.Status != jobs.StatusQueued || job.AssignedTo != "" {
+			continue
+		}
+		workerID := s.pickWorkerLocked(job.Requirements)
+		if workerID == "" {
+			if job.LastFailure == "" {
+				job.LastFailure = "waiting for capable worker"
+				job.UpdatedAt = now
+				s.jobs[id] = job
+			}
+			continue
+		}
+		job.AssignedTo = workerID
+		job.Status = jobs.StatusScheduled
+		job.Attempts++
+		if job.LastFailure == "waiting for capable worker" {
+			job.LastFailure = ""
+		}
+		job.Error = ""
+		job.Result = ""
+		job.StartedAt = time.Time{}
+		job.FinishedAt = time.Time{}
+		job.UpdatedAt = now
+		s.jobs[id] = job
+	}
 }
 
-func (s *State) pickWorkerExcludingLocked(excluded map[string]bool) string {
+func (s *State) pickWorkerLocked(req jobs.Requirements) string {
+	return s.pickWorkerExcludingLocked(req, nil)
+}
+
+func (s *State) pickWorkerExcludingLocked(req jobs.Requirements, excluded map[string]bool) string {
 	now := time.Now().UTC()
 	var bestID string
 	var bestScore float64
@@ -295,6 +343,9 @@ func (s *State) pickWorkerExcludingLocked(excluded map[string]bool) string {
 		if node.Role != cluster.NodeRoleWorker || node.Status != cluster.NodeStatusOnline {
 			continue
 		}
+		if !nodeMeetsRequirements(node, req) {
+			continue
+		}
 
 		score := s.nodeBenchmarkScoreLocked(node.ID)
 		if bestID == "" || score > bestScore {
@@ -304,6 +355,37 @@ func (s *State) pickWorkerExcludingLocked(excluded map[string]bool) string {
 	}
 
 	return bestID
+}
+
+func (s *State) nodeCanRunJobLocked(node cluster.Node, req jobs.Requirements, now time.Time) bool {
+	node = s.deriveNodeStatus(node, now)
+	return node.Role == cluster.NodeRoleWorker &&
+		node.Status == cluster.NodeStatusOnline &&
+		nodeMeetsRequirements(node, req)
+}
+
+func nodeMeetsRequirements(node cluster.Node, req jobs.Requirements) bool {
+	if req.CPUCores > 0 && node.Resources.CPU.CoresAllowed < req.CPUCores {
+		return false
+	}
+	if req.MemoryBytes > 0 && node.Resources.Memory.AllowedBytes < req.MemoryBytes {
+		return false
+	}
+	if req.DiskBytes > 0 && node.Resources.Storage.AllowedBytes < req.DiskBytes {
+		return false
+	}
+	if !req.GPURequired && req.VRAMBytes == 0 {
+		return true
+	}
+	for _, gpu := range node.Resources.GPU {
+		if !gpu.ComputeCompatible {
+			continue
+		}
+		if req.VRAMBytes == 0 || gpu.AllowedVRAMBytes >= req.VRAMBytes {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *State) nodeBenchmarkScoreLocked(nodeID string) float64 {

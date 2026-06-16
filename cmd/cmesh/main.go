@@ -298,7 +298,8 @@ func workerRun(ctx context.Context, options workerOptions) error {
 	ticker := time.NewTicker(heartbeatEvery)
 	defer ticker.Stop()
 
-	if err := sendHeartbeat(options.managerURL, resp.NodeID, discoverWorkerResources(options)); err != nil {
+	snapshot := discoverWorkerResources(options)
+	if err := sendHeartbeat(options.managerURL, resp.NodeID, snapshot); err != nil {
 		return err
 	}
 	if options.runBenchmark {
@@ -306,7 +307,7 @@ func workerRun(ctx context.Context, options workerOptions) error {
 			return err
 		}
 	}
-	if err := pollAndExecuteJob(options.managerURL, resp.NodeID, options.cacheDir); err != nil {
+	if err := pollAndExecuteJob(options.managerURL, resp.NodeID, options.cacheDir, snapshot); err != nil {
 		return err
 	}
 	if options.runOnce {
@@ -319,10 +320,11 @@ func workerRun(ctx context.Context, options workerOptions) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := sendHeartbeat(options.managerURL, resp.NodeID, discoverWorkerResources(options)); err != nil {
+			snapshot := discoverWorkerResources(options)
+			if err := sendHeartbeat(options.managerURL, resp.NodeID, snapshot); err != nil {
 				return err
 			}
-			if err := pollAndExecuteJob(options.managerURL, resp.NodeID, options.cacheDir); err != nil {
+			if err := pollAndExecuteJob(options.managerURL, resp.NodeID, options.cacheDir, snapshot); err != nil {
 				return err
 			}
 			fmt.Printf("heartbeat sent for %s\n", resp.NodeID)
@@ -654,7 +656,7 @@ func setOperatorToken(req *http.Request, token string) {
 	req.Header.Set("X-CMesh-Operator-Token", token)
 }
 
-func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string) error {
+func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapshot cluster.ResourceSnapshot) error {
 	httpResp, err := http.Get(managerURL + "/v1/workers/" + nodeID + "/jobs/next")
 	if err != nil {
 		return err
@@ -690,7 +692,7 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string) error 
 		fmt.Fprintf(os.Stderr, "failed to write worker job status: %v\n", err)
 	}
 
-	result, jobErr := executeJob(*resp.Job)
+	result, jobErr := executeJobWithResources(*resp.Job, snapshot)
 	complete := jobs.CompleteRequest{
 		NodeID: nodeID,
 		Result: result,
@@ -744,6 +746,13 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string) error 
 }
 
 func executeJob(job jobs.Job) (string, error) {
+	return executeJobWithResources(job, cluster.ResourceSnapshot{})
+}
+
+func executeJobWithResources(job jobs.Job, snapshot cluster.ResourceSnapshot) (string, error) {
+	if err := validateWorkerCanRunJob(job, snapshot); err != nil {
+		return "", err
+	}
 	switch job.Type {
 	case "echo":
 		return job.Input, nil
@@ -752,6 +761,34 @@ func executeJob(job jobs.Job) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported job type %q", job.Type)
 	}
+}
+
+func validateWorkerCanRunJob(job jobs.Job, snapshot cluster.ResourceSnapshot) error {
+	req := job.Requirements
+	if req.CPUCores > 0 && snapshot.CPU.CoresAllowed > 0 && snapshot.CPU.CoresAllowed < req.CPUCores {
+		return fmt.Errorf("worker resource guard rejected job: requires %d CPU cores, worker allows %d", req.CPUCores, snapshot.CPU.CoresAllowed)
+	}
+	if req.MemoryBytes > 0 && snapshot.Memory.AllowedBytes > 0 && snapshot.Memory.AllowedBytes < req.MemoryBytes {
+		return fmt.Errorf("worker resource guard rejected job: requires %.1f GB RAM, worker allows %.1f GB", bytesToGB(req.MemoryBytes), bytesToGB(snapshot.Memory.AllowedBytes))
+	}
+	if req.DiskBytes > 0 && snapshot.Storage.AllowedBytes > 0 && snapshot.Storage.AllowedBytes < req.DiskBytes {
+		return fmt.Errorf("worker resource guard rejected job: requires %.1f GB disk, worker allows %.1f GB", bytesToGB(req.DiskBytes), bytesToGB(snapshot.Storage.AllowedBytes))
+	}
+	if !req.GPURequired && req.VRAMBytes == 0 {
+		return nil
+	}
+	for _, gpu := range snapshot.GPU {
+		if !gpu.ComputeCompatible {
+			continue
+		}
+		if req.VRAMBytes == 0 || gpu.AllowedVRAMBytes >= req.VRAMBytes {
+			return nil
+		}
+	}
+	if req.VRAMBytes > 0 {
+		return fmt.Errorf("worker resource guard rejected job: requires compute GPU with %.1f GB VRAM", bytesToGB(req.VRAMBytes))
+	}
+	return fmt.Errorf("worker resource guard rejected job: requires compute GPU")
 }
 
 type matrixMultiplyInput struct {
@@ -886,4 +923,8 @@ func defaultStatePath() string {
 
 func gbToBytes(gb uint64) uint64 {
 	return gb * 1024 * 1024 * 1024
+}
+
+func bytesToGB(bytes uint64) float64 {
+	return float64(bytes) / 1024 / 1024 / 1024
 }

@@ -65,13 +65,16 @@ The scheduler should place jobs using:
 
 - worker health;
 - configured resource limits;
+- explicit job requirements for CPU, memory, disk, GPU, and VRAM;
 - current utilization;
 - benchmark score;
 - model/runtime compatibility;
 - artifact cache availability;
 - network and queue estimates.
 
-V1 scheduling can be simple. The API boundary should leave room for richer placement policies.
+V1 scheduling uses online worker state, declared resource limits, and benchmark score. Jobs that cannot be placed on a capable worker stay queued instead of being assigned to an unsuitable node.
+
+Workers also enforce a local resource guard before execution. If a worker receives a job that exceeds its current declared CPU, memory, disk, GPU, or VRAM capacity, it rejects the job with a controlled error so the manager can retry or queue it.
 
 ## Storage Strategy
 
@@ -101,4 +104,3 @@ Later scope:
 - POSIX distributed filesystem;
 - block storage;
 - automatic multi-machine execution of one large model.
-

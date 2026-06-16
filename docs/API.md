@@ -112,11 +112,25 @@ Example:
   "type": "echo",
   "input": "hello cluster",
   "requested_by": "developer",
-  "assigned_to": "node-abc123"
+  "assigned_to": "node-abc123",
+  "requirements": {
+    "cpu_cores": 2,
+    "memory_bytes": 2147483648,
+    "gpu_required": false,
+    "vram_bytes": 0
+  }
 }
 ```
 
-`assigned_to` is optional. When it is omitted, the manager schedules the job to the best currently online worker. When it is present, the job is pinned to that worker; this is used by cluster benchmarks to run one compute task per online node.
+`assigned_to` and `requirements` are optional. When `assigned_to` is omitted, the manager schedules the job to the best currently online worker that satisfies the requested CPU, memory, disk, GPU, and VRAM limits. When `assigned_to` is present, the manager schedules the job only if that worker is online and capable. If no capable worker exists, the job stays `queued` with `last_failure` set to `waiting for capable worker`.
+
+Jobs include retry metadata:
+
+- `attempts`: number of times the job has been assigned to a worker.
+- `max_attempts`: maximum assignment attempts before terminal failure.
+- `last_failure`: latest placement or worker failure reason.
+
+When a worker reports an execution error, the manager uses the same retry policy: it reschedules to another capable worker when attempts remain, queues the job when no capable worker is available, or marks it failed after `max_attempts`.
 
 ```http
 GET /v1/jobs
@@ -152,7 +166,7 @@ POST /v1/cluster-benchmarks
 Content-Type: application/json
 ```
 
-Starts one `compute.matrix_multiply` job on each currently online worker and returns an aggregate run summary.
+Starts one `compute.matrix_multiply` job on each currently online capable worker and returns an aggregate run summary.
 
 Example:
 

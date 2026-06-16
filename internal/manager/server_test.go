@@ -597,8 +597,9 @@ func TestOfflineWorkerFailsActiveJob(t *testing.T) {
 	worker := joinWorkerForTest(t, NewServer(":0", state), "job-worker")
 
 	job, err := state.CreateJob(jobs.CreateRequest{
-		Type:  "echo",
-		Input: "hello cluster",
+		Type:        "echo",
+		Input:       "hello cluster",
+		MaxAttempts: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -698,6 +699,49 @@ func TestOfflineWorkerReschedulesActiveJob(t *testing.T) {
 	}
 }
 
+func TestWorkerErrorReschedulesActiveJob(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	workerA := joinWorkerForTest(t, srv, "job-worker-a")
+	workerB := joinWorkerForTest(t, srv, "job-worker-b")
+
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:        "echo",
+		Input:       "hello cluster",
+		AssignedTo:  workerA.NodeID,
+		MaxAttempts: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.NextJobForWorker(workerA.NodeID); !ok {
+		t.Fatal("expected worker A job to start")
+	}
+
+	rescheduled, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{
+		NodeID: workerA.NodeID,
+		Error:  "worker resource guard rejected job: requires 4 CPU cores, worker allows 2",
+	})
+	if !ok {
+		t.Fatal("expected worker A completion to be accepted")
+	}
+	if rescheduled.Status != jobs.StatusScheduled {
+		t.Fatalf("expected rescheduled job, got %s", rescheduled.Status)
+	}
+	if rescheduled.AssignedTo != workerB.NodeID {
+		t.Fatalf("expected job assigned to worker B, got %s", rescheduled.AssignedTo)
+	}
+	if rescheduled.Attempts != 2 {
+		t.Fatalf("expected second attempt, got %d", rescheduled.Attempts)
+	}
+	if rescheduled.LastFailure == "" || !strings.Contains(rescheduled.LastFailure, "worker resource guard rejected job") {
+		t.Fatalf("expected worker error to be recorded, got %q", rescheduled.LastFailure)
+	}
+	if rescheduled.Error != "" || rescheduled.Result != "" || !rescheduled.StartedAt.IsZero() || !rescheduled.FinishedAt.IsZero() {
+		t.Fatalf("expected clean rescheduled job, got %#v", rescheduled)
+	}
+}
+
 func TestOfflineWorkerFailsJobAfterMaxAttempts(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
@@ -745,13 +789,121 @@ func TestOfflineWorkerFailsJobAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestJobQueuesUntilCapableWorkerJoins(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	weak := joinWorkerWithResourcesForTest(t, srv, "weak-worker", cluster.ResourceSnapshot{
+		CPU: cluster.CPUResources{
+			CoresTotal:   2,
+			CoresAllowed: 1,
+		},
+		Memory: cluster.MemoryResources{
+			TotalBytes:   2 * gb,
+			AllowedBytes: 1 * gb,
+		},
+	})
+
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:  "compute.matrix_multiply",
+		Input: `{"size":512,"iterations":2}`,
+		Requirements: jobs.Requirements{
+			CPUCores:    4,
+			MemoryBytes: 2 * gb,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != jobs.StatusQueued || job.AssignedTo != "" || job.Attempts != 0 {
+		t.Fatalf("expected job queued without assignment, got %#v", job)
+	}
+	if _, ok := state.NextJobForWorker(weak.NodeID); ok {
+		t.Fatal("weak worker should not receive the job")
+	}
+
+	strong := joinWorkerWithResourcesForTest(t, srv, "strong-worker", cluster.ResourceSnapshot{
+		CPU: cluster.CPUResources{
+			CoresTotal:   8,
+			CoresAllowed: 4,
+		},
+		Memory: cluster.MemoryResources{
+			TotalBytes:   16 * gb,
+			AllowedBytes: 4 * gb,
+		},
+	})
+
+	scheduled, ok := state.Job(job.ID)
+	if !ok {
+		t.Fatal("expected job")
+	}
+	if scheduled.Status != jobs.StatusScheduled || scheduled.AssignedTo != strong.NodeID || scheduled.Attempts != 1 {
+		t.Fatalf("expected job scheduled on capable worker, got %#v", scheduled)
+	}
+	if scheduled.LastFailure != "" {
+		t.Fatalf("expected waiting reason to be cleared after scheduling, got %q", scheduled.LastFailure)
+	}
+}
+
+func TestOfflineWorkerReschedulesOnlyToCapableWorker(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	workerA := joinWorkerWithResourcesForTest(t, srv, "capable-a", cluster.ResourceSnapshot{
+		CPU: cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+	})
+	workerB := joinWorkerWithResourcesForTest(t, srv, "weak-b", cluster.ResourceSnapshot{
+		CPU: cluster.CPUResources{CoresTotal: 2, CoresAllowed: 1},
+	})
+
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:       "echo",
+		Input:      "hello cluster",
+		AssignedTo: workerA.NodeID,
+		Requirements: jobs.Requirements{
+			CPUCores: 4,
+		},
+		MaxAttempts: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.NextJobForWorker(workerA.NodeID); !ok {
+		t.Fatal("expected worker A job to start")
+	}
+
+	state.MarkWorkerOffline(workerA.NodeID)
+
+	queued, ok := state.Job(job.ID)
+	if !ok {
+		t.Fatal("expected job")
+	}
+	if queued.Status != jobs.StatusQueued || queued.AssignedTo != "" || queued.Attempts != 1 {
+		t.Fatalf("expected job queued after capable worker loss, got %#v", queued)
+	}
+	if _, ok := state.NextJobForWorker(workerB.NodeID); ok {
+		t.Fatal("weak worker should not receive rescheduled job")
+	}
+
+	workerC := joinWorkerWithResourcesForTest(t, srv, "capable-c", cluster.ResourceSnapshot{
+		CPU: cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+	})
+
+	rescheduled, ok := state.Job(job.ID)
+	if !ok {
+		t.Fatal("expected job")
+	}
+	if rescheduled.Status != jobs.StatusScheduled || rescheduled.AssignedTo != workerC.NodeID || rescheduled.Attempts != 2 {
+		t.Fatalf("expected job rescheduled on worker C, got %#v", rescheduled)
+	}
+}
+
 func TestStaleWorkerFailsActiveJob(t *testing.T) {
 	state := NewState()
 	worker := joinWorkerForTest(t, NewServer(":0", state), "stale-job-worker")
 
 	job, err := state.CreateJob(jobs.CreateRequest{
-		Type:  "echo",
-		Input: "hello cluster",
+		Type:        "echo",
+		Input:       "hello cluster",
+		MaxAttempts: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -908,10 +1060,30 @@ func TestClusterBenchmarkRequiresOnlineWorkers(t *testing.T) {
 
 func joinWorkerForTest(t *testing.T, srv *Server, name string) membership.JoinResponse {
 	t.Helper()
+	return joinWorkerWithResourcesForTest(t, srv, name, cluster.ResourceSnapshot{
+		CPU: cluster.CPUResources{
+			CoresTotal:   4,
+			CoresAllowed: 2,
+		},
+		Memory: cluster.MemoryResources{
+			TotalBytes:   8 * gb,
+			AllowedBytes: 2 * gb,
+		},
+		Storage: cluster.StorageResources{
+			TotalBytes:   128 * gb,
+			AllowedBytes: 8 * gb,
+			FreeBytes:    64 * gb,
+		},
+	})
+}
+
+func joinWorkerWithResourcesForTest(t *testing.T, srv *Server, name string, resources cluster.ResourceSnapshot) membership.JoinResponse {
+	t.Helper()
 
 	joinReq := membership.JoinRequest{
-		NodeName: name,
-		Role:     cluster.NodeRoleWorker,
+		NodeName:  name,
+		Role:      cluster.NodeRoleWorker,
+		Resources: resources,
 	}
 	body, err := json.Marshal(joinReq)
 	if err != nil {

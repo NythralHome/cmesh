@@ -13,7 +13,7 @@
 
 - Job submission API.
 - Job state machine.
-- Scheduler placement.
+- Capability-aware scheduler placement.
 - Worker job polling or assignment.
 - Result reporting.
 - Retries and failure states.
@@ -46,4 +46,3 @@
 - Runtime-specific distributed inference proof of concept.
 - LAN-first constraints.
 - Explicit compatibility and network requirements.
-
