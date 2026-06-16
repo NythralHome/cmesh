@@ -1036,6 +1036,30 @@ func hasActiveJobs(in []jobs.Job) bool {
 	return false
 }
 
+func isModelJob(job jobs.Job) bool {
+	return job.Type == models.JobInstall || job.Type == models.JobDelete || job.Type == models.JobGenerate
+}
+
+func modelJobCount(in []jobs.Job) int {
+	count := 0
+	for _, job := range in {
+		if isModelJob(job) {
+			count++
+		}
+	}
+	return count
+}
+
+func generatableModelCount(in []ModelSummary) int {
+	count := 0
+	for _, summary := range in {
+		if len(summary.InstalledOn) > 0 && summary.Status != "deleting" {
+			count++
+		}
+	}
+	return count
+}
+
 func activeJobsByWorker(in []jobs.Job) map[string]int {
 	out := make(map[string]int)
 	for _, job := range in {
@@ -1263,6 +1287,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		return percent
 	},
 	"hasActiveJobs":    hasActiveJobs,
+	"isModelJob":       isModelJob,
+	"modelJobCount":    modelJobCount,
+	"generatableCount": generatableModelCount,
 	"workerSlots":      workerJobSlots,
 	"jobCanCancel":     jobCanBeCanceled,
 	"jobDuration":      jobDuration,
@@ -1572,6 +1599,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      gap: 8px;
       min-height: 36px;
       padding: 0 12px;
       border: 1px solid var(--line);
@@ -1581,6 +1609,56 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       text-decoration: none;
       font-size: 14px;
       font-weight: 600;
+    }
+    .icon {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      fill: none;
+    }
+    .console-tabs {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(14px);
+    }
+    .tab-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 0 14px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .tab-button.active {
+      border-color: var(--line);
+      background: var(--accent);
+      color: #fff;
+    }
+    .tab-panel {
+      display: grid;
+      gap: 20px;
+    }
+    .tab-panel[hidden] {
+      display: none;
     }
     .job-runner,
     .cluster-runner {
@@ -1700,10 +1778,38 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     }
     .models-shell {
       display: grid;
-      grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr);
+      grid-template-columns: minmax(360px, .78fr) minmax(0, 1.22fr);
       gap: 16px;
       padding: 16px;
       background: #fbfcfd;
+    }
+    .model-workspace {
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+    .model-block {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .model-block-head {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .model-block-title {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .model-block h3 {
+      margin: 0;
+      font-size: 17px;
     }
     .model-catalog {
       display: grid;
@@ -1758,10 +1864,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       display: grid;
       gap: 12px;
       align-content: start;
-      padding: 14px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
     }
     .chat-panel h3 {
       margin: 0;
@@ -1819,6 +1921,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       .first-test-form { grid-template-columns: 1fr; }
       .first-test-form .wide { grid-column: auto; }
       .job-runner, .cluster-runner { grid-template-columns: 1fr; }
+      .console-tabs { overflow-x: auto; }
       .models-shell { grid-template-columns: 1fr; }
       .model-specs { grid-template-columns: 1fr; }
       .growth-row { grid-template-columns: 1fr; }
@@ -1827,16 +1930,36 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
   </style>
 </head>
 <body data-active-jobs="{{hasActiveJobs .Jobs}}">
+  <svg aria-hidden="true" width="0" height="0" style="position:absolute">
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-workers" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="icon-cpu" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></symbol>
+    <symbol id="icon-brain" viewBox="0 0 24 24"><path d="M12 5a3 3 0 0 0-5.83 1A3.5 3.5 0 0 0 5 12.8V18a3 3 0 0 0 3 3h4V5Z"/><path d="M12 5a3 3 0 0 1 5.83 1A3.5 3.5 0 0 1 19 12.8V18a3 3 0 0 1-3 3h-4V5Z"/><path d="M8 13h4M12 9h4M12 17h4"/></symbol>
+    <symbol id="icon-terminal" viewBox="0 0 24 24"><path d="m7 8 4 4-4 4"/><path d="M13 16h4"/><rect x="3" y="4" width="18" height="16" rx="2"/></symbol>
+    <symbol id="icon-chart" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 15H6L5 6"/><path d="M10 11v6M14 11v6"/></symbol>
+    <symbol id="icon-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  </svg>
   <header>
     <div>
       <h1>CMesh</h1>
       <p class="sub">Decentralized-ready AI compute cluster manager</p>
     </div>
     <div class="actions">
-      <a class="button" href="{{.InviteURL}}">Invite worker</a>
+      <a class="button" href="{{.InviteURL}}"><svg class="icon"><use href="#icon-plus"></use></svg>Invite worker</a>
     </div>
   </header>
   <main>
+    <nav class="console-tabs" aria-label="Dashboard sections">
+      <button class="tab-button active" type="button" data-tab-target="overview"><svg class="icon"><use href="#icon-workers"></use></svg>Overview</button>
+      <button class="tab-button" type="button" data-tab-target="models"><svg class="icon"><use href="#icon-brain"></use></svg>Models</button>
+      <button class="tab-button" type="button" data-tab-target="jobs"><svg class="icon"><use href="#icon-terminal"></use></svg>Jobs</button>
+      <button class="tab-button" type="button" data-tab-target="benchmarks"><svg class="icon"><use href="#icon-chart"></use></svg>Benchmarks</button>
+    </nav>
+    <div class="tab-panel" id="tab-overview">
     <section class="onboarding" aria-label="Cluster console">
       <div class="section-head">
         <h2>Cluster Console</h2>
@@ -1847,8 +1970,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <h3>{{if .OnlineNodes}}Cluster is ready{{else}}Waiting for workers{{end}}</h3>
           <p class="sub">Invite machines, watch their usable capacity, then run compute jobs against the scheduler. This is the last cluster validation surface before adding model inference jobs.</p>
           <div class="actions">
-            <a class="button primary" href="{{.InviteURL}}">Invite worker</a>
-            <a class="button" href="#jobs">Open jobs</a>
+            <a class="button primary" href="{{.InviteURL}}"><svg class="icon"><use href="#icon-plus"></use></svg>Invite worker</a>
+            <button class="button" type="button" data-tab-target="jobs"><svg class="icon"><use href="#icon-terminal"></use></svg>Open jobs</button>
           </div>
           <div class="first-test-grid">
             <div class="first-test-stat"><span>Workers</span><strong>{{.Summary.WorkersOnline}} / {{.Summary.WorkersTotal}}</strong></div>
@@ -1878,7 +2001,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <label for="first-test-iterations">Iterations</label>
               <input id="first-test-iterations" name="iterations" type="number" min="1" max="100" step="1" value="6">
             </div>
-            <button class="button primary wide" type="submit" {{if not .OnlineNodes}}disabled{{end}}>Run cluster test</button>
+            <button class="button primary wide" type="submit" {{if not .OnlineNodes}}disabled{{end}}><svg class="icon"><use href="#icon-play"></use></svg>Run cluster test</button>
           </form>
           <div class="runner-status" id="first-test-status">{{if .OnlineNodes}}Ready to run one task on each online worker.{{else}}Connect a worker first, then this button becomes available.{{end}}</div>
         </div>
@@ -1935,12 +2058,88 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <div class="empty">No workers are online right now.</div>
       {{end}}
     </section>
-    <section id="models" style="margin-top: 20px;">
+    </div>
+    <div class="tab-panel" id="tab-models" hidden>
+    <section id="models">
       <div class="section-head">
-        <h2>Models</h2>
-        <code>{{len .Models}} catalog entries</code>
+        <h2>Models Console</h2>
+        <code>{{len .Models}} catalog entries / {{modelJobCount .Jobs}} model jobs</code>
       </div>
       <div class="models-shell">
+        <div class="model-workspace">
+          <div class="model-block">
+            <div class="model-block-head">
+              <div class="model-block-title">
+                <svg class="icon"><use href="#icon-send"></use></svg>
+                <div>
+                  <h3>Prompt workspace</h3>
+                  <p class="sub">Run a prompt against a model that is already installed on a worker.</p>
+                </div>
+              </div>
+            </div>
+            <form class="chat-panel" id="model-chat-form">
+              <div class="field">
+                <label for="chat-model">Model</label>
+                <select id="chat-model" name="model_id">
+                  {{if eq (generatableCount .Models) 0}}<option value="">Install a model first</option>{{end}}
+                  {{range .Models}}{{if modelCanGenerate .}}<option value="{{.Model.ID}}">{{.Model.Name}}</option>{{end}}{{end}}
+                </select>
+              </div>
+              <div class="field">
+                <label for="chat-node">Worker</label>
+                <select id="chat-node" name="node_id">
+                  {{if eq (generatableCount .Models) 0}}<option value="">No installed model worker</option>{{end}}
+                  {{range .Models}}{{$chatModelID := .Model.ID}}{{range modelNodeOptions $.NodesByID .}}<option value="{{.ID}}" data-model-id="{{$chatModelID}}">{{.Name}}</option>{{end}}{{end}}
+                </select>
+              </div>
+              <div class="field">
+                <label for="chat-prompt">Prompt</label>
+                <textarea id="chat-prompt" name="prompt" placeholder="Ask the local model something"></textarea>
+              </div>
+              <div class="model-actions">
+                <button class="button primary" type="submit" {{if or (not .OnlineNodes) (eq (generatableCount .Models) 0)}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Generate</button>
+              </div>
+              <div class="runner-status" id="model-status">{{if .OnlineNodes}}Install a model first, then submit a prompt.{{else}}Connect a worker before installing models.{{end}}</div>
+            </form>
+          </div>
+          <div class="model-block">
+            <div class="model-block-title">
+              <svg class="icon"><use href="#icon-terminal"></use></svg>
+              <div>
+                <h3>Model activity</h3>
+                <p class="sub">Recent install, delete, and generate jobs.</p>
+              </div>
+            </div>
+            {{if gt (modelJobCount .Jobs) 0}}
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Job</th>
+                    <th>Status</th>
+                    <th>Workload</th>
+                    <th>Worker</th>
+                    <th>Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                {{range .Jobs}}{{if isModelJob .}}
+                  <tr>
+                    <td><code>{{shortID .ID}}</code><br><span class="sub">{{.Type}}</span></td>
+                    <td><span class="{{jobPillClass .Status}}">{{.Status}}</span></td>
+                    <td><code>{{clip (jobWorkload .) 90}}</code></td>
+                    <td><code>{{jobWorkerLabel $.NodesByID .}}</code></td>
+                    <td class="mono-output"><code>{{clip (jobDetail .) 120}}</code></td>
+                  </tr>
+                {{end}}{{end}}
+                </tbody>
+              </table>
+            </div>
+            {{else}}
+            <div class="empty">No model activity yet.</div>
+            {{end}}
+          </div>
+        </div>
         <div class="model-catalog">
           {{range .Models}}
           <article class="model-card" data-model-id="{{.Model.ID}}">
@@ -1963,42 +2162,20 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <p class="sub">Last error: {{.LastError}}</p>
             {{end}}
             <div class="model-actions">
-              <button class="button primary model-install" type="button" data-model-id="{{.Model.ID}}" {{if not (modelCanInstall .)}}disabled{{end}}>Install</button>
+              <button class="button primary model-install" type="button" data-model-id="{{.Model.ID}}" {{if not (modelCanInstall .)}}disabled{{end}}><svg class="icon"><use href="#icon-download"></use></svg><span>Install</span></button>
               {{$modelID := .Model.ID}}
               {{range modelNodeOptions $.NodesByID .}}
-              <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.ID}}">Delete from {{.Name}}</button>
+              <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.ID}}"><svg class="icon"><use href="#icon-trash"></use></svg><span>Delete from {{.Name}}</span></button>
               {{end}}
             </div>
           </article>
           {{end}}
         </div>
-        <form class="chat-panel" id="model-chat-form">
-          <h3>Chat test</h3>
-          <p class="sub">Submit one prompt to an installed model. The worker must have the GGUF file and a local llama.cpp runtime.</p>
-          <div class="field">
-            <label for="chat-model">Model</label>
-            <select id="chat-model" name="model_id">
-              {{range .Models}}{{if modelCanGenerate .}}<option value="{{.Model.ID}}">{{.Model.Name}}</option>{{end}}{{end}}
-            </select>
-          </div>
-          <div class="field">
-            <label for="chat-node">Worker</label>
-            <select id="chat-node" name="node_id">
-              {{range .Models}}{{$chatModelID := .Model.ID}}{{range modelNodeOptions $.NodesByID .}}<option value="{{.ID}}" data-model-id="{{$chatModelID}}">{{.Name}}</option>{{end}}{{end}}
-            </select>
-          </div>
-          <div class="field">
-            <label for="chat-prompt">Prompt</label>
-            <textarea id="chat-prompt" name="prompt" placeholder="Ask the local model something"></textarea>
-          </div>
-          <div class="model-actions">
-            <button class="button primary" type="submit">Generate</button>
-          </div>
-          <div class="runner-status" id="model-status">{{if .OnlineNodes}}Install a model first, then submit a prompt.{{else}}Connect a worker before installing models.{{end}}</div>
-        </form>
       </div>
     </section>
-    <section style="margin-top: 20px;">
+    </div>
+    <div class="tab-panel" id="tab-benchmarks" hidden>
+    <section>
       <div class="section-head">
         <h2>Benchmark History</h2>
         <code>{{len .ClusterBenchmarks}} recent runs</code>
@@ -2064,7 +2241,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <div class="empty">No cluster benchmark runs yet.</div>
       {{end}}
     </section>
-    <section id="jobs" style="margin-top: 20px;">
+    </div>
+    <div class="tab-panel" id="tab-jobs" hidden>
+    <section id="jobs">
       <div class="section-head">
         <h2>Compute Jobs</h2>
         <code>{{len .Jobs}} recent</code>
@@ -2100,7 +2279,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         </div>
         <div class="field">
           <label>&nbsp;</label>
-          <button class="button primary" type="submit" {{if not .OnlineNodes}}disabled{{end}}>Run compute job</button>
+          <button class="button primary" type="submit" {{if not .OnlineNodes}}disabled{{end}}><svg class="icon"><use href="#icon-play"></use></svg>Run compute job</button>
         </div>
       </form>
       <div class="runner-status" id="compute-job-status">{{if .OnlineNodes}}Submit one compute job to the scheduler. Capacity, requirements, and job slots decide where it runs.{{else}}Connect at least one worker before submitting a compute job.{{end}}</div>
@@ -2145,7 +2324,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 <code>{{clip (jobDetail .) 180}}</code>
                 {{if jobCanCancel .}}
                 <form class="job-cancel-form" data-job-id="{{.ID}}">
-                  <button class="button danger" type="submit">Cancel</button>
+                  <button class="button danger" type="submit"><svg class="icon"><use href="#icon-x"></use></svg>Cancel</button>
                 </form>
                 {{end}}
               </td>
@@ -2164,8 +2343,37 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <div class="empty">No jobs have been submitted yet.</div>
       {{end}}
     </section>
+    </div>
   </main>
   <script>
+    function setButtonText(button, text) {
+      var label = button.querySelector("span");
+      if (label) {
+        label.innerText = text;
+      } else {
+        button.innerText = text;
+      }
+    }
+    function activateTab(name, updateHash) {
+      var target = name || "overview";
+      var panel = document.getElementById("tab-" + target);
+      if (!panel) target = "overview";
+      document.querySelectorAll(".tab-panel").forEach(function(section) {
+        section.hidden = section.id !== "tab-" + target;
+      });
+      document.querySelectorAll("[data-tab-target]").forEach(function(button) {
+        button.classList.toggle("active", button.dataset.tabTarget === target);
+      });
+      if (updateHash) {
+        history.replaceState(null, "", target === "overview" ? window.location.pathname : "#" + target);
+      }
+    }
+    document.querySelectorAll("[data-tab-target]").forEach(function(button) {
+      button.addEventListener("click", function() {
+        activateTab(button.dataset.tabTarget, true);
+      });
+    });
+    activateTab((window.location.hash || "").replace("#", ""), false);
     var form = document.getElementById("compute-job-form");
     var status = document.getElementById("compute-job-status");
     if (form) {
@@ -2220,7 +2428,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         var button = cancelForm.querySelector("button");
         if (button) {
           button.disabled = true;
-          button.innerText = "Canceling...";
+          setButtonText(button, "Canceling...");
         }
         fetch("/v1/jobs/" + encodeURIComponent(jobID) + "/cancel", {
           method: "POST"
@@ -2234,7 +2442,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         }).catch(function(error) {
           if (button) {
             button.disabled = false;
-            button.innerText = "Cancel";
+            setButtonText(button, "Cancel");
           }
           alert("Cancel failed: " + error.message);
         });
@@ -2281,7 +2489,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         var modelID = button.dataset.modelId;
         if (!modelID) return;
         button.disabled = true;
-        button.innerText = "Installing...";
+        setButtonText(button, "Installing...");
         fetch("/v1/models/" + encodeURIComponent(modelID) + "/install", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2297,7 +2505,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           setTimeout(function() { window.location.reload(); }, 1200);
         }).catch(function(error) {
           button.disabled = false;
-          button.innerText = "Install";
+          setButtonText(button, "Install");
           alert("Install failed: " + error.message);
         });
       });
@@ -2308,7 +2516,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         var nodeID = button.dataset.nodeId;
         if (!modelID || !nodeID) return;
         button.disabled = true;
-        button.innerText = "Deleting...";
+        setButtonText(button, "Deleting...");
         fetch("/v1/models/" + encodeURIComponent(modelID) + "/delete", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2324,7 +2532,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           setTimeout(function() { window.location.reload(); }, 1200);
         }).catch(function(error) {
           button.disabled = false;
-          button.innerText = "Delete";
+          setButtonText(button, "Delete");
           alert("Delete failed: " + error.message);
         });
       });
@@ -2333,11 +2541,18 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var chatModel = document.getElementById("chat-model");
     var chatNode = document.getElementById("chat-node");
     var modelStatus = document.getElementById("model-status");
-    function syncChatNodes() {
-      if (!chatModel || !chatNode) return;
-      var modelID = chatModel.value;
-      var firstVisible = "";
-      Array.prototype.forEach.call(chatNode.options, function(option) {
+	function syncChatNodes() {
+		if (!chatModel || !chatNode) return;
+		var modelID = chatModel.value;
+		if (!modelID) {
+			Array.prototype.forEach.call(chatNode.options, function(option) {
+				option.hidden = false;
+				option.disabled = false;
+			});
+			return;
+		}
+		var firstVisible = "";
+		Array.prototype.forEach.call(chatNode.options, function(option) {
         var matches = option.getAttribute("data-model-id") === modelID;
         option.hidden = !matches;
         option.disabled = !matches;
