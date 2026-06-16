@@ -32,6 +32,16 @@ dist/cmesh-linux-arm64
 dist/cmesh-windows-amd64.exe
 ```
 
+## Guarded Alpha Deploy
+
+For the hosted alpha, deploy through the release-asset guard:
+
+```sh
+make deploy-alpha VERSION=v0.1.0-alpha.44
+```
+
+The guard checks that the CLI binary and every worker desktop artifact referenced by the invite page are already downloadable from GitHub Releases. If any asset is still publishing, deployment stops before the manager is updated.
+
 ## Manager On A VPS
 
 Generate an invite token:

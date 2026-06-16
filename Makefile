@@ -3,7 +3,7 @@ COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X github.com/cmesh/cmesh/internal/version.Version=$(VERSION) -X github.com/cmesh/cmesh/internal/version.Commit=$(COMMIT) -X github.com/cmesh/cmesh/internal/version.Date=$(DATE)
 
-.PHONY: test run build dist clean docker worker-desktop-run worker-desktop-test worker-desktop-build help
+.PHONY: test run build dist clean docker worker-desktop-run worker-desktop-test worker-desktop-build deploy-alpha help
 
 help:
 	@echo "Targets:"
@@ -15,6 +15,7 @@ help:
 	@echo "  make worker-desktop-run    Run the Flutter worker desktop app"
 	@echo "  make worker-desktop-test   Test/analyze the Flutter worker desktop app"
 	@echo "  make worker-desktop-build  Build the Flutter worker desktop app for this OS"
+	@echo "  make deploy-alpha VERSION=v...  Deploy alpha after release assets are published"
 
 test:
 	go test ./...
@@ -53,6 +54,9 @@ worker-desktop-build: build
 	else \
 		echo "Unsupported desktop build host: $(shell uname -s)" >&2; exit 1; \
 	fi
+
+deploy-alpha:
+	CMESH_VERSION=$(VERSION) scripts/deploy-alpha.sh
 
 clean:
 	rm -rf dist

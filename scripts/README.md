@@ -77,3 +77,19 @@ curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/inst
 ```
 
 If `CMESH_JOIN_TOKEN` is omitted, the manager installer generates one and stores it in `/etc/cmesh/manager.env`.
+
+## Alpha Deploy Guard
+
+Use the guarded alpha deploy script after pushing a release tag:
+
+```sh
+CMESH_VERSION=v0.1.0-alpha.44 scripts/deploy-alpha.sh
+```
+
+The script checks every release asset used by the manager invite page before touching the VPS. It refuses to deploy while GitHub is still publishing desktop installers, which prevents broken download links such as a missing macOS DMG.
+
+To check release readiness without deploying:
+
+```sh
+CMESH_VERSION=v0.1.0-alpha.44 CMESH_DRY_RUN=true scripts/deploy-alpha.sh
+```

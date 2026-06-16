@@ -93,9 +93,12 @@ Worker invite links use the `cmesh://join` protocol. Release builds register tha
 
 Tagged releases publish early desktop bundles alongside CLI binaries:
 
-- `CMesh-Worker-macos-<arch>.zip`
+- `CMesh-Worker-Apple-Silicon.dmg`
+- `CMesh-Worker-Intel-Mac.dmg`
 - `CMesh-Worker-windows-amd64.zip`
 - `CMesh-Worker-linux-amd64.tar.gz`
+
+Alpha deployments should use `make deploy-alpha VERSION=v...`; it refuses to deploy until all release assets are available.
 
 For the first multi-machine alpha, use [docs/FIRST_REAL_TEST.md](docs/FIRST_REAL_TEST.md).
 
