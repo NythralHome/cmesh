@@ -742,6 +742,63 @@ func TestWorkerErrorReschedulesActiveJob(t *testing.T) {
 	}
 }
 
+func TestWorkerSlotQueuesUntilActiveJobCompletes(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerForTest(t, srv, "slot-worker")
+
+	first, err := state.CreateJob(jobs.CreateRequest{
+		Type:  "echo",
+		Input: "first",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != jobs.StatusScheduled || first.AssignedTo != worker.NodeID {
+		t.Fatalf("expected first job scheduled to worker, got %#v", first)
+	}
+
+	second, err := state.CreateJob(jobs.CreateRequest{
+		Type:  "echo",
+		Input: "second",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Status != jobs.StatusQueued || second.AssignedTo != "" || second.Attempts != 0 {
+		t.Fatalf("expected second job queued while worker slot is busy, got %#v", second)
+	}
+	if second.LastFailure != "waiting for available worker capacity" {
+		t.Fatalf("unexpected queue reason %q", second.LastFailure)
+	}
+
+	if next, ok := state.NextJobForWorker(worker.NodeID); !ok || next.ID != first.ID {
+		t.Fatalf("expected first job from worker queue, got %#v ok=%v", next, ok)
+	}
+	if unexpected, ok := state.NextJobForWorker(worker.NodeID); ok {
+		t.Fatalf("worker should not receive second job before first completes: %#v", unexpected)
+	}
+
+	completed, ok := state.CompleteJob(first.ID, jobs.CompleteRequest{
+		NodeID: worker.NodeID,
+		Result: "first-ok",
+	})
+	if !ok || completed.Status != jobs.StatusSucceeded {
+		t.Fatalf("expected first completion, got %#v ok=%v", completed, ok)
+	}
+
+	scheduled, ok := state.Job(second.ID)
+	if !ok {
+		t.Fatal("expected second job")
+	}
+	if scheduled.Status != jobs.StatusScheduled || scheduled.AssignedTo != worker.NodeID || scheduled.Attempts != 1 {
+		t.Fatalf("expected second job scheduled after slot frees, got %#v", scheduled)
+	}
+	if scheduled.LastFailure != "" {
+		t.Fatalf("expected capacity reason cleared after scheduling, got %q", scheduled.LastFailure)
+	}
+}
+
 func TestOfflineWorkerFailsJobAfterMaxAttempts(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
@@ -1028,6 +1085,7 @@ func TestClusterBenchmarkCreatesJobPerOnlineWorker(t *testing.T) {
 		"5.75 GFLOPS",
 		"cluster-worker-a",
 		"cluster-worker-b",
+		"Job slots",
 		"test/a",
 		"test/b",
 	} {

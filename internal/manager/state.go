@@ -12,6 +12,8 @@ import (
 	"github.com/cmesh/cmesh/internal/resources"
 )
 
+const defaultWorkerJobSlots = 1
+
 type State struct {
 	mu               sync.RWMutex
 	startedAt        time.Time
@@ -215,19 +217,19 @@ func (s *State) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 	defer s.mu.Unlock()
 
 	if req.AssignedTo != "" {
-		if node, ok := s.nodes[req.AssignedTo]; ok && s.nodeCanRunJobLocked(node, job.Requirements, now) {
+		if node, ok := s.nodes[req.AssignedTo]; ok && s.nodeCanAcceptJobLocked(node, job.Requirements, now) {
 			job.AssignedTo = req.AssignedTo
 			job.Status = jobs.StatusScheduled
 			job.Attempts = 1
 		} else {
-			job.LastFailure = "waiting for capable worker"
+			job.LastFailure = s.waitingReasonLocked(job.Requirements, now)
 		}
 	} else if workerID := s.pickWorkerLocked(job.Requirements); workerID != "" {
 		job.AssignedTo = workerID
 		job.Status = jobs.StatusScheduled
 		job.Attempts = 1
 	} else {
-		job.LastFailure = "waiting for capable worker"
+		job.LastFailure = s.waitingReasonLocked(job.Requirements, now)
 	}
 
 	s.jobs[job.ID] = job
@@ -293,6 +295,7 @@ func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, b
 		job.FinishedAt = now
 	}
 	s.jobs[job.ID] = job
+	s.scheduleQueuedJobsLocked(now)
 
 	return job, true
 }
@@ -304,8 +307,9 @@ func (s *State) scheduleQueuedJobsLocked(now time.Time) {
 		}
 		workerID := s.pickWorkerLocked(job.Requirements)
 		if workerID == "" {
-			if job.LastFailure == "" {
-				job.LastFailure = "waiting for capable worker"
+			reason := s.waitingReasonLocked(job.Requirements, now)
+			if job.LastFailure == "" || job.LastFailure == "waiting for capable worker" || job.LastFailure == "waiting for available worker capacity" {
+				job.LastFailure = reason
 				job.UpdatedAt = now
 				s.jobs[id] = job
 			}
@@ -314,7 +318,7 @@ func (s *State) scheduleQueuedJobsLocked(now time.Time) {
 		job.AssignedTo = workerID
 		job.Status = jobs.StatusScheduled
 		job.Attempts++
-		if job.LastFailure == "waiting for capable worker" {
+		if job.LastFailure == "waiting for capable worker" || job.LastFailure == "waiting for available worker capacity" {
 			job.LastFailure = ""
 		}
 		job.Error = ""
@@ -346,6 +350,9 @@ func (s *State) pickWorkerExcludingLocked(req jobs.Requirements, excluded map[st
 		if !nodeMeetsRequirements(node, req) {
 			continue
 		}
+		if s.activeJobsForWorkerLocked(node.ID) >= defaultWorkerJobSlots {
+			continue
+		}
 
 		score := s.nodeBenchmarkScoreLocked(node.ID)
 		if bestID == "" || score > bestScore {
@@ -357,11 +364,37 @@ func (s *State) pickWorkerExcludingLocked(req jobs.Requirements, excluded map[st
 	return bestID
 }
 
-func (s *State) nodeCanRunJobLocked(node cluster.Node, req jobs.Requirements, now time.Time) bool {
+func (s *State) nodeCanAcceptJobLocked(node cluster.Node, req jobs.Requirements, now time.Time) bool {
 	node = s.deriveNodeStatus(node, now)
 	return node.Role == cluster.NodeRoleWorker &&
 		node.Status == cluster.NodeStatusOnline &&
-		nodeMeetsRequirements(node, req)
+		nodeMeetsRequirements(node, req) &&
+		s.activeJobsForWorkerLocked(node.ID) < defaultWorkerJobSlots
+}
+
+func (s *State) waitingReasonLocked(req jobs.Requirements, now time.Time) string {
+	for _, node := range s.nodes {
+		node = s.deriveNodeStatus(node, now)
+		if node.Role == cluster.NodeRoleWorker &&
+			node.Status == cluster.NodeStatusOnline &&
+			nodeMeetsRequirements(node, req) {
+			return "waiting for available worker capacity"
+		}
+	}
+	return "waiting for capable worker"
+}
+
+func (s *State) activeJobsForWorkerLocked(nodeID string) int {
+	var active int
+	for _, job := range s.jobs {
+		if job.AssignedTo != nodeID {
+			continue
+		}
+		if job.Status == jobs.StatusScheduled || job.Status == jobs.StatusRunning {
+			active++
+		}
+	}
+	return active
 }
 
 func nodeMeetsRequirements(node cluster.Node, req jobs.Requirements) bool {

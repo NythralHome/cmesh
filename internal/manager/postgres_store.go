@@ -293,19 +293,19 @@ func (s *PostgresStore) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 		UpdatedAt:    now,
 	}
 	if req.AssignedTo != "" {
-		if s.workerCanRun(req.AssignedTo, job.Requirements) {
+		if s.workerCanAccept(req.AssignedTo, job.Requirements) {
 			job.AssignedTo = req.AssignedTo
 			job.Status = jobs.StatusScheduled
 			job.Attempts = 1
 		} else {
-			job.LastFailure = "waiting for capable worker"
+			job.LastFailure = s.waitingReason(job.Requirements)
 		}
 	} else if workerID := s.pickWorker(job.Requirements); workerID != "" {
 		job.AssignedTo = workerID
 		job.Status = jobs.StatusScheduled
 		job.Attempts = 1
 	} else {
-		job.LastFailure = "waiting for capable worker"
+		job.LastFailure = s.waitingReason(job.Requirements)
 	}
 
 	requirements, _ := json.Marshal(job.Requirements)
@@ -399,7 +399,11 @@ SET status = $2,
 WHERE id = $1
 RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
 `, job.ID, string(job.Status), job.AssignedTo, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.UpdatedAt, nullableTime(job.StartedAt), nullableTime(job.FinishedAt))
-	return scanJob(updatedRow)
+	updated, ok := scanJob(updatedRow)
+	if ok {
+		s.scheduleQueuedJobs(now)
+	}
+	return updated, ok
 }
 
 func (s *PostgresStore) Nodes() []cluster.Node {
@@ -504,17 +508,17 @@ ORDER BY created_at ASC
 		}
 		workerID := s.pickWorker(job.Requirements)
 		if workerID == "" {
-			if job.LastFailure == "" {
+			if job.LastFailure == "" || job.LastFailure == "waiting for capable worker" || job.LastFailure == "waiting for available worker capacity" {
 				_, _ = s.pool.Exec(context.Background(), `
 UPDATE jobs
 SET last_failure = $2, updated_at = $3
 WHERE id = $1
-`, job.ID, "waiting for capable worker", now)
+`, job.ID, s.waitingReason(job.Requirements), now)
 			}
 			continue
 		}
 		lastFailure := job.LastFailure
-		if lastFailure == "waiting for capable worker" {
+		if lastFailure == "waiting for capable worker" || lastFailure == "waiting for available worker capacity" {
 			lastFailure = ""
 		}
 		_, _ = s.pool.Exec(context.Background(), `
@@ -552,6 +556,9 @@ func (s *PostgresStore) pickWorkerExcept(req jobs.Requirements, excluded map[str
 		if !nodeMeetsRequirements(node, req) {
 			continue
 		}
+		if s.activeJobsForWorker(node.ID) >= defaultWorkerJobSlots {
+			continue
+		}
 		score := benchmarks[node.ID].TotalScore
 		if bestID == "" || score > bestScore {
 			bestID = node.ID
@@ -561,15 +568,40 @@ func (s *PostgresStore) pickWorkerExcept(req jobs.Requirements, excluded map[str
 	return bestID
 }
 
-func (s *PostgresStore) workerCanRun(nodeID string, req jobs.Requirements) bool {
+func (s *PostgresStore) workerCanAccept(nodeID string, req jobs.Requirements) bool {
 	for _, node := range s.Nodes() {
 		if node.ID == nodeID {
 			return node.Role == cluster.NodeRoleWorker &&
 				node.Status == cluster.NodeStatusOnline &&
-				nodeMeetsRequirements(node, req)
+				nodeMeetsRequirements(node, req) &&
+				s.activeJobsForWorker(node.ID) < defaultWorkerJobSlots
 		}
 	}
 	return false
+}
+
+func (s *PostgresStore) waitingReason(req jobs.Requirements) string {
+	for _, node := range s.Nodes() {
+		if node.Role == cluster.NodeRoleWorker &&
+			node.Status == cluster.NodeStatusOnline &&
+			nodeMeetsRequirements(node, req) {
+			return "waiting for available worker capacity"
+		}
+	}
+	return "waiting for capable worker"
+}
+
+func (s *PostgresStore) activeJobsForWorker(nodeID string) int {
+	var count int
+	row := s.pool.QueryRow(context.Background(), `
+SELECT COUNT(*)
+FROM jobs
+WHERE assigned_to = $1 AND status IN ($2, $3)
+`, nodeID, string(jobs.StatusScheduled), string(jobs.StatusRunning))
+	if err := row.Scan(&count); err != nil {
+		return defaultWorkerJobSlots
+	}
+	return count
 }
 
 type jobScanner interface {

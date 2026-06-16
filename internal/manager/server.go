@@ -115,6 +115,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Benchmarks         map[string]NodeBenchmarkSummary
 		ClusterBenchmarks  []ClusterBenchmarkSummary
 		NodesByID          map[string]cluster.Node
+		WorkerActiveJobs   map[string]int
 		MaxClusterGFLOPS   float64
 		Jobs               []jobs.Job
 		InviteURL          string
@@ -125,6 +126,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Benchmarks:         s.state.BenchmarkSummaryByNode(),
 		ClusterBenchmarks:  clusterBenchmarks,
 		NodesByID:          nodesByID(nodes),
+		WorkerActiveJobs:   activeJobsByWorker(allJobs),
 		MaxClusterGFLOPS:   maxClusterBenchmarkGFLOPS(clusterBenchmarks),
 		Jobs:               recentJobs(allJobs, 12),
 		InviteURL:          "/invite",
@@ -836,6 +838,19 @@ func hasActiveJobs(in []jobs.Job) bool {
 	return false
 }
 
+func activeJobsByWorker(in []jobs.Job) map[string]int {
+	out := make(map[string]int)
+	for _, job := range in {
+		if job.AssignedTo == "" {
+			continue
+		}
+		if job.Status == jobs.StatusScheduled || job.Status == jobs.StatusRunning {
+			out[job.AssignedTo]++
+		}
+	}
+	return out
+}
+
 func jobDuration(job jobs.Job) string {
 	if job.StartedAt.IsZero() {
 		return "-"
@@ -1036,6 +1051,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		return percent
 	},
 	"hasActiveJobs":   hasActiveJobs,
+	"workerSlots":     func() int { return defaultWorkerJobSlots },
 	"jobDuration":     jobDuration,
 	"jobTimeline":     jobTimeline,
 	"jobWorkload":     jobWorkload,
@@ -1575,6 +1591,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <th>Memory</th>
               <th>Storage</th>
               <th>GPU</th>
+              <th>Job slots</th>
               <th>Benchmark</th>
               <th>Last seen</th>
             </tr>
@@ -1588,6 +1605,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <td>{{printf "%.1f" (gb .Resources.Memory.AllowedBytes)}} / {{printf "%.1f" (gb .Resources.Memory.TotalBytes)}} GB</td>
               <td>{{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed</td>
               <td>{{range .Resources.GPU}}<div>{{.Name}}</div>{{else}}0{{end}}</td>
+              <td>{{index $.WorkerActiveJobs .ID}} / {{workerSlots}} active</td>
               <td>{{with index $.Benchmarks .ID}}{{printf "%.0f" .TotalScore}}{{else}}Not run{{end}}</td>
               <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
             </tr>
