@@ -670,6 +670,10 @@ func (s *Server) handleModelGenerate(w http.ResponseWriter, r *http.Request, mod
 		http.Error(w, "model is not installed on the selected worker", http.StatusConflict)
 		return
 	}
+	if !modelGeneratableOn(summaries[0], req.NodeID) {
+		http.Error(w, "model runtime is not ready on the selected worker", http.StatusConflict)
+		return
+	}
 	conversationID := strings.TrimSpace(req.ConversationID)
 	if conversationID == "" {
 		conversationID = newConversationID()
@@ -1317,7 +1321,7 @@ func installedModelCount(in []ModelSummary) int {
 func generatableModelCount(in []ModelSummary) int {
 	count := 0
 	for _, summary := range in {
-		if len(summary.InstalledOn) > 0 && summary.Status != "deleting" {
+		if len(summary.GeneratableOn) > 0 && summary.Status != "deleting" {
 			count++
 		}
 	}
@@ -1824,6 +1828,16 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 		return out
 	},
+	"modelReadyNodeOptions": func(nodes map[string]cluster.Node, summary ModelSummary) []cluster.Node {
+		out := make([]cluster.Node, 0, len(summary.GeneratableOn))
+		for _, nodeID := range summary.GeneratableOn {
+			if node, ok := nodes[nodeID]; ok {
+				out = append(out, node)
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		return out
+	},
 	"modelStatusClass": func(status string) string {
 		switch status {
 		case "installed":
@@ -1838,7 +1852,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		return summary.Status == "available" && summary.CapableNodes > 0
 	},
 	"modelCanGenerate": func(summary ModelSummary) bool {
-		return len(summary.InstalledOn) > 0 && summary.Status != "deleting"
+		return len(summary.GeneratableOn) > 0 && summary.Status != "deleting"
 	},
 	"jobMetric": func(job jobs.Job, key string) string {
 		if job.Result == "" {
@@ -2994,7 +3008,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 <label for="chat-node">Worker</label>
                 <select id="chat-node" name="node_id">
                   {{if eq (generatableCount .Models) 0}}<option value="">No installed model worker</option>{{end}}
-                  {{range .Models}}{{$chatModelID := .Model.ID}}{{range modelNodeOptions $.NodesByID .}}<option value="{{.ID}}" data-model-id="{{$chatModelID}}">{{.Name}}</option>{{end}}{{end}}
+                  {{range .Models}}{{$chatModelID := .Model.ID}}{{range modelReadyNodeOptions $.NodesByID .}}<option value="{{.ID}}" data-model-id="{{$chatModelID}}">{{.Name}}</option>{{end}}{{end}}
                 </select>
               </div>
               <div class="chat-settings">

@@ -64,6 +64,10 @@ func TestModelSummariesUseWorkerReportedInventory(t *testing.T) {
 			Status: cluster.NodeStatusOnline,
 			Resources: cluster.ResourceSnapshot{
 				Models: []cluster.ModelResource{{ID: "qwen-test", Name: "Qwen Test", Bytes: 123}},
+				Runtimes: []cluster.RuntimeResource{{
+					Name:  "llama.cpp",
+					Ready: true,
+				}},
 			},
 		},
 	}
@@ -77,6 +81,40 @@ func TestModelSummariesUseWorkerReportedInventory(t *testing.T) {
 	}
 	if len(summaries[0].InstalledOn) != 1 || summaries[0].InstalledOn[0] != "node-online" {
 		t.Fatalf("expected installed node from inventory, got %#v", summaries[0].InstalledOn)
+	}
+	if len(summaries[0].GeneratableOn) != 1 || summaries[0].GeneratableOn[0] != "node-online" {
+		t.Fatalf("expected ready runtime node from inventory, got %#v", summaries[0].GeneratableOn)
+	}
+}
+
+func TestModelSummariesDoNotGenerateWithoutReadyRuntime(t *testing.T) {
+	catalog := []models.Model{{ID: "qwen-test", Name: "Qwen Test", Runtime: "llama.cpp"}}
+	nodes := []cluster.Node{
+		{
+			ID:     "node-online",
+			Name:   "worker-a",
+			Role:   cluster.NodeRoleWorker,
+			Status: cluster.NodeStatusOnline,
+			Resources: cluster.ResourceSnapshot{
+				Models: []cluster.ModelResource{{ID: "qwen-test", Name: "Qwen Test", Bytes: 123}},
+				Runtimes: []cluster.RuntimeResource{{
+					Name:  "llama.cpp",
+					Ready: false,
+					Error: "llama-cli missing",
+				}},
+			},
+		},
+	}
+
+	summaries := modelSummaries(catalog, nil, nodes)
+	if len(summaries) != 1 {
+		t.Fatalf("expected one summary, got %d", len(summaries))
+	}
+	if len(summaries[0].InstalledOn) != 1 {
+		t.Fatalf("expected installed node, got %#v", summaries[0].InstalledOn)
+	}
+	if len(summaries[0].GeneratableOn) != 0 {
+		t.Fatalf("expected no generatable nodes without runtime, got %#v", summaries[0].GeneratableOn)
 	}
 }
 

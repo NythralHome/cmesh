@@ -13,15 +13,16 @@ import (
 )
 
 type ModelSummary struct {
-	Model        models.Model      `json:"model"`
-	Status       string            `json:"status"`
-	InstalledOn  []string          `json:"installed_on"`
-	ActiveJobID  string            `json:"active_job_id,omitempty"`
-	LastJobID    string            `json:"last_job_id,omitempty"`
-	LastError    string            `json:"last_error,omitempty"`
-	LastUpdated  time.Time         `json:"last_updated,omitempty"`
-	CapableNodes int               `json:"capable_nodes"`
-	Capabilities []ModelCapability `json:"capabilities,omitempty"`
+	Model         models.Model      `json:"model"`
+	Status        string            `json:"status"`
+	InstalledOn   []string          `json:"installed_on"`
+	GeneratableOn []string          `json:"generatable_on,omitempty"`
+	ActiveJobID   string            `json:"active_job_id,omitempty"`
+	LastJobID     string            `json:"last_job_id,omitempty"`
+	LastError     string            `json:"last_error,omitempty"`
+	LastUpdated   time.Time         `json:"last_updated,omitempty"`
+	CapableNodes  int               `json:"capable_nodes"`
+	Capabilities  []ModelCapability `json:"capabilities,omitempty"`
 }
 
 type ModelCapability struct {
@@ -58,6 +59,9 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 			for _, installedModel := range node.Resources.Models {
 				if installedModel.ID == model.ID {
 					installed[node.ID] = true
+					if nodeRuntimeReady(node, string(model.Runtime)) {
+						summary.GeneratableOn = append(summary.GeneratableOn, node.ID)
+					}
 				}
 			}
 		}
@@ -90,12 +94,26 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 			summary.InstalledOn = append(summary.InstalledOn, nodeID)
 		}
 		sort.Strings(summary.InstalledOn)
+		sort.Strings(summary.GeneratableOn)
 		if len(summary.InstalledOn) > 0 && summary.Status == "available" {
 			summary.Status = "installed"
 		}
 		out = append(out, summary)
 	}
 	return out
+}
+
+func nodeRuntimeReady(node cluster.Node, runtimeName string) bool {
+	runtimeName = strings.TrimSpace(runtimeName)
+	if runtimeName == "" {
+		return true
+	}
+	for _, runtime := range node.Resources.Runtimes {
+		if runtime.Name == runtimeName && runtime.Ready {
+			return true
+		}
+	}
+	return false
 }
 
 func modelCapabilities(model models.Model, nodes []cluster.Node, jobsList []jobs.Job) []ModelCapability {
@@ -216,6 +234,15 @@ func jobModelID(job jobs.Job) (string, bool) {
 func modelInstalledOn(summary ModelSummary, nodeID string) bool {
 	for _, installedNodeID := range summary.InstalledOn {
 		if installedNodeID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+func modelGeneratableOn(summary ModelSummary, nodeID string) bool {
+	for _, readyNodeID := range summary.GeneratableOn {
+		if readyNodeID == nodeID {
 			return true
 		}
 	}

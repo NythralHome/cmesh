@@ -508,6 +508,10 @@ func TestConversationAPIListsAndReadsGeneratedChatContext(t *testing.T) {
 			ID:   "qwen2.5-0.5b-instruct-q4-k-m",
 			Name: "Qwen2.5 0.5B Instruct",
 		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+		}},
 	})
 
 	body := bytes.NewReader([]byte(`{"node_id":"` + worker.NodeID + `","prompt":"Мене звати Сергій.","system_prompt":"Remember names."}`))
@@ -548,6 +552,36 @@ func TestConversationAPIListsAndReadsGeneratedChatContext(t *testing.T) {
 	}
 	if !strings.Contains(readRec.Body.String(), "Мене звати Сергій.") || !strings.Contains(readRec.Body.String(), "Remember names.") {
 		t.Fatalf("expected conversation body to include saved prompt and system prompt, got %s", readRec.Body.String())
+	}
+}
+
+func TestModelGenerateRejectsWorkerWithoutReadyRuntime(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 4, CoresAllowed: 2},
+		Memory:  cluster.MemoryResources{TotalBytes: 64 * gb, AllowedBytes: 48 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 256 * gb, AllowedBytes: 64 * gb, FreeBytes: 128 * gb},
+		Models: []cluster.ModelResource{{
+			ID:   "qwen2.5-0.5b-instruct-q4-k-m",
+			Name: "Qwen2.5 0.5B Instruct",
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: false,
+			Error: "llama-cli missing",
+		}},
+	})
+
+	body := bytes.NewReader([]byte(`{"node_id":"` + worker.NodeID + `","prompt":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/generate", body)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "runtime is not ready") {
+		t.Fatalf("expected runtime error, got %s", rec.Body.String())
 	}
 }
 
