@@ -305,6 +305,44 @@ func TestDashboardShowsOnlineWorkersAndJobs(t *testing.T) {
 	}
 }
 
+func TestRecentChatJobsOnlyIncludesSuccessfulDashboardChat(t *testing.T) {
+	now := time.Now()
+	in := []jobs.Job{
+		{
+			ID:          "old-failed",
+			Type:        models.JobGenerate,
+			Status:      jobs.StatusFailed,
+			RequestedBy: "dashboard-chat",
+			Error:       "llama-cli is not available on PATH",
+			UpdatedAt:   now.Add(2 * time.Minute),
+		},
+		{
+			ID:          "external-success",
+			Type:        models.JobGenerate,
+			Status:      jobs.StatusSucceeded,
+			RequestedBy: "api",
+			Result:      `{"output":"external"}`,
+			UpdatedAt:   now.Add(3 * time.Minute),
+		},
+		{
+			ID:          "chat-success",
+			Type:        models.JobGenerate,
+			Status:      jobs.StatusSucceeded,
+			RequestedBy: "dashboard-chat",
+			Result:      `{"output":"hello"}`,
+			UpdatedAt:   now,
+		},
+	}
+
+	got := recentChatJobs(in, 6)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 chat job, got %d", len(got))
+	}
+	if got[0].ID != "chat-success" {
+		t.Fatalf("expected chat-success, got %q", got[0].ID)
+	}
+}
+
 func TestReadAPIRequiresOperatorTokenWhenConfigured(t *testing.T) {
 	srv := NewServerWithOptions(ServerOptions{
 		Addr:          ":0",

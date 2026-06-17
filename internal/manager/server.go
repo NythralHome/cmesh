@@ -124,6 +124,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		WorkerActiveJobs   map[string]int
 		MaxClusterGFLOPS   float64
 		Jobs               []jobs.Job
+		ChatJobs           []jobs.Job
 		InviteURL          string
 	}{
 		Summary:            s.state.ClusterSummary(),
@@ -136,6 +137,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		WorkerActiveJobs:   activeJobsByWorker(allJobs),
 		MaxClusterGFLOPS:   maxClusterBenchmarkGFLOPS(clusterBenchmarks),
 		Jobs:               recentJobs(allJobs, 12),
+		ChatJobs:           recentChatJobs(allJobs, 6),
 		InviteURL:          "/invite",
 	}
 
@@ -906,6 +908,23 @@ func recentJobs(in []jobs.Job, limit int) []jobs.Job {
 		out = out[:limit]
 	}
 	return out
+}
+
+func recentChatJobs(in []jobs.Job, limit int) []jobs.Job {
+	out := make([]jobs.Job, 0, len(in))
+	for _, job := range in {
+		if job.Type != models.JobGenerate {
+			continue
+		}
+		if job.RequestedBy != "dashboard-chat" {
+			continue
+		}
+		if job.Status != jobs.StatusSucceeded || strings.TrimSpace(job.Result) == "" {
+			continue
+		}
+		out = append(out, job)
+	}
+	return recentJobs(out, limit)
 }
 
 func maxClusterBenchmarkGFLOPS(in []ClusterBenchmarkSummary) float64 {
@@ -2248,13 +2267,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <p>Responses run on your selected worker, not an external API.</p>
           </div>
           {{end}}
-          {{range .Jobs}}{{if eq .Type "model.generate"}}
-            {{if .Error}}
-            <div class="chat-message system">{{jobDetail .}}</div>
-            {{else if .Result}}
+          {{range .ChatJobs}}
             <div class="chat-message assistant">{{jobDetail .}}</div>
-            {{end}}
-          {{end}}{{end}}
+          {{end}}
         </div>
         <div class="chat-composer">
           <textarea id="chat-prompt" name="prompt" placeholder="Message the selected local model"></textarea>
@@ -2831,7 +2846,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         fetch("/v1/models/" + encodeURIComponent(modelID) + "/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ node_id: nodeID, prompt: prompt, max_tokens: 256, temperature: "0.7" })
+          body: JSON.stringify({ node_id: nodeID, prompt: prompt, max_tokens: 64, temperature: "0.7" })
         }).then(function(response) {
           if (!response.ok) {
             return response.text().then(function(text) { throw new Error(text || response.statusText); });
