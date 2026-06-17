@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -392,6 +393,41 @@ func (s *State) DeleteMemory(id string) bool {
 	}
 	delete(s.memories, id)
 	return true
+}
+
+func (s *State) UpsertMemory(memory Memory) (Memory, error) {
+	now := time.Now().UTC()
+	memory.ModelID = strings.TrimSpace(memory.ModelID)
+	memory.Key = strings.TrimSpace(memory.Key)
+	memory.Value = strings.TrimSpace(memory.Value)
+	memory.Source = strings.TrimSpace(memory.Source)
+	memory.ConversationID = strings.TrimSpace(memory.ConversationID)
+	if memory.ModelID == "" {
+		return Memory{}, errors.New("model_id is required")
+	}
+	if memory.Key == "" {
+		return Memory{}, errors.New("key is required")
+	}
+	if memory.Value == "" {
+		return Memory{}, errors.New("value is required")
+	}
+	if memory.ID == "" {
+		memory.ID = newMemoryID()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.memories[memory.ID]; ok {
+		if memory.CreatedAt.IsZero() {
+			memory.CreatedAt = existing.CreatedAt
+		}
+	} else if memory.CreatedAt.IsZero() {
+		memory.CreatedAt = now
+	}
+	memory.UpdatedAt = now
+	s.memories[memory.ID] = memory
+	return memory, nil
 }
 
 func (s *State) DeleteMemoriesByModel(modelID string) int {

@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -749,11 +750,25 @@ func (s *Server) handleMemories(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperatorAuth(w, r, false) {
 		return
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	modelID := strings.TrimSpace(r.URL.Query().Get("model_id"))
+	if r.Method == http.MethodPost {
+		memory, err := s.decodeMemoryRequest(r, "")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		saved, err := s.saveMemory(memory)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusCreated, saved)
+		return
+	}
 	if r.Method == http.MethodDelete {
 		if modelID == "" {
 			http.Error(w, "model_id is required", http.StatusBadRequest)
@@ -795,11 +810,54 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "memory persistence is not available", http.StatusNotImplemented)
 		return
 	}
+	if r.Method == http.MethodPost {
+		memory, err := s.decodeMemoryRequest(r, id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		saved, err := memories.UpsertMemory(memory)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, saved)
+		return
+	}
 	if !memories.DeleteMemory(id) {
 		http.NotFound(w, r)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+func (s *Server) decodeMemoryRequest(r *http.Request, id string) (Memory, error) {
+	var req struct {
+		ModelID        string `json:"model_id"`
+		Key            string `json:"key"`
+		Value          string `json:"value"`
+		Source         string `json:"source"`
+		ConversationID string `json:"conversation_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return Memory{}, err
+	}
+	return Memory{
+		ID:             strings.TrimSpace(id),
+		ModelID:        req.ModelID,
+		Key:            req.Key,
+		Value:          req.Value,
+		Source:         req.Source,
+		ConversationID: req.ConversationID,
+	}, nil
+}
+
+func (s *Server) saveMemory(memory Memory) (Memory, error) {
+	memories, ok := s.state.(memoryStore)
+	if !ok {
+		return Memory{}, errors.New("memory persistence is not available")
+	}
+	return memories.UpsertMemory(memory)
 }
 
 func (s *Server) handleMemoryPreview(w http.ResponseWriter, r *http.Request) {
@@ -1240,6 +1298,7 @@ type conversationStore interface {
 
 type memoryStore interface {
 	Memories(modelID string) []Memory
+	UpsertMemory(memory Memory) (Memory, error)
 	DeleteMemory(id string) bool
 	DeleteMemoriesByModel(modelID string) int
 }
@@ -2167,7 +2226,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     }
     .memory-item {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr auto auto;
       gap: 8px;
       align-items: start;
       padding: 8px;
@@ -2183,6 +2242,18 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .memory-value {
       font-weight: 800;
       word-break: break-word;
+    }
+    .memory-editor {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+    .memory-editor textarea {
+      min-height: 68px;
     }
     .memory-preview {
       display: grid;
@@ -2670,6 +2741,18 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <div class="memory-list" id="memory-list">
               <div class="sub">Select a model to load memory.</div>
             </div>
+            <form class="memory-editor" id="memory-editor">
+              <input type="hidden" name="memory_id" value="">
+              <div class="field">
+                <label for="memory-key">Key</label>
+                <input id="memory-key" name="key" type="text" placeholder="user.name">
+              </div>
+              <div class="field">
+                <label for="memory-value">Value</label>
+                <textarea id="memory-value" name="value" placeholder="Sergiy"></textarea>
+              </div>
+              <button class="button primary wide" type="submit"><svg class="icon"><use href="#icon-plus"></use></svg><span>Save memory</span></button>
+            </form>
             <div class="memory-preview">
               <span class="conversation-meta">Effective system context</span>
               <pre id="memory-preview-text">Select a model to preview the prompt context.</pre>
@@ -3216,6 +3299,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var newChatButton = document.getElementById("new-chat-button");
     var conversationList = document.getElementById("conversation-list");
     var memoryList = document.getElementById("memory-list");
+    var memoryEditor = document.getElementById("memory-editor");
     var memoryClearModel = document.getElementById("memory-clear-model");
     var memoryPreviewText = document.getElementById("memory-preview-text");
     var chatSystemPrompt = document.getElementById("chat-system-prompt");
@@ -3287,16 +3371,24 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         value.textContent = memory.value || "";
         var meta = document.createElement("span");
         meta.className = "conversation-meta";
-        meta.textContent = memory.model_id || "";
+        meta.textContent = (memory.source ? "source: " + memory.source : memory.model_id || "") + (memory.updated_at ? " · " + new Date(memory.updated_at).toLocaleTimeString() : "");
         main.appendChild(label);
         main.appendChild(value);
         main.appendChild(meta);
+        var editButton = document.createElement("button");
+        editButton.className = "button memory-edit";
+        editButton.type = "button";
+        editButton.dataset.memoryId = memory.id || "";
+        editButton.dataset.memoryKey = memory.key || "";
+        editButton.dataset.memoryValue = memory.value || "";
+        editButton.innerHTML = '<svg class="icon"><use href="#icon-status"></use></svg>';
         var button = document.createElement("button");
         button.className = "button danger memory-delete";
         button.type = "button";
         button.dataset.memoryId = memory.id || "";
         button.innerHTML = '<svg class="icon"><use href="#icon-trash"></use></svg>';
         item.appendChild(main);
+        item.appendChild(editButton);
         item.appendChild(button);
         memoryList.appendChild(item);
       });
@@ -3459,6 +3551,14 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     }
     if (memoryList) {
       memoryList.addEventListener("click", function(event) {
+        var editButton = event.target.closest ? event.target.closest(".memory-edit") : null;
+        if (editButton && memoryEditor) {
+          memoryEditor.querySelector('[name="memory_id"]').value = editButton.dataset.memoryId || "";
+          memoryEditor.querySelector('[name="key"]').value = editButton.dataset.memoryKey || "";
+          memoryEditor.querySelector('[name="value"]').value = editButton.dataset.memoryValue || "";
+          if (modelStatus) modelStatus.innerText = "Editing memory " + (editButton.dataset.memoryKey || editButton.dataset.memoryId || "") + ".";
+          return;
+        }
         var button = event.target.closest ? event.target.closest(".memory-delete") : null;
         if (!button) return;
         var memoryID = button.dataset.memoryId;
@@ -3477,6 +3577,54 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         }).catch(function(error) {
           button.disabled = false;
           if (modelStatus) modelStatus.innerText = "Memory delete failed: " + error.message;
+        });
+      });
+    }
+    if (memoryEditor) {
+      memoryEditor.addEventListener("submit", function(event) {
+        event.preventDefault();
+        var modelID = currentChatModelID();
+        var memoryID = String(memoryEditor.querySelector('[name="memory_id"]').value || "").trim();
+        var key = String(memoryEditor.querySelector('[name="key"]').value || "").trim();
+        var value = String(memoryEditor.querySelector('[name="value"]').value || "").trim();
+        if (!modelID) {
+          if (modelStatus) modelStatus.innerText = "Select a model before saving memory.";
+          return;
+        }
+        if (!key || !value) {
+          if (modelStatus) modelStatus.innerText = "Memory key and value are required.";
+          return;
+        }
+        var button = memoryEditor.querySelector("button[type=submit]");
+        if (button) {
+          button.disabled = true;
+          setButtonText(button, "Saving...");
+        }
+        fetch(memoryID ? "/v1/memories/" + encodeURIComponent(memoryID) : "/v1/memories", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model_id: modelID,
+            key: key,
+            value: value,
+            source: "manual"
+          })
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function() {
+          memoryEditor.reset();
+          if (modelStatus) modelStatus.innerText = "Memory saved.";
+          loadModelMemory();
+        }).catch(function(error) {
+          if (modelStatus) modelStatus.innerText = "Memory save failed: " + error.message;
+        }).finally(function() {
+          if (button) {
+            button.disabled = false;
+            setButtonText(button, "Save memory");
+          }
         });
       });
     }

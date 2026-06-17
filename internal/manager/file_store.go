@@ -107,6 +107,14 @@ func (s *FileStore) DeleteMemory(id string) bool {
 	return ok
 }
 
+func (s *FileStore) UpsertMemory(memory Memory) (Memory, error) {
+	saved, err := s.State.UpsertMemory(memory)
+	if err == nil {
+		_ = s.save()
+	}
+	return saved, err
+}
+
 func (s *FileStore) DeleteMemoriesByModel(modelID string) int {
 	deleted := s.State.DeleteMemoriesByModel(modelID)
 	if deleted > 0 {

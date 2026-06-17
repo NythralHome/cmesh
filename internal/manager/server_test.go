@@ -586,6 +586,48 @@ func TestMemoryAPIPreviewsAndClearsModelMemory(t *testing.T) {
 	}
 }
 
+func TestMemoryAPICreatesAndUpdatesManualMemory(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+
+	body := bytes.NewBufferString(`{"model_id":"qwen2.5-0.5b-instruct-q4-k-m","key":"reply_language","value":"ukrainian","source":"manual"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/memories", body)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created Memory
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.Key != "reply_language" || created.Value != "ukrainian" || created.Source != "manual" {
+		t.Fatalf("unexpected created memory: %#v", created)
+	}
+
+	body = bytes.NewBufferString(`{"model_id":"qwen2.5-0.5b-instruct-q4-k-m","key":"reply_language","value":"українська","source":"manual"}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/memories/"+created.ID, body)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	memories := state.Memories("qwen2.5-0.5b-instruct-q4-k-m")
+	if len(memories) != 1 || memories[0].Value != "українська" {
+		t.Fatalf("expected updated memory, got %#v", memories)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/memories/preview?model_id=qwen2.5-0.5b-instruct-q4-k-m", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "reply_language: українська") {
+		t.Fatalf("expected manual memory in preview, got %s", rec.Body.String())
+	}
+}
+
 func TestGenerateCompletionKeepsStoredSystemPromptClean(t *testing.T) {
 	state := NewState()
 	state.AppendConversationMessage("conv-test", "qwen2.5-0.5b-instruct-q4-k-m", "node-test", "Base prompt.", models.ChatMessage{
