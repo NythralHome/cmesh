@@ -1047,11 +1047,13 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	defer cancel()
 	args := []string{
 		"-m", path,
-		"-p", modelPrompt(model, req.Prompt),
+		"-p", strings.TrimSpace(req.Prompt),
 		"-n", strconv.Itoa(maxTokens),
 		"--temp", temperature,
 		"--threads", "1",
 		"--ctx-size", strconv.Itoa(modelContextSize(model)),
+		"-sys", modelSystemPrompt(model),
+		"-r", "<|im_end|>",
 		"--log-disable",
 		"--no-display-prompt",
 		"--no-show-timings",
@@ -1142,12 +1144,11 @@ func modelContextSize(model models.Model) int {
 	return 2048
 }
 
-func modelPrompt(model models.Model, prompt string) string {
-	prompt = strings.TrimSpace(prompt)
+func modelSystemPrompt(model models.Model) string {
 	if strings.EqualFold(model.Family, "Qwen") {
-		return "<|im_start|>system\nYou are a concise assistant. Answer only the user's question. Do not print chat template tokens.<|im_end|>\n<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n"
+		return "You are a concise assistant. Answer only the user's question. Do not print role names or chat template tokens."
 	}
-	return prompt
+	return "You are a concise assistant. Answer only the user's question."
 }
 
 func cleanLlamaOutput(output string, prompt string) string {
@@ -1214,6 +1215,9 @@ func sanitizeModelText(text string) string {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "</|im_start|") || strings.HasPrefix(trimmed, "</|im_end|") || trimmed == "</" {
+			continue
+		}
+		if trimmed == "<" || strings.EqualFold(trimmed, "user") || strings.EqualFold(trimmed, "assistant") || strings.EqualFold(trimmed, "system") {
 			continue
 		}
 		cleaned = append(cleaned, line)

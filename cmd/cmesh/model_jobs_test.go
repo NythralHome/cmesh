@@ -92,17 +92,17 @@ how are you?
 	}
 }
 
-func TestModelPromptUsesQwenChatTemplate(t *testing.T) {
+func TestModelSystemPromptUsesQwenGuardrails(t *testing.T) {
 	model, err := models.MustFind("qwen2.5-0.5b-instruct-q4-k-m")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := modelPrompt(model, "hello")
-	if !strings.Contains(got, "<|im_start|>user\nhello<|im_end|>") {
-		t.Fatalf("expected qwen user template, got %q", got)
+	got := modelSystemPrompt(model)
+	if strings.Contains(got, "<|im_start|>") || strings.Contains(got, "<|im_end|>") {
+		t.Fatalf("expected no manual chat template tokens, got %q", got)
 	}
-	if !strings.HasSuffix(got, "<|im_start|>assistant\n") {
-		t.Fatalf("expected assistant prefix, got %q", got)
+	if !strings.Contains(got, "Do not print role names") {
+		t.Fatalf("expected qwen guardrail prompt, got %q", got)
 	}
 }
 
