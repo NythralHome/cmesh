@@ -94,6 +94,14 @@ On macOS the dry-run also packages a local DMG. To skip desktop packaging while 
 CMESH_DRY_RUN_SKIP_DESKTOP_BUILD=true scripts/release-dry-run.sh
 ```
 
+Prepare release candidate metadata after a passing dry-run:
+
+```sh
+make release-candidate VERSION=v0.1.0-alpha.83
+```
+
+This writes release notes, expected asset names, local dry-run checksums, and a manifest under `dist/release-candidate/<version>`. It does not create a git tag, push commits, publish a GitHub release, or deploy alpha.
+
 Use the guarded alpha deploy script after pushing a release tag:
 
 ```sh

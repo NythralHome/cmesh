@@ -151,6 +151,9 @@ write_manifest() {
   {
     echo "artifacts:"
     find "$ARTIFACT_DIR" -maxdepth 2 -mindepth 1 -print | sort
+    echo
+    echo "PASS: release dry-run completed"
+    echo "Artifacts: $ARTIFACT_DIR"
   } >>"$REPORT"
   echo
   echo "PASS: release dry-run completed"
