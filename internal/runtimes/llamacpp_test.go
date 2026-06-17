@@ -42,3 +42,18 @@ func TestSelectLlamaCPPAssetRejectsUnsupportedPlatform(t *testing.T) {
 		t.Fatal("expected unsupported platform error")
 	}
 }
+
+func TestFallbackLlamaCPPReleaseHasPlatformAssets(t *testing.T) {
+	release := fallbackLlamaCPPRelease("b9672")
+	if release.TagName != "b9672" {
+		t.Fatalf("expected fallback tag b9672, got %q", release.TagName)
+	}
+	got, err := selectLlamaCPPAsset(release, "darwin", "arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://github.com/ggml-org/llama.cpp/releases/download/b9672/llama-b9672-bin-macos-arm64.tar.gz"
+	if got.URL != want {
+		t.Fatalf("expected %q, got %q", want, got.URL)
+	}
+}

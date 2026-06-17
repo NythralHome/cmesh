@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	LlamaCPPName = "llama.cpp"
-	githubAPIURL = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+	LlamaCPPName        = "llama.cpp"
+	githubAPIURL        = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+	fallbackLlamaCPPTag = "b9672"
 )
 
 type RuntimeStatus struct {
@@ -176,6 +177,30 @@ func fetchLatestRelease(ctx context.Context) (githubRelease, error) {
 	if tag != "" {
 		url = "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/" + tag
 	}
+
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return githubRelease{}, ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+		}
+		release, err := fetchGitHubRelease(ctx, url)
+		if err == nil {
+			return release, nil
+		}
+		lastErr = err
+	}
+
+	if tag == "" {
+		return fallbackLlamaCPPRelease(fallbackLlamaCPPTag), nil
+	}
+	return githubRelease{}, lastErr
+}
+
+func fetchGitHubRelease(ctx context.Context, url string) (githubRelease, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, url, nil)
@@ -199,6 +224,27 @@ func fetchLatestRelease(ctx context.Context) (githubRelease, error) {
 		return githubRelease{}, fmt.Errorf("llama.cpp release has no tag")
 	}
 	return release, nil
+}
+
+func fallbackLlamaCPPRelease(tag string) githubRelease {
+	base := "https://github.com/ggml-org/llama.cpp/releases/download/" + tag + "/llama-" + tag
+	names := []string{
+		"-bin-macos-arm64.tar.gz",
+		"-bin-macos-x64.tar.gz",
+		"-bin-ubuntu-x64.tar.gz",
+		"-bin-ubuntu-arm64.tar.gz",
+		"-bin-win-cpu-x64.zip",
+		"-bin-win-cpu-arm64.zip",
+	}
+	release := githubRelease{TagName: tag, Assets: make([]githubAssetObject, 0, len(names))}
+	for _, name := range names {
+		assetName := "llama-" + tag + name
+		release.Assets = append(release.Assets, githubAssetObject{
+			Name:               assetName,
+			BrowserDownloadURL: base + name,
+		})
+	}
+	return release
 }
 
 func selectLlamaCPPAsset(release githubRelease, goos string, goarch string) (asset, error) {

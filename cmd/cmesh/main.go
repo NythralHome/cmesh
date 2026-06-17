@@ -1042,14 +1042,45 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	if temperature == "" {
 		temperature = "0.7"
 	}
-	cmd := exec.Command(cli, "-m", path, "-p", req.Prompt, "-n", strconv.Itoa(maxTokens), "--temp", temperature)
+	timeout := modelGenerateTimeout(maxTokens)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	args := []string{
+		"-m", path,
+		"-p", req.Prompt,
+		"-n", strconv.Itoa(maxTokens),
+		"--temp", temperature,
+		"--threads", "1",
+		"--ctx-size", strconv.Itoa(modelContextSize(model)),
+		"--log-disable",
+		"--no-display-prompt",
+		"--no-show-timings",
+		"--simple-io",
+		"--single-turn",
+	}
+	cmd := exec.CommandContext(ctx, cli, args...)
 	cmd.Env = os.Environ()
 	cmd.Dir = filepath.Dir(cli)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("%s failed: %w: %s", model.Runtime, err, strings.TrimSpace(string(output)))
+	var stdout limitedBuffer
+	var stderr limitedBuffer
+	stdout.limit = 64 * 1024
+	stderr.limit = 16 * 1024
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("%s timed out after %s", model.Runtime, timeout)
 	}
-	text := strings.TrimSpace(string(output))
+	if err != nil {
+		return "", fmt.Errorf("%s failed: %w: %s", model.Runtime, err, strings.TrimSpace(stderr.String()))
+	}
+	text := cleanLlamaOutput(stdout.String(), req.Prompt)
+	if text == "" {
+		text = strings.TrimSpace(stdout.String())
+	}
+	if text == "" {
+		return "", fmt.Errorf("%s returned an empty response", model.Runtime)
+	}
 	result := modelGenerateResult{
 		Kind:           string(models.JobGenerate),
 		ModelID:        model.ID,
@@ -1060,6 +1091,92 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	}
 	body, err := json.Marshal(result)
 	return string(body), err
+}
+
+type limitedBuffer struct {
+	bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if b.limit <= 0 {
+		return len(p), nil
+	}
+	remaining := b.limit - b.Buffer.Len()
+	if remaining <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		b.truncated = true
+		_, _ = b.Buffer.Write(p[:remaining])
+		return len(p), nil
+	}
+	_, _ = b.Buffer.Write(p)
+	return len(p), nil
+}
+
+func modelGenerateTimeout(maxTokens int) time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("CMESH_MODEL_GENERATE_TIMEOUT")); raw != "" {
+		if duration, err := time.ParseDuration(raw); err == nil && duration > 0 {
+			return duration
+		}
+	}
+	timeout := 2*time.Minute + time.Duration(maxTokens)*2*time.Second
+	if timeout > 10*time.Minute {
+		return 10 * time.Minute
+	}
+	return timeout
+}
+
+func modelContextSize(model models.Model) int {
+	if raw := strings.TrimSpace(os.Getenv("CMESH_MODEL_CONTEXT_SIZE")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			return value
+		}
+	}
+	if model.Context > 0 && model.Context < 2048 {
+		return model.Context
+	}
+	return 2048
+}
+
+func cleanLlamaOutput(output string, prompt string) string {
+	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
+	collected := make([]string, 0, len(lines))
+	afterPrompt := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			if afterPrompt && len(collected) > 0 {
+				collected = append(collected, "")
+			}
+			continue
+		case strings.HasPrefix(trimmed, "> "):
+			afterPrompt = true
+			continue
+		case trimmed == "Exiting..." || trimmed == "Loading model..." || strings.HasPrefix(trimmed, "build      :") || strings.HasPrefix(trimmed, "model      :") || strings.HasPrefix(trimmed, "modalities :"):
+			continue
+		case strings.Contains(trimmed, "available commands:") || strings.HasPrefix(trimmed, "/exit ") || strings.HasPrefix(trimmed, "/regen") || strings.HasPrefix(trimmed, "/clear") || strings.HasPrefix(trimmed, "/read ") || strings.HasPrefix(trimmed, "/glob "):
+			continue
+		case strings.Contains(trimmed, "▄▄") || strings.Contains(trimmed, "██") || strings.Contains(trimmed, "▀▀"):
+			continue
+		}
+		if !afterPrompt {
+			continue
+		}
+		collected = append(collected, line)
+	}
+	text := strings.TrimSpace(strings.Join(collected, "\n"))
+	if text == "" {
+		return strings.TrimSpace(output)
+	}
+	if len([]byte(text)) > 8192 {
+		return string([]byte(text)[:8192])
+	}
+	return text
 }
 
 func ensureModelRuntime(modelRuntime models.Runtime, cacheDir string) (string, runtimes.RuntimeStatus, error) {

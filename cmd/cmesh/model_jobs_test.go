@@ -46,3 +46,40 @@ func TestExecuteModelDeleteJobRemovesModelFileAndEmptyDirectory(t *testing.T) {
 		t.Fatalf("expected empty model directory to be removed, stat err=%v", err)
 	}
 }
+
+func TestCleanLlamaOutputRemovesRuntimeBanner(t *testing.T) {
+	output := `
+Loading model...
+
+▄▄ ▄▄
+build      : b9672-74ade5274
+model      : qwen2.5-0.5b-instruct-q4_k_m.gguf
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+
+> Привіт
+
+CMesh is a cluster for sharing compute across connected workers.
+
+Exiting...
+`
+
+	got := cleanLlamaOutput(output, "Привіт")
+	want := "CMesh is a cluster for sharing compute across connected workers."
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestModelContextSizeCapsLargeCatalogContext(t *testing.T) {
+	model, err := models.MustFind("qwen2.5-0.5b-instruct-q4-k-m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CMESH_MODEL_CONTEXT_SIZE", "")
+	if got := modelContextSize(model); got != 2048 {
+		t.Fatalf("expected context cap 2048, got %d", got)
+	}
+}
