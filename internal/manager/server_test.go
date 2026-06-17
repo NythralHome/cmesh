@@ -399,6 +399,67 @@ func TestConversationStoresAssistantMessageAfterGenerateCompletes(t *testing.T) 
 	}
 }
 
+func TestConversationExtractsAndInjectsModelMemory(t *testing.T) {
+	state := NewState()
+	state.AppendConversationMessage("conv-test", "qwen2.5-0.5b-instruct-q4-k-m", "node-test", "system", models.ChatMessage{
+		Role:    "user",
+		Content: "Мене звати Сергій.",
+	})
+	memories := state.Memories("qwen2.5-0.5b-instruct-q4-k-m")
+	if len(memories) != 1 {
+		t.Fatalf("expected one memory, got %#v", memories)
+	}
+	if memories[0].Key != "user.name" || memories[0].Value != "Сергій" {
+		t.Fatalf("unexpected memory: %#v", memories[0])
+	}
+
+	prompt := systemPromptWithMemory("Base prompt.", "qwen2.5-0.5b-instruct-q4-k-m", state)
+	if !strings.Contains(prompt, "Known memory") || !strings.Contains(prompt, "user.name: Сергій") {
+		t.Fatalf("expected injected memory, got %q", prompt)
+	}
+}
+
+func TestModelDeleteCleansModelPersistence(t *testing.T) {
+	state := NewState()
+	state.AppendConversationMessage("conv-test", "qwen2.5-0.5b-instruct-q4-k-m", "node-test", "system", models.ChatMessage{
+		Role:    "user",
+		Content: "My name is Sergiy.",
+	})
+	if len(state.Memories("qwen2.5-0.5b-instruct-q4-k-m")) != 1 {
+		t.Fatal("expected memory before delete")
+	}
+
+	input, err := json.Marshal(models.DeleteInput{ModelID: "qwen2.5-0.5b-instruct-q4-k-m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobDelete,
+		Input:       string(input),
+		RequestedBy: "dashboard-models",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.jobs[job.ID] = jobs.Job{
+		ID:         job.ID,
+		Type:       job.Type,
+		Status:     jobs.StatusRunning,
+		Input:      job.Input,
+		AssignedTo: "node-test",
+	}
+	if _, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{NodeID: "node-test", Result: `{"removed":true}`}); !ok {
+		t.Fatal("expected delete completion to succeed")
+	}
+	if got := state.Memories("qwen2.5-0.5b-instruct-q4-k-m"); len(got) != 0 {
+		t.Fatalf("expected memories to be removed, got %#v", got)
+	}
+	if _, ok := state.Conversation("conv-test"); ok {
+		t.Fatal("expected model conversation to be removed")
+	}
+}
+
 func TestConversationAPIListsAndReadsGeneratedChatContext(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
@@ -460,6 +521,29 @@ func TestConversationAPIListsAndReadsGeneratedChatContext(t *testing.T) {
 	}
 	if !strings.Contains(readRec.Body.String(), "Мене звати Сергій.") || !strings.Contains(readRec.Body.String(), "Remember names.") {
 		t.Fatalf("expected conversation body to include saved prompt and system prompt, got %s", readRec.Body.String())
+	}
+}
+
+func TestMemoryAPIDeletesMemory(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	state.AppendConversationMessage("conv-test", "qwen2.5-0.5b-instruct-q4-k-m", "node-test", "system", models.ChatMessage{
+		Role:    "user",
+		Content: "My name is Sergiy.",
+	})
+	memories := state.Memories("qwen2.5-0.5b-instruct-q4-k-m")
+	if len(memories) != 1 {
+		t.Fatalf("expected one memory, got %#v", memories)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/memories/"+memories[0].ID, nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := state.Memories("qwen2.5-0.5b-instruct-q4-k-m"); len(got) != 0 {
+		t.Fatalf("expected memory deleted, got %#v", got)
 	}
 }
 

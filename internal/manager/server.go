@@ -62,6 +62,8 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/models/", s.handleModel)
 	mux.HandleFunc("/v1/conversations", s.handleConversations)
 	mux.HandleFunc("/v1/conversations/", s.handleConversation)
+	mux.HandleFunc("/v1/memories", s.handleMemories)
+	mux.HandleFunc("/v1/memories/", s.handleMemory)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/jobs/", s.handleJob)
 	mux.HandleFunc("/v1/workers/", s.handleWorkerRoutes)
@@ -128,6 +130,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Jobs               []jobs.Job
 		ChatJobs           []jobs.Job
 		Conversations      []Conversation
+		Memories           []Memory
 		InviteURL          string
 	}{
 		Summary:            s.state.ClusterSummary(),
@@ -142,6 +145,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Jobs:               recentJobs(allJobs, 12),
 		ChatJobs:           recentChatJobs(allJobs, 6),
 		Conversations:      recentConversations(s.state, 12),
+		Memories:           recentMemories(s.state, 12),
 		InviteURL:          "/invite",
 	}
 
@@ -668,11 +672,12 @@ func (s *Server) handleModelGenerate(w http.ResponseWriter, r *http.Request, mod
 		Role:    "user",
 		Content: req.Prompt,
 	})
+	effectiveSystemPrompt := systemPromptWithMemory(systemPrompt, model.ID, s.state)
 	input, err := json.Marshal(models.GenerateInput{
 		ModelID:        model.ID,
 		Prompt:         req.Prompt,
 		Messages:       conversation.Messages,
-		SystemPrompt:   conversation.SystemPrompt,
+		SystemPrompt:   effectiveSystemPrompt,
 		ConversationID: conversation.ID,
 		MaxTokens:      req.MaxTokens,
 		Temperature:    req.Temperature,
@@ -738,6 +743,45 @@ func (s *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, conversation)
+}
+
+func (s *Server) handleMemories(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	modelID := strings.TrimSpace(r.URL.Query().Get("model_id"))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"memories": memoriesForModel(s.state, modelID),
+	})
+}
+
+func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/memories/"), "/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodDelete && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	memories, ok := s.state.(memoryStore)
+	if !ok {
+		http.Error(w, "memory persistence is not available", http.StatusNotImplemented)
+		return
+	}
+	if !memories.DeleteMemory(id) {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 }
 
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
@@ -1152,6 +1196,11 @@ type conversationStore interface {
 	AppendConversationMessage(id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation
 }
 
+type memoryStore interface {
+	Memories(modelID string) []Memory
+	DeleteMemory(id string) bool
+}
+
 func appendConversationMessage(store Store, id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation {
 	if conversations, ok := store.(conversationStore); ok {
 		return conversations.AppendConversationMessage(id, modelID, nodeID, systemPrompt, message)
@@ -1165,6 +1214,19 @@ func appendConversationMessage(store Store, id string, modelID string, nodeID st
 		CreatedAt:    time.Now().UTC(),
 		UpdatedAt:    time.Now().UTC(),
 	}
+}
+
+func systemPromptWithMemory(systemPrompt string, modelID string, store Store) string {
+	memories := memoriesForModel(store, modelID)
+	context := memoryContext(modelID, memories)
+	if context == "" {
+		return systemPrompt
+	}
+	base := strings.TrimSpace(systemPrompt)
+	if base == "" {
+		return context
+	}
+	return base + "\n\n" + context
 }
 
 func modelDefaultSystemPrompt(model models.Model) string {
@@ -1199,6 +1261,47 @@ func recentConversations(store Store, limit int) []Conversation {
 		out = out[:limit]
 	}
 	return out
+}
+
+func memoriesForModel(store Store, modelID string) []Memory {
+	memories, ok := store.(memoryStore)
+	if !ok {
+		return nil
+	}
+	out := memories.Memories(modelID)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out
+}
+
+func recentMemories(store Store, limit int) []Memory {
+	out := memoriesForModel(store, "")
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func memoryLabel(memory Memory) string {
+	if memory.Key == "" {
+		return "-"
+	}
+	return memory.Key
+}
+
+func memorySubtitle(memory Memory) string {
+	parts := make([]string, 0, 3)
+	if memory.ModelID != "" {
+		parts = append(parts, memory.ModelID)
+	}
+	if !memory.UpdatedAt.IsZero() {
+		parts = append(parts, memory.UpdatedAt.Format("15:04"))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, " · ")
 }
 
 func conversationTitle(conversation Conversation) string {
@@ -1474,6 +1577,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 	"jobRequirements":      jobRequirements,
 	"conversationTitle":    conversationTitle,
 	"conversationSubtitle": conversationSubtitle,
+	"memoryLabel":          memoryLabel,
+	"memorySubtitle":       memorySubtitle,
 	"modelInstalledOn":     modelInstalledOn,
 	"modelNodeOptions": func(nodes map[string]cluster.Node, summary ModelSummary) []cluster.Node {
 		out := make([]cluster.Node, 0, len(summary.InstalledOn))
@@ -1991,6 +2096,41 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       min-height: 0;
       overflow: auto;
     }
+    .memory-panel {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .memory-panel h3 {
+      margin: 0;
+      font-size: 15px;
+    }
+    .memory-list {
+      display: grid;
+      gap: 8px;
+    }
+    .memory-item {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: start;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+    .memory-main {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+    .memory-value {
+      font-weight: 800;
+      word-break: break-word;
+    }
     .conversation-item {
       display: grid;
       gap: 4px;
@@ -2451,6 +2591,23 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <div class="conversation-sidebar-head">
             <button class="button primary wide" id="new-chat-button" type="button"><svg class="icon"><use href="#icon-plus"></use></svg>New chat</button>
             <div class="sub">Conversation history is stored in this cluster manager.</div>
+          </div>
+          <div class="memory-panel">
+            <h3>Model memory</h3>
+            <div class="memory-list" id="memory-list">
+              {{range .Memories}}
+              <div class="memory-item" data-memory-id="{{.ID}}">
+                <div class="memory-main">
+                  <span class="conversation-meta">{{memoryLabel .}}</span>
+                  <span class="memory-value">{{.Value}}</span>
+                  <span class="conversation-meta">{{memorySubtitle .}}</span>
+                </div>
+                <button class="button danger memory-delete" type="button" data-memory-id="{{.ID}}"><svg class="icon"><use href="#icon-trash"></use></svg></button>
+              </div>
+              {{else}}
+              <div class="sub">No model memory yet.</div>
+              {{end}}
+            </div>
           </div>
           <div class="conversation-list" id="conversation-list">
             {{range .Conversations}}
@@ -2992,6 +3149,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var modelStatus = document.getElementById("model-status");
     var newChatButton = document.getElementById("new-chat-button");
     var conversationList = document.getElementById("conversation-list");
+    var memoryList = document.getElementById("memory-list");
     var chatSystemPrompt = document.getElementById("chat-system-prompt");
     var chatTemperature = document.getElementById("chat-temperature");
     var chatMaxTokens = document.getElementById("chat-max-tokens");
@@ -3139,6 +3297,30 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         resetChatThread();
         if (chatSystemPrompt) chatSystemPrompt.value = "";
         if (modelStatus) modelStatus.innerText = "New chat ready.";
+      });
+    }
+    if (memoryList) {
+      memoryList.querySelectorAll(".memory-delete").forEach(function(button) {
+        button.addEventListener("click", function() {
+          var memoryID = button.dataset.memoryId;
+          if (!memoryID) return;
+          button.disabled = true;
+          fetch("/v1/memories/" + encodeURIComponent(memoryID), {
+            method: "DELETE"
+          }).then(function(response) {
+            if (!response.ok) {
+              return response.text().then(function(text) { throw new Error(text || response.statusText); });
+            }
+            return response.json();
+          }).then(function() {
+            var item = memoryList.querySelector('[data-memory-id="' + memoryID + '"]');
+            if (item) item.remove();
+            if (modelStatus) modelStatus.innerText = "Memory deleted.";
+          }).catch(function(error) {
+            button.disabled = false;
+            if (modelStatus) modelStatus.innerText = "Memory delete failed: " + error.message;
+          });
+        });
       });
     }
     if (chatConversationID) {

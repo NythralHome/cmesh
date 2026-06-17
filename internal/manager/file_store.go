@@ -25,6 +25,7 @@ type fileStoreSnapshot struct {
 	Benchmarks    map[string]map[resources.BenchmarkKind]resources.BenchmarkResult `json:"benchmarks"`
 	Jobs          map[string]jobs.Job                                              `json:"jobs"`
 	Conversations map[string]Conversation                                          `json:"conversations,omitempty"`
+	Memories      map[string]Memory                                                `json:"memories,omitempty"`
 }
 
 func NewFileStore(path string) (*FileStore, error) {
@@ -98,6 +99,14 @@ func (s *FileStore) AppendConversationMessage(id string, modelID string, nodeID 
 	return conversation
 }
 
+func (s *FileStore) DeleteMemory(id string) bool {
+	ok := s.State.DeleteMemory(id)
+	if ok {
+		_ = s.save()
+	}
+	return ok
+}
+
 func (s *FileStore) CancelJob(jobID string) (jobs.Job, bool) {
 	job, ok := s.State.CancelJob(jobID)
 	if ok {
@@ -141,6 +150,9 @@ func (s *FileStore) load() error {
 	if snapshot.Conversations != nil {
 		s.conversations = snapshot.Conversations
 	}
+	if snapshot.Memories != nil {
+		s.memories = snapshot.Memories
+	}
 	return nil
 }
 
@@ -152,6 +164,7 @@ func (s *FileStore) save() error {
 		Benchmarks:    cloneBenchmarks(s.benchmarks),
 		Jobs:          cloneJobs(s.jobs),
 		Conversations: cloneConversations(s.conversations),
+		Memories:      cloneMemories(s.memories),
 	}
 	s.mu.RUnlock()
 

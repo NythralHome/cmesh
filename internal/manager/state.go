@@ -24,6 +24,7 @@ type State struct {
 	benchmarks       map[string]map[resources.BenchmarkKind]resources.BenchmarkResult
 	jobs             map[string]jobs.Job
 	conversations    map[string]Conversation
+	memories         map[string]Memory
 }
 
 func NewState() *State {
@@ -34,6 +35,7 @@ func NewState() *State {
 		benchmarks:       make(map[string]map[resources.BenchmarkKind]resources.BenchmarkResult),
 		jobs:             make(map[string]jobs.Job),
 		conversations:    make(map[string]Conversation),
+		memories:         make(map[string]Memory),
 	}
 }
 
@@ -304,6 +306,7 @@ func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, b
 		job.Status = jobs.StatusSucceeded
 		job.FinishedAt = now
 		s.appendAssistantMessageForJobLocked(job, now)
+		s.cleanupModelPersistenceForDeleteJobLocked(job)
 	}
 	s.jobs[job.ID] = job
 	s.scheduleQueuedJobsLocked(now)
@@ -354,12 +357,82 @@ func (s *State) AppendConversationMessage(id string, modelID string, nodeID stri
 	if message.Content != "" {
 		conversation.Messages = append(conversation.Messages, message)
 		conversation.Messages = trimConversationMessages(conversation.Messages)
+		if message.Role == "user" {
+			s.upsertExtractedMemoriesLocked(modelID, conversation.ID, message.Content, now)
+		}
 	}
 	conversation.UpdatedAt = now
 	s.conversations[id] = conversation
 
 	conversation.Messages = append([]models.ChatMessage(nil), conversation.Messages...)
 	return conversation
+}
+
+func (s *State) Memories(modelID string) []Memory {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]Memory, 0, len(s.memories))
+	for _, memory := range s.memories {
+		if modelID != "" && memory.ModelID != modelID {
+			continue
+		}
+		out = append(out, memory)
+	}
+	return out
+}
+
+func (s *State) DeleteMemory(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.memories[id]; !ok {
+		return false
+	}
+	delete(s.memories, id)
+	return true
+}
+
+func (s *State) upsertExtractedMemoriesLocked(modelID string, conversationID string, content string, now time.Time) {
+	for _, memory := range extractMemories(modelID, conversationID, content, now) {
+		existingID := ""
+		for id, existing := range s.memories {
+			if existing.ModelID == memory.ModelID && existing.Key == memory.Key {
+				existingID = id
+				break
+			}
+		}
+		if existingID != "" {
+			existing := s.memories[existingID]
+			existing.Value = memory.Value
+			existing.Source = memory.Source
+			existing.ConversationID = memory.ConversationID
+			existing.UpdatedAt = now
+			s.memories[existingID] = existing
+			continue
+		}
+		s.memories[memory.ID] = memory
+	}
+}
+
+func (s *State) cleanupModelPersistenceForDeleteJobLocked(job jobs.Job) {
+	if job.Type != models.JobDelete {
+		return
+	}
+	var input models.DeleteInput
+	if err := json.Unmarshal([]byte(job.Input), &input); err != nil || input.ModelID == "" {
+		return
+	}
+	for id, memory := range s.memories {
+		if memory.ModelID == input.ModelID {
+			delete(s.memories, id)
+		}
+	}
+	for id, conversation := range s.conversations {
+		if conversation.ModelID == input.ModelID {
+			delete(s.conversations, id)
+		}
+	}
 }
 
 func (s *State) appendAssistantMessageForJobLocked(job jobs.Job, now time.Time) {
