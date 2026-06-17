@@ -168,17 +168,22 @@ func TestEnsureRuntimeRejectsWrongMethod(t *testing.T) {
 	_, baseURL, stop := startTestServer(t)
 	defer stop()
 
-	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/runtime/llama.cpp/ensure", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %s", resp.Status)
+	for _, path := range []string{
+		"/v1/runtime/llama.cpp/ensure",
+		"/v1/runtime/llama.cpp/repair",
+	} {
+		req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405 for %s, got %s", path, resp.Status)
+		}
 	}
 }
 

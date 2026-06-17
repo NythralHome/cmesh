@@ -3435,6 +3435,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <p class="sub">Runtime ready{{if .RuntimeStatus.Version}} · {{.RuntimeStatus.Version}}{{end}}{{if .RuntimeStatus.Source}} · {{.RuntimeStatus.Source}}{{end}}</p>
           {{else}}
           <div class="hint">Runtime is not ready on this worker: {{if .RuntimeStatus.Error}}{{.RuntimeStatus.Error}}{{else}}not reported{{end}}</div>
+          <p class="sub">Open CMesh Worker on <code>{{.NodeName}}</code>, then use Runtime → Repair runtime.</p>
           {{end}}
           <div class="model-actions">
             <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.NodeID}}"><svg class="icon"><use href="#icon-trash"></use></svg><span>Delete from {{.NodeName}}</span></button>

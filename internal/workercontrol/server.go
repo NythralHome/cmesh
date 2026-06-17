@@ -100,6 +100,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/v1/restart", s.handleRestart)
 	mux.HandleFunc("/v1/disconnect", s.handleDisconnect)
 	mux.HandleFunc("/v1/runtime/llama.cpp/ensure", s.handleEnsureLlamaCPP)
+	mux.HandleFunc("/v1/runtime/llama.cpp/repair", s.handleEnsureLlamaCPP)
 
 	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {

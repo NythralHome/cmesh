@@ -905,7 +905,7 @@ class WorkerController {
   Future<WorkerCommandResult> ensureRuntime() {
     return _request(
       'POST',
-      '/v1/runtime/llama.cpp/ensure',
+      '/v1/runtime/llama.cpp/repair',
       timeout: const Duration(minutes: 10),
     );
   }
@@ -1753,7 +1753,7 @@ class _WorkerHomePageState extends State<WorkerHomePage>
     );
 
     return DefaultTabController(
-      length: 4,
+      length: 5,
       child: Scaffold(
         body: Container(
           decoration: const BoxDecoration(
@@ -1837,10 +1837,17 @@ class _WorkerHomePageState extends State<WorkerHomePage>
                             ),
                             _TabSurface(child: connectionPanel),
                             _TabSurface(
-                              child: _ModelsRuntimePanel(
+                              child: _RuntimePanel(
                                 status: _runtimeStatus,
                                 onRefresh: _refreshStatus,
                                 onRepairRuntime: _repairRuntime,
+                                onOpenCacheFolder: _openCacheFolder,
+                              ),
+                            ),
+                            _TabSurface(
+                              child: _ModelsPanel(
+                                status: _runtimeStatus,
+                                onRefresh: _refreshStatus,
                                 onOpenCacheFolder: _openCacheFolder,
                               ),
                             ),
@@ -1890,6 +1897,7 @@ class _WorkerTabs extends StatelessWidget {
             tabs: [
               Tab(icon: Icon(Icons.speed), text: 'Overview'),
               Tab(icon: Icon(Icons.tune), text: 'Connection'),
+              Tab(icon: Icon(Icons.build_circle_outlined), text: 'Runtime'),
               Tab(icon: Icon(Icons.hub_outlined), text: 'Models'),
               Tab(icon: Icon(Icons.terminal), text: 'Logs'),
             ],
@@ -2685,8 +2693,8 @@ class _LogsPanel extends StatelessWidget {
   }
 }
 
-class _ModelsRuntimePanel extends StatelessWidget {
-  const _ModelsRuntimePanel({
+class _RuntimePanel extends StatelessWidget {
+  const _RuntimePanel({
     required this.status,
     required this.onRefresh,
     required this.onRepairRuntime,
@@ -2701,13 +2709,14 @@ class _ModelsRuntimePanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final runtime = status?.modelRuntime;
-    final models = status?.models ?? const <WorkerInstalledModel>[];
     return _Panel(
-      title: 'Models and runtime',
-      icon: Icons.hub_outlined,
+      title: 'AI runtime',
+      icon: Icons.build_circle_outlined,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          _RuntimeRepairBanner(runtime: runtime),
+          const SizedBox(height: 14),
           Wrap(
             spacing: 10,
             runSpacing: 10,
@@ -2736,8 +2745,105 @@ class _ModelsRuntimePanel extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           _WorkerJobStatusCard(status: status?.jobStatus),
-          const SizedBox(height: 12),
+        ],
+      ),
+    );
+  }
+}
+
+class _ModelsPanel extends StatelessWidget {
+  const _ModelsPanel({
+    required this.status,
+    required this.onRefresh,
+    required this.onOpenCacheFolder,
+  });
+
+  final WorkerRuntimeStatus? status;
+  final VoidCallback onRefresh;
+  final VoidCallback onOpenCacheFolder;
+
+  @override
+  Widget build(BuildContext context) {
+    final models = status?.models ?? const <WorkerInstalledModel>[];
+    return _Panel(
+      title: 'Installed models',
+      icon: Icons.hub_outlined,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              OutlinedButton.icon(
+                onPressed: onRefresh,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Refresh status'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onOpenCacheFolder,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('Open cache folder'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
           _InstalledModelsCard(models: models),
+        ],
+      ),
+    );
+  }
+}
+
+class _RuntimeRepairBanner extends StatelessWidget {
+  const _RuntimeRepairBanner({required this.runtime});
+
+  final WorkerModelRuntimeStatus? runtime;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final ready = runtime?.ready ?? false;
+    final title = ready ? 'llama.cpp is ready' : 'llama.cpp needs repair';
+    final detail = ready
+        ? 'Model jobs can use the local runtime on this worker.'
+        : runtime?.error.isNotEmpty == true
+        ? runtime!.error
+        : 'The runtime binary is missing or has not been installed in the worker cache yet.';
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: ready
+            ? const Color(0xFFE8F6EE)
+            : colors.errorContainer.withValues(alpha: 0.62),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: ready
+              ? const Color(0xFF9FD8B8)
+              : colors.error.withValues(alpha: 0.24),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            ready ? Icons.check_circle : Icons.error_outline,
+            color: ready ? const Color(0xFF1B7F4B) : colors.error,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 4),
+                Text(detail, style: TextStyle(color: colors.onSurfaceVariant)),
+              ],
+            ),
+          ),
         ],
       ),
     );
