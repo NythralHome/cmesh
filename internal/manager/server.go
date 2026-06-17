@@ -2568,6 +2568,22 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       gap: 8px;
       flex-wrap: wrap;
     }
+    .model-operation {
+      display: grid;
+      gap: 6px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f8fafc;
+    }
+    .model-operation strong {
+      font-size: 13px;
+    }
+    .model-operation code {
+      color: var(--muted);
+      white-space: normal;
+      word-break: break-word;
+    }
     .capability-list {
       display: grid;
       gap: 6px;
@@ -3055,9 +3071,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <div class="capability-row">
                 <strong>{{.Name}}</strong>
                 {{if .Capable}}
-                <span>ready · jobs {{.ActiveJobs}}/{{.JobSlots}} · {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM · {{printf "%.1f" (gb .AllowedStorageBytes)}} GB disk{{if gt .AllowedVRAMBytes 0}} · {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
+                <span>ready · jobs {{.ActiveJobs}}/{{.JobSlots}} · {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM · {{printf "%.1f" (gb .AllowedStorageBytes)}} GB allowed disk · {{printf "%.1f" (gb .FreeStorageBytes)}} GB free{{if gt .AllowedVRAMBytes 0}} · {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
                 {{else}}
-                <span>{{range $index, $reason := .Reasons}}{{if $index}}; {{end}}{{$reason}}{{end}} · jobs {{.ActiveJobs}}/{{.JobSlots}} · has {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM / {{printf "%.1f" (gb .AllowedStorageBytes)}} GB disk{{if gt .AllowedVRAMBytes 0}} / {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
+                <span>{{range $index, $reason := .Reasons}}{{if $index}}; {{end}}{{$reason}}{{end}} · jobs {{.ActiveJobs}}/{{.JobSlots}} · has {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM / {{printf "%.1f" (gb .AllowedStorageBytes)}} GB allowed disk / {{printf "%.1f" (gb .FreeStorageBytes)}} GB free{{if gt .AllowedVRAMBytes 0}} / {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
                 {{end}}
               </div>
               {{end}}
@@ -3431,6 +3447,110 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         startClusterBenchmark(firstTestForm, firstTestStatus, "first-test");
       });
     }
+    function cssIdent(value) {
+      if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(value);
+      return String(value || "").replace(/"/g, '\\"');
+    }
+    function modelCardFor(modelID) {
+      if (!modelID) return null;
+      return document.querySelector('[data-model-id="' + cssIdent(modelID) + '"]');
+    }
+    function modelOperationText(job) {
+      if (!job) return "Waiting for job...";
+      if (job.error) return job.error;
+      if (job.result) {
+        try {
+          var parsed = JSON.parse(job.result);
+          if (parsed.freed_bytes) return "Freed " + Math.round(parsed.freed_bytes / 1024 / 1024) + " MB.";
+          if (parsed.bytes) return "Stored " + Math.round(parsed.bytes / 1024 / 1024) + " MB.";
+          if (parsed.worker_runtime) return "Completed on " + parsed.worker_runtime + ".";
+        } catch (error) {
+          return job.result;
+        }
+      }
+      if (job.last_failure) return job.last_failure;
+      if (job.assigned_to) return "Assigned to " + job.assigned_to + ".";
+      return "Waiting for an eligible worker.";
+    }
+    function renderModelOperation(modelID, job, fallbackText) {
+      var card = modelCardFor(modelID);
+      if (!card) return;
+      var operation = card.querySelector(".model-operation");
+      if (!operation) {
+        operation = document.createElement("div");
+        operation.className = "model-operation";
+        card.appendChild(operation);
+      }
+      var status = job ? String(job.status || "queued") : "queued";
+      var jobID = job ? String(job.id || "") : "";
+      var text = fallbackText || modelOperationText(job);
+      operation.innerHTML = "";
+      var title = document.createElement("strong");
+      title.textContent = "Operation " + status;
+      operation.appendChild(title);
+      if (jobID) {
+        var code = document.createElement("code");
+        code.textContent = jobID;
+        operation.appendChild(code);
+      }
+      var body = document.createElement("span");
+      body.className = "sub";
+      body.textContent = text;
+      operation.appendChild(body);
+      if (jobID && status !== "succeeded" && status !== "failed" && status !== "canceled") {
+        var cancelButton = document.createElement("button");
+        cancelButton.className = "button danger model-operation-cancel";
+        cancelButton.type = "button";
+        cancelButton.dataset.jobId = jobID;
+        cancelButton.dataset.modelId = modelID;
+        cancelButton.innerHTML = '<svg class="icon"><use href="#icon-x"></use></svg><span>Cancel</span>';
+        operation.appendChild(cancelButton);
+      }
+    }
+    document.addEventListener("click", function(event) {
+      var button = event.target.closest ? event.target.closest(".model-operation-cancel") : null;
+      if (!button) return;
+      var jobID = button.dataset.jobId;
+      var modelID = button.dataset.modelId;
+      if (!jobID || !modelID) return;
+      button.disabled = true;
+      setButtonText(button, "Canceling...");
+      fetch("/v1/jobs/" + encodeURIComponent(jobID) + "/cancel", {
+        method: "POST"
+      }).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(job) {
+        renderModelOperation(modelID, job, "Canceled by operator.");
+        setTimeout(function() { window.location.reload(); }, 900);
+      }).catch(function(error) {
+        button.disabled = false;
+        setButtonText(button, "Cancel");
+        renderModelOperation(modelID, null, "Cancel failed: " + error.message);
+      });
+    });
+    function pollModelLifecycleJob(modelID, jobID, attempt) {
+      if (!modelID || !jobID) return;
+      fetch("/v1/jobs/" + encodeURIComponent(jobID)).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(job) {
+        renderModelOperation(modelID, job);
+        if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
+          setTimeout(function() { window.location.reload(); }, 900);
+          return;
+        }
+        if (attempt < 240) {
+          setTimeout(function() { pollModelLifecycleJob(modelID, jobID, attempt + 1); }, 1500);
+        }
+      }).catch(function(error) {
+        renderModelOperation(modelID, null, "Could not read job: " + error.message);
+      });
+    }
     document.querySelectorAll(".model-install").forEach(function(button) {
       button.addEventListener("click", function() {
         var modelID = button.dataset.modelId;
@@ -3449,7 +3569,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         }).then(function(job) {
           var statusElement = document.getElementById("model-status");
           if (statusElement) statusElement.innerText = "Install job " + job.id + " submitted.";
-          setTimeout(function() { window.location.reload(); }, 1200);
+          renderModelOperation(modelID, job, "Install submitted.");
+          pollModelLifecycleJob(modelID, job.id, 0);
         }).catch(function(error) {
           button.disabled = false;
           setButtonText(button, "Install");
@@ -3476,7 +3597,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         }).then(function(job) {
           var statusElement = document.getElementById("model-status");
           if (statusElement) statusElement.innerText = "Delete job " + job.id + " submitted.";
-          setTimeout(function() { window.location.reload(); }, 1200);
+          renderModelOperation(modelID, job, "Delete submitted.");
+          pollModelLifecycleJob(modelID, job.id, 0);
         }).catch(function(error) {
           button.disabled = false;
           setButtonText(button, "Delete");

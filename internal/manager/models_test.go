@@ -156,3 +156,35 @@ func TestModelCapabilitiesReportBusyJobSlots(t *testing.T) {
 		t.Fatalf("expected busy slot reason, got %#v", capability.Reasons)
 	}
 }
+
+func TestModelCapabilitiesReportFreeDiskShortage(t *testing.T) {
+	catalog := []models.Model{{
+		ID:          "large-test",
+		Name:        "Large Test",
+		MemoryBytes: 1 * gb,
+		DiskBytes:   8 * gb,
+	}}
+	nodes := []cluster.Node{{
+		ID:     "node-low-free",
+		Name:   "low-free-worker",
+		Role:   cluster.NodeRoleWorker,
+		Status: cluster.NodeStatusOnline,
+		Resources: cluster.ResourceSnapshot{
+			Memory:   cluster.MemoryResources{AllowedBytes: 16 * gb},
+			Storage:  cluster.StorageResources{AllowedBytes: 20 * gb, FreeBytes: 2 * gb},
+			JobSlots: 1,
+		},
+	}}
+
+	summaries := modelSummaries(catalog, nil, nodes)
+	capability := summaries[0].Capabilities[0]
+	if capability.Capable {
+		t.Fatalf("expected low free disk worker to be blocked")
+	}
+	if capability.FreeStorageBytes != 2*gb {
+		t.Fatalf("expected free storage metadata, got %#v", capability)
+	}
+	if len(capability.Reasons) != 1 || capability.Reasons[0] != "free disk short by 6.0 GB" {
+		t.Fatalf("expected free disk reason, got %#v", capability.Reasons)
+	}
+}

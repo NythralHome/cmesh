@@ -30,6 +30,7 @@ type ModelCapability struct {
 	Capable             bool     `json:"capable"`
 	AllowedMemoryBytes  uint64   `json:"allowed_memory_bytes"`
 	AllowedStorageBytes uint64   `json:"allowed_storage_bytes"`
+	FreeStorageBytes    uint64   `json:"free_storage_bytes"`
 	AllowedVRAMBytes    uint64   `json:"allowed_vram_bytes,omitempty"`
 	ActiveJobs          int      `json:"active_jobs"`
 	JobSlots            int      `json:"job_slots"`
@@ -108,6 +109,7 @@ func modelCapabilities(model models.Model, nodes []cluster.Node, jobsList []jobs
 			Name:                node.Name,
 			AllowedMemoryBytes:  node.Resources.Memory.AllowedBytes,
 			AllowedStorageBytes: node.Resources.Storage.AllowedBytes,
+			FreeStorageBytes:    node.Resources.Storage.FreeBytes,
 			AllowedVRAMBytes:    maxAllowedVRAM(node.Resources.GPU),
 			ActiveJobs:          activeModelJobsForNode(jobsList, node.ID),
 			JobSlots:            workerJobSlots(node),
@@ -120,6 +122,9 @@ func modelCapabilities(model models.Model, nodes []cluster.Node, jobsList []jobs
 		}
 		if node.Resources.Storage.AllowedBytes < model.DiskBytes {
 			item.Reasons = append(item.Reasons, fmt.Sprintf("disk short by %.1f GB", gbDiff(model.DiskBytes, node.Resources.Storage.AllowedBytes)))
+		}
+		if node.Resources.Storage.FreeBytes > 0 && node.Resources.Storage.FreeBytes < model.DiskBytes {
+			item.Reasons = append(item.Reasons, fmt.Sprintf("free disk short by %.1f GB", gbDiff(model.DiskBytes, node.Resources.Storage.FreeBytes)))
 		}
 		if model.VRAMBytes > 0 && !hasAllowedVRAM(node.Resources.GPU, model.VRAMBytes) {
 			item.Reasons = append(item.Reasons, fmt.Sprintf("VRAM short by %.1f GB", gbDiff(model.VRAMBytes, item.AllowedVRAMBytes)))
