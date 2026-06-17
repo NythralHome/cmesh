@@ -80,6 +80,20 @@ If `CMESH_JOIN_TOKEN` is omitted, the manager installer generates one and stores
 
 ## Alpha Deploy Guard
 
+Run a local pre-release dry-run before creating or publishing a tag:
+
+```sh
+make release-dry-run VERSION=v0.1.0-alpha.local
+```
+
+This runs Go tests, Flutter worker tests, local CLI build, host desktop build, embedded `cmesh` verification, manager dashboard/API smoke checks, and writes local artifacts under `dist/release-dry-run`. It does not publish a GitHub release, push a tag, or deploy to the VPS.
+
+On macOS the dry-run also packages a local DMG. To skip desktop packaging while debugging the script:
+
+```sh
+CMESH_DRY_RUN_SKIP_DESKTOP_BUILD=true scripts/release-dry-run.sh
+```
+
 Use the guarded alpha deploy script after pushing a release tag:
 
 ```sh
