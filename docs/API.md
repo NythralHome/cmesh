@@ -82,7 +82,17 @@ Example:
       "total_bytes": 0,
       "allowed_bytes": 53687091200,
       "free_bytes": 0
-    }
+    },
+    "models": [],
+    "runtimes": [
+      {
+        "name": "llama.cpp",
+        "ready": false,
+        "platform": "darwin/arm64",
+        "source": "cmesh-runtime-cache",
+        "error": "runtime is not installed"
+      }
+    ]
   }
 }
 ```
@@ -97,6 +107,11 @@ Content-Type: application/json
 Workers use this endpoint to refresh liveness and resource state after joining.
 
 The manager currently marks workers offline when no heartbeat has been observed for the configured timeout window.
+
+Heartbeat resources may include:
+
+- `models`: model files actually present in the worker cache. The manager treats this as the source of truth for installed model inventory.
+- `runtimes`: local AI runtime state such as `llama.cpp` readiness, version, platform, source, binary path, and error.
 
 ## Jobs
 
@@ -135,6 +150,12 @@ When a worker reports an execution error, the manager uses the same retry policy
 ```http
 GET /v1/jobs
 GET /v1/jobs/{job_id}
+```
+
+Operators can cancel queued, scheduled, or running jobs:
+
+```http
+POST /v1/jobs/{job_id}/cancel
 ```
 
 Workers poll assigned jobs:
@@ -183,3 +204,95 @@ GET /v1/cluster-benchmarks
 ```
 
 Returns recent benchmark runs reconstructed from jobs. Each summary includes worker count, completed/failed/active counts, workload size, and total GFLOPS from successful jobs.
+
+## Models
+
+```http
+GET /v1/models
+```
+
+Returns catalog entries with current cluster capability and installed inventory. A model is considered installed only when an online worker reports it in heartbeat `resources.models`.
+
+```http
+POST /v1/models/{model_id}/install
+Content-Type: application/json
+```
+
+Optional body:
+
+```json
+{
+  "node_id": "node-abc123"
+}
+```
+
+When `node_id` is omitted, the manager schedules install on an eligible online worker. Eligibility checks RAM, allowed disk, actual free disk, VRAM, and available worker job slots. If no worker is eligible, the API returns `409 Conflict` with actionable reasons.
+
+```http
+POST /v1/models/{model_id}/delete
+Content-Type: application/json
+```
+
+Example:
+
+```json
+{
+  "node_id": "node-abc123"
+}
+```
+
+Delete removes the worker model directory and returns `freed_bytes` in the job result when the worker completes the operation. Successful delete also clears model-scoped memory and conversations in the manager.
+
+```http
+POST /v1/models/{model_id}/generate
+Content-Type: application/json
+```
+
+Example:
+
+```json
+{
+  "node_id": "node-abc123",
+  "conversation_id": "conv-abc123",
+  "system_prompt": "Answer concisely.",
+  "prompt": "Привіт",
+  "max_tokens": 512,
+  "temperature": "0.7"
+}
+```
+
+Generation uses model-family prompt adapters, model-scoped memory, and conversation history. Responses run on the selected worker, not an external API.
+
+## Conversations
+
+```http
+GET /v1/conversations
+GET /v1/conversations/{conversation_id}
+DELETE /v1/conversations/{conversation_id}
+```
+
+Conversations persist chat history and selected model context in the manager. Deleting a conversation does not delete model memory.
+
+## Memories
+
+```http
+GET /v1/memories?model_id={model_id}
+POST /v1/memories
+POST /v1/memories/{memory_id}
+DELETE /v1/memories/{memory_id}
+DELETE /v1/memories?model_id={model_id}
+GET /v1/memories/preview?model_id={model_id}
+```
+
+Manual memory example:
+
+```json
+{
+  "model_id": "qwen2.5-0.5b-instruct-q4-k-m",
+  "key": "user.name",
+  "value": "Сергій",
+  "source": "manual"
+}
+```
+
+Memory is scoped to a model and injected into the effective system prompt before chat messages.

@@ -4,7 +4,7 @@ This runbook is for the first alpha test with real machines joining one private 
 
 ## Goal
 
-Prove that several machines can join one manager, advertise resources, run benchmarks, and remain controllable from the donor desktop app.
+Prove that several machines can join one manager, advertise resources, run benchmarks, install a local model, run a prompt, delete the model, and remain controllable from the donor desktop app.
 
 ## Test Shape
 
@@ -18,8 +18,9 @@ Prove that several machines can join one manager, advertise resources, run bench
 1. Open the manager invite page.
 2. Create or copy a join invite.
 3. Send the invite link to each worker donor.
-4. Watch `/v1/nodes` and `/v1/benchmarks` during the test.
+4. Watch Workers, Models, Model Activity, Jobs, and Benchmarks during the test.
 5. Record the node count and total advertised CPU, RAM, disk, GPU, and VRAM before and after each worker joins.
+6. Confirm each worker reports runtime status and installed model inventory.
 
 ## Worker Donor
 
@@ -42,6 +43,13 @@ Prove that several machines can join one manager, advertise resources, run bench
 - Each worker appears in manager nodes.
 - Resource totals increase when a worker joins.
 - Benchmark results appear for each worker.
+- Workers report `llama.cpp` runtime status.
+- Model catalog shows why each model can or cannot install on each worker.
+- Installing a model creates a visible model job and eventually updates installed inventory.
+- Chat can generate a response against an installed model and selected worker.
+- Conversation history persists across messages.
+- Manual model memory appears in prompt preview and affects future chat context.
+- Deleting a model removes it from worker inventory and reports freed bytes.
 - The desktop app can show running/stopped state without using terminal commands.
 - `Stop` stops the local worker process.
 - `Start` brings the worker back.
@@ -49,11 +57,10 @@ Prove that several machines can join one manager, advertise resources, run bench
 
 ## Known Alpha Limitations
 
-- Desktop packages are unsigned `.zip` or `.tar.gz` bundles.
-- macOS may show Gatekeeper warnings.
-- Windows and Linux protocol registration happens after the app starts once.
+- macOS packages are distributed as DMG builds and should be signed/notarized when release secrets are configured.
+- Windows and Linux desktop packaging is still alpha-level.
 - Background service installation is still alpha-level and will move to signed installers or privileged helpers later.
-- The first test proves connectivity, resource accounting, benchmark visibility, and local control. It does not yet prove distributed inference across many small machines.
+- Model execution currently runs one model on one selected worker. This test does not yet prove distributed inference for one model split across many machines.
 
 ## Evidence To Capture
 
@@ -62,4 +69,8 @@ Prove that several machines can join one manager, advertise resources, run bench
 - Screenshot of each worker desktop status card.
 - `/v1/nodes` response after all workers join.
 - `/v1/benchmarks` response after benchmarks complete.
+- `/v1/models` response before and after model install.
+- Model Activity screenshot for install, generate, and delete.
+- Chat screenshot showing selected model and worker.
+- Prompt Debug screenshot when manual memory is used.
 - Any donor OS warning or permission prompt.

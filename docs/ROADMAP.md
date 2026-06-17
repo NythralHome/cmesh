@@ -20,20 +20,33 @@
 
 ## Milestone 3: First AI Runtime
 
-- Ollama or llama.cpp integration.
-- One small supported model.
-- Prompt API.
-- Latency and throughput metrics.
-- Model cache awareness.
+- Managed llama.cpp runtime.
+- GGUF model catalog.
+- Model install, delete, and generate jobs.
+- Model cache and installed inventory awareness.
+- Model-family prompt adapters.
+- Conversation context and model-scoped memory.
+- Runtime status reporting in worker heartbeat.
 
-## Milestone 4: Storage Plane
+## Milestone 4: Operator Console Hardening
+
+- Model lifecycle polling without full page reload.
+- Cancel controls for model operations.
+- Scheduler eligibility explanations.
+- Worker health inventory.
+- Runtime readiness visibility.
+- Conversation and memory management.
+- First-run flow from worker invite to model chat.
+- Documentation updates before alpha release.
+
+## Milestone 5: Storage Plane
 
 - Artifact metadata.
 - Content-addressed local cache.
 - Peer transfer prototype.
 - Replication policy design.
 
-## Milestone 5: Multi-Manager Consensus
+## Milestone 6: Multi-Manager Consensus
 
 - Raft-backed cluster state.
 - Leader election.
@@ -41,7 +54,7 @@
 - Snapshots and recovery.
 - Manager quorum dashboard.
 
-## Milestone 6: Distributed Model Experiments
+## Milestone 7: Distributed Model Experiments
 
 - Runtime-specific distributed inference proof of concept.
 - LAN-first constraints.
