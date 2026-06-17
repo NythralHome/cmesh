@@ -997,6 +997,9 @@ func executeModelDeleteJob(input string, cacheDir string) (string, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
+	if removed {
+		_ = os.Remove(filepath.Dir(path))
+	}
 	result := modelDeleteResult{
 		Kind:          string(models.JobDelete),
 		ModelID:       model.ID,
