@@ -904,6 +904,7 @@ type modelDeleteResult struct {
 	ModelID       string `json:"model_id"`
 	Removed       bool   `json:"removed"`
 	Path          string `json:"path"`
+	FreedBytes    int64  `json:"freed_bytes,omitempty"`
 	WorkerRuntime string `json:"worker_runtime"`
 }
 
@@ -992,23 +993,45 @@ func executeModelDeleteJob(input string, cacheDir string) (string, error) {
 		return "", err
 	}
 	path := modelPath(cacheDir, model)
-	err = os.Remove(path)
-	removed := err == nil
-	if err != nil && !os.IsNotExist(err) {
+	modelDir := filepath.Dir(path)
+	freedBytes, _ := directorySize(modelDir)
+	err = os.RemoveAll(modelDir)
+	if err != nil {
 		return "", err
 	}
-	if removed {
-		_ = os.Remove(filepath.Dir(path))
-	}
+	removed := freedBytes > 0
 	result := modelDeleteResult{
 		Kind:          string(models.JobDelete),
 		ModelID:       model.ID,
 		Removed:       removed,
 		Path:          path,
+		FreedBytes:    freedBytes,
 		WorkerRuntime: runtime.GOOS + "/" + runtime.GOARCH,
 	}
 	body, err := json.Marshal(result)
 	return string(body), err
+}
+
+func directorySize(path string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(path, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	return total, err
 }
 
 func executeModelGenerateJob(input string, cacheDir string) (string, error) {
@@ -1408,6 +1431,7 @@ func sanitizeModelText(text string) string {
 	text = removeReasoningText(text)
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	cleaned := make([]string, 0, len(lines))
+	seenContent := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
@@ -1416,15 +1440,49 @@ func sanitizeModelText(text string) string {
 			}
 			continue
 		}
-		if strings.HasPrefix(trimmed, "</|im_start|") || strings.HasPrefix(trimmed, "</|im_end|") || trimmed == "</" {
+		lower := strings.ToLower(trimmed)
+		if isChatTemplateNoise(lower) {
 			continue
 		}
-		if trimmed == "<" || strings.EqualFold(trimmed, "user") || strings.EqualFold(trimmed, "assistant") || strings.EqualFold(trimmed, "system") {
+		if isRoleEcho(lower) {
 			continue
 		}
+		if !seenContent && strings.HasPrefix(lower, "you will answer the user's question") {
+			continue
+		}
+		seenContent = true
 		cleaned = append(cleaned, line)
 	}
 	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
+func isChatTemplateNoise(lower string) bool {
+	if lower == "<" || lower == "</" {
+		return true
+	}
+	if strings.HasPrefix(lower, "<|im_start|") || strings.HasPrefix(lower, "<|im_end|") {
+		return true
+	}
+	if strings.HasPrefix(lower, "</|im_start|") || strings.HasPrefix(lower, "</|im_end|") {
+		return true
+	}
+	if strings.HasPrefix(lower, "<start_of_turn>") || strings.HasPrefix(lower, "<end_of_turn>") {
+		return true
+	}
+	if strings.HasPrefix(lower, "<|system|>") || strings.HasPrefix(lower, "<|user|>") || strings.HasPrefix(lower, "<|assistant|>") || strings.HasPrefix(lower, "<|end|>") {
+		return true
+	}
+	return false
+}
+
+func isRoleEcho(lower string) bool {
+	trimmed := strings.Trim(strings.TrimSpace(lower), ":")
+	switch trimmed {
+	case "user", "assistant", "system", "model":
+		return true
+	default:
+		return false
+	}
 }
 
 func removeReasoningText(text string) string {
@@ -1456,6 +1514,12 @@ func removeChatTemplateTokens(text string) string {
 		"<|im_end|>", "",
 		"</|im_start|>", "",
 		"</|im_end|>", "",
+		"<start_of_turn>", "",
+		"<end_of_turn>", "",
+		"<|system|>", "",
+		"<|user|>", "",
+		"<|assistant|>", "",
+		"<|end|>", "",
 	)
 	return replacer.Replace(text)
 }

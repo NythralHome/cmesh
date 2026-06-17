@@ -30,12 +30,13 @@ type Node struct {
 }
 
 type ResourceSnapshot struct {
-	CPU      CPUResources     `json:"cpu"`
-	Memory   MemoryResources  `json:"memory"`
-	GPU      []GPUResources   `json:"gpu"`
-	Storage  StorageResources `json:"storage"`
-	JobSlots int              `json:"job_slots,omitempty"`
-	Models   []ModelResource  `json:"models,omitempty"`
+	CPU      CPUResources      `json:"cpu"`
+	Memory   MemoryResources   `json:"memory"`
+	GPU      []GPUResources    `json:"gpu"`
+	Storage  StorageResources  `json:"storage"`
+	JobSlots int               `json:"job_slots,omitempty"`
+	Models   []ModelResource   `json:"models,omitempty"`
+	Runtimes []RuntimeResource `json:"runtimes,omitempty"`
 }
 
 type ModelResource struct {
@@ -43,6 +44,16 @@ type ModelResource struct {
 	Name  string `json:"name"`
 	Path  string `json:"path"`
 	Bytes uint64 `json:"bytes"`
+}
+
+type RuntimeResource struct {
+	Name       string `json:"name"`
+	Ready      bool   `json:"ready"`
+	Version    string `json:"version,omitempty"`
+	Platform   string `json:"platform,omitempty"`
+	BinaryPath string `json:"binary_path,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 type CPUResources struct {

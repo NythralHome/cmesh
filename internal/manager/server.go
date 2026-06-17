@@ -1273,6 +1273,16 @@ func modelJobCount(in []jobs.Job) int {
 	return count
 }
 
+func installedModelCount(in []ModelSummary) int {
+	count := 0
+	for _, summary := range in {
+		if len(summary.InstalledOn) > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 func generatableModelCount(in []ModelSummary) int {
 	count := 0
 	for _, summary := range in {
@@ -1404,6 +1414,31 @@ func memorySubtitle(memory Memory) string {
 		return "-"
 	}
 	return strings.Join(parts, " · ")
+}
+
+func runtimeSummary(runtimes []cluster.RuntimeResource) string {
+	if len(runtimes) == 0 {
+		return "not reported"
+	}
+	parts := make([]string, 0, len(runtimes))
+	for _, runtime := range runtimes {
+		status := "missing"
+		if runtime.Ready {
+			status = "ready"
+		}
+		detail := runtime.Name + " " + status
+		if runtime.Version != "" {
+			detail += " " + runtime.Version
+		}
+		if runtime.Source != "" {
+			detail += " (" + runtime.Source + ")"
+		}
+		if runtime.Error != "" && !runtime.Ready {
+			detail += ": " + runtime.Error
+		}
+		parts = append(parts, detail)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func conversationTitle(conversation Conversation) string {
@@ -1669,6 +1704,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 	"hasActiveJobs":        hasActiveJobs,
 	"isModelJob":           isModelJob,
 	"modelJobCount":        modelJobCount,
+	"installedModelCount":  installedModelCount,
 	"generatableCount":     generatableModelCount,
 	"modelFailureHint":     modelFailureHint,
 	"workerSlots":          workerJobSlots,
@@ -1681,6 +1717,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 	"conversationSubtitle": conversationSubtitle,
 	"memoryLabel":          memoryLabel,
 	"memorySubtitle":       memorySubtitle,
+	"runtimeSummary":       runtimeSummary,
 	"modelInstalledOn":     modelInstalledOn,
 	"modelNodeOptions": func(nodes map[string]cluster.Node, summary ModelSummary) []cluster.Node {
 		out := make([]cluster.Node, 0, len(summary.InstalledOn))
@@ -2172,7 +2209,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .chat-shell {
       min-height: calc(100vh - 230px);
       display: grid;
-      grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+      grid-template-columns: 1fr;
       gap: 16px;
       padding: 18px;
       background: #fbfcfd;
@@ -2197,6 +2234,15 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       gap: 8px;
       min-height: 0;
       overflow: auto;
+    }
+    .conversation-shell,
+    .memory-shell,
+    .debug-shell {
+      display: grid;
+      grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+      gap: 16px;
+      padding: 18px;
+      background: #fbfcfd;
     }
     .memory-panel {
       display: grid;
@@ -2264,13 +2310,33 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       background: #fbfcfd;
     }
     .memory-preview pre {
-      max-height: 180px;
+      max-height: 520px;
       margin: 0;
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
       font-size: 12px;
       line-height: 1.35;
+    }
+    .empty-action {
+      display: grid;
+      place-items: center;
+      min-height: 360px;
+      padding: 32px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      text-align: center;
+    }
+    .empty-action h3 {
+      margin: 0 0 8px;
+      font-size: 22px;
+    }
+    .empty-action p {
+      max-width: 520px;
+      margin: 0 auto 18px;
+      color: var(--muted);
+      line-height: 1.45;
     }
     .conversation-item {
       display: grid;
@@ -2429,6 +2495,26 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       gap: 12px;
     }
+    .installed-models {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .installed-model {
+      display: grid;
+      gap: 8px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .installed-model h3 {
+      margin: 0;
+      font-size: 16px;
+    }
     .model-card {
       display: grid;
       gap: 12px;
@@ -2568,6 +2654,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       .console-tabs { overflow-x: auto; }
       .models-shell { grid-template-columns: 1fr; }
       .chat-shell { grid-template-columns: 1fr; }
+      .conversation-shell, .memory-shell, .debug-shell { grid-template-columns: 1fr; }
       .chat-topbar { grid-template-columns: 1fr; }
       .chat-selectors { grid-template-columns: 1fr; }
       .chat-settings { grid-template-columns: 1fr; }
@@ -2590,6 +2677,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
     <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 15H6L5 6"/><path d="M10 11v6M14 11v6"/></symbol>
     <symbol id="icon-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+    <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
     <symbol id="icon-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
   </svg>
   <header>
@@ -2606,7 +2694,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <button class="tab-button active" type="button" data-tab-target="overview"><svg class="icon"><use href="#icon-workers"></use></svg>Overview</button>
       <button class="tab-button" type="button" data-tab-target="workers"><svg class="icon"><use href="#icon-workers"></use></svg>Workers</button>
       <button class="tab-button" type="button" data-tab-target="chat"><svg class="icon"><use href="#icon-send"></use></svg>Chat</button>
+      <button class="tab-button" type="button" data-tab-target="memory"><svg class="icon"><use href="#icon-brain"></use></svg>Memory</button>
+      <button class="tab-button" type="button" data-tab-target="conversations"><svg class="icon"><use href="#icon-terminal"></use></svg>Conversations</button>
       <button class="tab-button" type="button" data-tab-target="models"><svg class="icon"><use href="#icon-brain"></use></svg>Models</button>
+      <button class="tab-button" type="button" data-tab-target="prompt-debug"><svg class="icon"><use href="#icon-terminal"></use></svg>Prompt Debug</button>
       <button class="tab-button" type="button" data-tab-target="model-activity"><svg class="icon"><use href="#icon-terminal"></use></svg>Model Activity</button>
       <button class="tab-button" type="button" data-tab-target="jobs"><svg class="icon"><use href="#icon-terminal"></use></svg>Jobs</button>
       <button class="tab-button" type="button" data-tab-target="benchmarks"><svg class="icon"><use href="#icon-chart"></use></svg>Benchmarks</button>
@@ -2686,6 +2777,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <th>Memory</th>
               <th>Storage</th>
               <th>Installed models</th>
+              <th>Runtime</th>
               <th>GPU</th>
               <th>Job slots</th>
               <th>Benchmark</th>
@@ -2707,6 +2799,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                   <span class="sub">No installed models reported</span>
                 {{end}}
               </td>
+              <td><span class="sub">{{runtimeSummary .Resources.Runtimes}}</span></td>
               <td>{{range .Resources.GPU}}<div>{{.Name}}</div>{{else}}0{{end}}</td>
               <td>{{index $.WorkerActiveJobs .ID}} / {{workerSlots .}} active</td>
               <td>{{with index $.Benchmarks .ID}}{{printf "%.0f" .TotalScore}}{{else}}Not run{{end}}</td>
@@ -2728,47 +2821,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         <code>{{generatableCount .Models}} ready models</code>
       </div>
       <div class="chat-shell">
-        <aside class="conversation-sidebar">
-          <div class="conversation-sidebar-head">
-            <button class="button primary wide" id="new-chat-button" type="button"><svg class="icon"><use href="#icon-plus"></use></svg>New chat</button>
-            <div class="sub">Conversation history is stored in this cluster manager.</div>
-          </div>
-          <div class="memory-panel">
-            <div class="memory-panel-head">
-              <h3>Model memory</h3>
-              <button class="button danger" id="memory-clear-model" type="button"><svg class="icon"><use href="#icon-trash"></use></svg>Clear</button>
-            </div>
-            <div class="memory-list" id="memory-list">
-              <div class="sub">Select a model to load memory.</div>
-            </div>
-            <form class="memory-editor" id="memory-editor">
-              <input type="hidden" name="memory_id" value="">
-              <div class="field">
-                <label for="memory-key">Key</label>
-                <input id="memory-key" name="key" type="text" placeholder="user.name">
-              </div>
-              <div class="field">
-                <label for="memory-value">Value</label>
-                <textarea id="memory-value" name="value" placeholder="Sergiy"></textarea>
-              </div>
-              <button class="button primary wide" type="submit"><svg class="icon"><use href="#icon-plus"></use></svg><span>Save memory</span></button>
-            </form>
-            <div class="memory-preview">
-              <span class="conversation-meta">Effective system context</span>
-              <pre id="memory-preview-text">Select a model to preview the prompt context.</pre>
-            </div>
-          </div>
-          <div class="conversation-list" id="conversation-list">
-            {{range .Conversations}}
-            <button class="conversation-item" type="button" data-conversation-id="{{.ID}}">
-              <span class="conversation-title">{{conversationTitle .}}</span>
-              <span class="conversation-meta">{{conversationSubtitle .}}</span>
-            </button>
-            {{else}}
-            <div class="empty">No saved conversations yet.</div>
-            {{end}}
-          </div>
-        </aside>
         <form class="chat-main" id="model-chat-form">
           <div class="chat-topbar">
             <div>
@@ -2811,6 +2863,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <div class="chat-empty">
               <h3>No model is ready yet</h3>
               <p>Install a model from the Models tab before chatting.</p>
+              <button class="button primary" type="button" data-tab-shortcut="models"><svg class="icon"><use href="#icon-brain"></use></svg>Go to Models</button>
             </div>
             {{else}}
             <div class="chat-empty">
@@ -2830,11 +2883,145 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
     </section>
     </div>
+    <div class="tab-panel" id="tab-memory" hidden>
+    <section id="memory">
+      <div class="section-head">
+        <h2>Model Memory</h2>
+        <code>model-scoped context</code>
+      </div>
+      <div class="memory-shell">
+        <div class="memory-panel">
+          <div class="memory-panel-head">
+            <h3>Saved memory</h3>
+            <button class="button danger" id="memory-clear-model" type="button"><svg class="icon"><use href="#icon-trash"></use></svg>Clear model</button>
+          </div>
+          <div class="field">
+            <label for="memory-model-select">Model</label>
+            <select id="memory-model-select">
+              {{if eq (generatableCount .Models) 0}}<option value="">Install a model first</option>{{end}}
+              {{range .Models}}{{if modelCanGenerate .}}<option value="{{.Model.ID}}">{{.Model.Name}}</option>{{end}}{{end}}
+            </select>
+          </div>
+          <div class="memory-list" id="memory-list">
+            <div class="sub">Select a model to load memory.</div>
+          </div>
+        </div>
+        <form class="memory-panel" id="memory-editor">
+          <input type="hidden" name="memory_id" value="">
+          <div>
+            <h3>Add or edit memory</h3>
+            <p class="sub">Memory is injected into prompts for this model before conversation history.</p>
+          </div>
+          <div class="field">
+            <label for="memory-key">Key</label>
+            <input id="memory-key" name="key" type="text" placeholder="user.name">
+          </div>
+          <div class="field">
+            <label for="memory-value">Value</label>
+            <textarea id="memory-value" name="value" placeholder="Sergiy"></textarea>
+          </div>
+          <div class="actions">
+            <button class="button primary" type="submit"><svg class="icon"><use href="#icon-plus"></use></svg><span>Save memory</span></button>
+            <button class="button" id="memory-editor-reset" type="button"><svg class="icon"><use href="#icon-x"></use></svg>Reset</button>
+          </div>
+        </form>
+      </div>
+    </section>
+    </div>
+    <div class="tab-panel" id="tab-conversations" hidden>
+    <section id="conversations">
+      <div class="section-head">
+        <h2>Conversations</h2>
+        <code>{{len .Conversations}} saved</code>
+      </div>
+      <div class="conversation-shell">
+        <aside class="conversation-sidebar">
+          <div class="conversation-sidebar-head">
+            <button class="button primary wide" id="new-chat-button" type="button"><svg class="icon"><use href="#icon-plus"></use></svg>New chat</button>
+            <div class="sub">Conversation history is stored in this cluster manager.</div>
+          </div>
+          <div class="conversation-list" id="conversation-list">
+            {{range .Conversations}}
+            <button class="conversation-item" type="button" data-conversation-id="{{.ID}}">
+              <span class="conversation-title">{{conversationTitle .}}</span>
+              <span class="conversation-meta">{{conversationSubtitle .}}</span>
+            </button>
+            {{else}}
+            <div class="empty">No saved conversations yet.</div>
+            {{end}}
+          </div>
+        </aside>
+        <div class="empty-action">
+          <div>
+            <h3>Open a conversation</h3>
+            <p>Select a saved conversation to load it into the Chat screen, or start a clean one.</p>
+            <button class="button" type="button" data-tab-shortcut="chat"><svg class="icon"><use href="#icon-send"></use></svg>Open Chat</button>
+          </div>
+        </div>
+      </div>
+    </section>
+    </div>
+    <div class="tab-panel" id="tab-prompt-debug" hidden>
+    <section id="prompt-debug">
+      <div class="section-head">
+        <h2>Prompt Debug</h2>
+        <code>effective context</code>
+      </div>
+      <div class="debug-shell">
+        <div class="memory-panel">
+          <h3>Preview input</h3>
+          <div class="field">
+            <label for="debug-model-select">Model</label>
+            <select id="debug-model-select">
+              {{if eq (generatableCount .Models) 0}}<option value="">Install a model first</option>{{end}}
+              {{range .Models}}{{if modelCanGenerate .}}<option value="{{.Model.ID}}">{{.Model.Name}}</option>{{end}}{{end}}
+            </select>
+          </div>
+          <p class="sub">This shows exactly what memory and system prompt context will be sent before the chat messages.</p>
+        </div>
+        <div class="memory-preview">
+          <span class="conversation-meta">Effective system context</span>
+          <pre id="memory-preview-text">Select a model to preview the prompt context.</pre>
+        </div>
+      </div>
+    </section>
+    </div>
     <div class="tab-panel" id="tab-models" hidden>
     <section id="models">
       <div class="section-head">
         <h2>Model Catalog</h2>
-        <code>{{len .Models}} catalog entries</code>
+        <code>{{installedModelCount .Models}} installed / {{len .Models}} catalog entries</code>
+      </div>
+      <div class="installed-models">
+        {{if gt (installedModelCount .Models) 0}}
+        {{range .Models}}
+        {{if .InstalledOn}}
+        <article class="installed-model" data-model-id="{{.Model.ID}}">
+          <div class="model-title">
+            <div>
+              <h3>{{.Model.Name}}</h3>
+              <p class="sub">{{.Model.Parameters}} / {{.Model.Quant}} · {{printf "%.1f" (gb .Model.DiskBytes)}} GB catalog disk</p>
+            </div>
+            <span class="{{modelStatusClass .Status}}">{{.Status}}</span>
+          </div>
+          <p class="sub">Installed on {{range $index, $nodeID := .InstalledOn}}{{if $index}}, {{end}}<code>{{nodeLabel $.NodesByID $nodeID}}</code>{{end}}</p>
+          <div class="model-actions">
+            {{$modelID := .Model.ID}}
+            {{range modelNodeOptions $.NodesByID .}}
+            <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.ID}}"><svg class="icon"><use href="#icon-trash"></use></svg><span>Delete from {{.Name}}</span></button>
+            {{end}}
+          </div>
+        </article>
+        {{end}}
+        {{end}}
+        {{else}}
+        <div class="empty-action">
+          <div>
+            <h3>No installed models</h3>
+            <p>Install one catalog model on a capable online worker before using Chat.</p>
+          </div>
+        </div>
+        {{end}}
       </div>
       <div class="model-catalog">
           {{range .Models}}
@@ -2869,18 +3056,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             {{else}}
             <p class="sub">No online workers are reporting resources for this model.</p>
             {{end}}
-            {{if .InstalledOn}}
-            <p class="sub">Installed on {{range $index, $nodeID := .InstalledOn}}{{if $index}}, {{end}}<code>{{nodeLabel $.NodesByID $nodeID}}</code>{{end}}</p>
-            {{end}}
             {{if .LastError}}
             <p class="sub">Last error: {{.LastError}}</p>
             {{end}}
             <div class="model-actions">
               <button class="button primary model-install" type="button" data-model-id="{{.Model.ID}}" {{if not (modelCanInstall .)}}disabled{{end}}><svg class="icon"><use href="#icon-download"></use></svg><span>Install</span></button>
-              {{$modelID := .Model.ID}}
-              {{range modelNodeOptions $.NodesByID .}}
-              <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.ID}}"><svg class="icon"><use href="#icon-trash"></use></svg><span>Delete from {{.Name}}</span></button>
-              {{end}}
             </div>
           </article>
           {{end}}
@@ -3300,8 +3480,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var conversationList = document.getElementById("conversation-list");
     var memoryList = document.getElementById("memory-list");
     var memoryEditor = document.getElementById("memory-editor");
+    var memoryEditorReset = document.getElementById("memory-editor-reset");
     var memoryClearModel = document.getElementById("memory-clear-model");
     var memoryPreviewText = document.getElementById("memory-preview-text");
+    var memoryModelSelect = document.getElementById("memory-model-select");
+    var debugModelSelect = document.getElementById("debug-model-select");
     var chatSystemPrompt = document.getElementById("chat-system-prompt");
     var chatTemperature = document.getElementById("chat-temperature");
     var chatMaxTokens = document.getElementById("chat-max-tokens");
@@ -3347,13 +3530,26 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     function currentChatModelID() {
       return chatModel ? String(chatModel.value || "").trim() : "";
     }
+    function selectedMemoryModelID() {
+      if (memoryModelSelect && memoryModelSelect.value) return String(memoryModelSelect.value || "").trim();
+      return currentChatModelID();
+    }
+    function selectedDebugModelID() {
+      if (debugModelSelect && debugModelSelect.value) return String(debugModelSelect.value || "").trim();
+      return currentChatModelID();
+    }
+    function syncAuxModelSelects(modelID) {
+      if (!modelID) return;
+      if (memoryModelSelect) memoryModelSelect.value = modelID;
+      if (debugModelSelect) debugModelSelect.value = modelID;
+    }
     function renderMemoryList(memories) {
       if (!memoryList) return;
       memoryList.innerHTML = "";
       if (!memories || memories.length === 0) {
         var empty = document.createElement("div");
         empty.className = "sub";
-        empty.textContent = currentChatModelID() ? "No memory stored for this model yet." : "Select a model to load memory.";
+        empty.textContent = selectedMemoryModelID() ? "No memory stored for this model yet." : "Select a model to load memory.";
         memoryList.appendChild(empty);
         return;
       }
@@ -3381,7 +3577,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         editButton.dataset.memoryId = memory.id || "";
         editButton.dataset.memoryKey = memory.key || "";
         editButton.dataset.memoryValue = memory.value || "";
-        editButton.innerHTML = '<svg class="icon"><use href="#icon-status"></use></svg>';
+        editButton.innerHTML = '<svg class="icon"><use href="#icon-edit"></use></svg>';
         var button = document.createElement("button");
         button.className = "button danger memory-delete";
         button.type = "button";
@@ -3394,7 +3590,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       });
     }
     function loadModelMemory() {
-      var modelID = currentChatModelID();
+      var modelID = selectedMemoryModelID();
       if (!memoryList || !modelID) {
         renderMemoryList([]);
         if (memoryPreviewText) memoryPreviewText.textContent = "Select a model to preview the prompt context.";
@@ -3414,7 +3610,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     }
     function updateMemoryPreview() {
       if (!memoryPreviewText) return;
-      var modelID = currentChatModelID();
+      var modelID = selectedDebugModelID();
       if (!modelID) {
         memoryPreviewText.textContent = "Select a model to preview the prompt context.";
         return;
@@ -3478,6 +3674,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       }).then(function(conversation) {
         setActiveConversation(conversation.id);
         renderConversation(conversation);
+        activateTab("chat", true);
       }).catch(function(error) {
         if (modelStatus) modelStatus.innerText = "Could not load conversation: " + error.message;
       });
@@ -3525,10 +3722,23 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     if (chatModel) {
       chatModel.addEventListener("change", function() {
         syncChatNodes();
+        syncAuxModelSelects(currentChatModelID());
         loadModelMemory();
+        updateMemoryPreview();
       });
       syncChatNodes();
+      syncAuxModelSelects(currentChatModelID());
       loadModelMemory();
+    }
+    if (memoryModelSelect) {
+      memoryModelSelect.addEventListener("change", function() {
+        loadModelMemory();
+      });
+    }
+    if (debugModelSelect) {
+      debugModelSelect.addEventListener("change", function() {
+        updateMemoryPreview();
+      });
     }
     if (conversationList) {
       conversationList.querySelectorAll(".conversation-item").forEach(function(button) {
@@ -3544,6 +3754,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         if (chatSystemPrompt) chatSystemPrompt.value = "";
         loadModelMemory();
         if (modelStatus) modelStatus.innerText = "New chat ready.";
+        activateTab("chat", true);
       });
     }
     if (chatSystemPrompt) {
@@ -3574,6 +3785,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         }).then(function() {
           if (modelStatus) modelStatus.innerText = "Memory deleted.";
           loadModelMemory();
+          updateMemoryPreview();
         }).catch(function(error) {
           button.disabled = false;
           if (modelStatus) modelStatus.innerText = "Memory delete failed: " + error.message;
@@ -3583,7 +3795,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     if (memoryEditor) {
       memoryEditor.addEventListener("submit", function(event) {
         event.preventDefault();
-        var modelID = currentChatModelID();
+        var modelID = selectedMemoryModelID();
         var memoryID = String(memoryEditor.querySelector('[name="memory_id"]').value || "").trim();
         var key = String(memoryEditor.querySelector('[name="key"]').value || "").trim();
         var value = String(memoryEditor.querySelector('[name="value"]').value || "").trim();
@@ -3618,6 +3830,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           memoryEditor.reset();
           if (modelStatus) modelStatus.innerText = "Memory saved.";
           loadModelMemory();
+          updateMemoryPreview();
         }).catch(function(error) {
           if (modelStatus) modelStatus.innerText = "Memory save failed: " + error.message;
         }).finally(function() {
@@ -3628,9 +3841,15 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         });
       });
     }
+    if (memoryEditorReset && memoryEditor) {
+      memoryEditorReset.addEventListener("click", function() {
+        memoryEditor.reset();
+        if (modelStatus) modelStatus.innerText = "Memory editor reset.";
+      });
+    }
     if (memoryClearModel) {
       memoryClearModel.addEventListener("click", function() {
-        var modelID = currentChatModelID();
+        var modelID = selectedMemoryModelID();
         if (!modelID) {
           if (modelStatus) modelStatus.innerText = "Select a model before clearing memory.";
           return;
@@ -3646,6 +3865,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         }).then(function(payload) {
           if (modelStatus) modelStatus.innerText = "Cleared " + (payload.deleted || 0) + " memory item(s).";
           loadModelMemory();
+          updateMemoryPreview();
         }).catch(function(error) {
           if (modelStatus) modelStatus.innerText = "Clear memory failed: " + error.message;
         }).finally(function() {

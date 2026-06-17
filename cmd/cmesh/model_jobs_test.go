@@ -10,7 +10,7 @@ import (
 	"github.com/cmesh/cmesh/internal/models"
 )
 
-func TestExecuteModelDeleteJobRemovesModelFileAndEmptyDirectory(t *testing.T) {
+func TestExecuteModelDeleteJobRemovesModelDirectory(t *testing.T) {
 	cacheDir := t.TempDir()
 	model, err := models.MustFind("qwen2.5-0.5b-instruct-q4-k-m")
 	if err != nil {
@@ -21,6 +21,10 @@ func TestExecuteModelDeleteJobRemovesModelFileAndEmptyDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte("model"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(filepath.Dir(path), "download.tmp")
+	if err := os.WriteFile(sidecar, []byte("partial"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -40,11 +44,17 @@ func TestExecuteModelDeleteJobRemovesModelFileAndEmptyDirectory(t *testing.T) {
 	if !result.Removed {
 		t.Fatalf("expected removed=true, got %#v", result)
 	}
+	if result.FreedBytes != int64(len("model")+len("partial")) {
+		t.Fatalf("expected freed bytes to include model directory contents, got %#v", result)
+	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected model file to be removed, stat err=%v", err)
 	}
+	if _, err := os.Stat(sidecar); !os.IsNotExist(err) {
+		t.Fatalf("expected sidecar file to be removed, stat err=%v", err)
+	}
 	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
-		t.Fatalf("expected empty model directory to be removed, stat err=%v", err)
+		t.Fatalf("expected model directory to be removed, stat err=%v", err)
 	}
 }
 

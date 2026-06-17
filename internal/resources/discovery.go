@@ -13,6 +13,7 @@ import (
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/config"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/runtimes"
 )
 
 type DiscoveryOptions struct {
@@ -45,7 +46,21 @@ func DiscoverLocal(options DiscoveryOptions) cluster.ResourceSnapshot {
 		},
 		JobSlots: allowedInt(options.Limits.JobSlots, 1),
 		Models:   DiscoverInstalledModels(options.CacheDir),
+		Runtimes: DiscoverRuntimes(options.CacheDir),
 	}
+}
+
+func DiscoverRuntimes(cacheDir string) []cluster.RuntimeResource {
+	status := runtimes.LlamaCPPStatus(cacheDir)
+	return []cluster.RuntimeResource{{
+		Name:       status.Name,
+		Ready:      status.Ready,
+		Version:    status.Version,
+		Platform:   status.Platform,
+		BinaryPath: status.BinaryPath,
+		Source:     status.Source,
+		Error:      status.Error,
+	}}
 }
 
 func DiscoverInstalledModels(cacheDir string) []cluster.ModelResource {

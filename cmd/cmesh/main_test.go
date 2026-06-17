@@ -154,3 +154,26 @@ func TestWorkerResourceGuardRejectsInsufficientVRAM(t *testing.T) {
 		t.Fatalf("unexpected error %q", err.Error())
 	}
 }
+
+func TestSanitizeModelTextRemovesChatTemplateNoise(t *testing.T) {
+	input := strings.Join([]string{
+		"<|im_start|>assistant",
+		"<|im_end|>",
+		"</|im_start|>",
+		"user",
+		"<start_of_turn>model",
+		"You will answer the user's question.",
+		"Привіт, Сергію.",
+		"<end_of_turn>",
+		"assistant:",
+		"Як я можу допомогти?",
+	}, "\n")
+
+	got := sanitizeModelText(input)
+	if strings.Contains(got, "<|") || strings.Contains(got, "start_of_turn") || strings.Contains(strings.ToLower(got), "assistant:") || strings.Contains(strings.ToLower(got), "user") {
+		t.Fatalf("template noise was not removed: %q", got)
+	}
+	if !strings.Contains(got, "Привіт, Сергію.") || !strings.Contains(got, "Як я можу допомогти?") {
+		t.Fatalf("expected useful text to remain, got %q", got)
+	}
+}
