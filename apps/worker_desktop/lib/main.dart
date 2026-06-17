@@ -957,6 +957,7 @@ class WorkerController {
     String path, {
     Map<String, dynamic>? body,
     bool tryStart = true,
+    bool tryTokenRecovery = true,
     Duration timeout = _requestTimeout,
   }) async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
@@ -974,6 +975,23 @@ class WorkerController {
       final decoded = _decodeResponse(raw);
       final output = _formatResponse(resp.statusCode, raw, decoded, path);
       final ok = resp.statusCode >= 200 && resp.statusCode < 300;
+      if (!ok &&
+          resp.statusCode == HttpStatus.unauthorized &&
+          path.startsWith('/v1/') &&
+          tryTokenRecovery) {
+        final recovery = await _recoverRejectedControlToken();
+        if (recovery.ok) {
+          return _request(
+            method,
+            path,
+            body: body,
+            tryStart: false,
+            tryTokenRecovery: false,
+            timeout: timeout,
+          );
+        }
+        return recovery;
+      }
       return WorkerCommandResult(
         exitCode: ok ? 0 : resp.statusCode,
         output: output,
@@ -989,7 +1007,14 @@ class WorkerController {
       if (tryStart) {
         final start = await ensureRunning();
         if (start.ok) {
-          return _request(method, path, body: body, tryStart: false);
+          return _request(
+            method,
+            path,
+            body: body,
+            tryStart: false,
+            tryTokenRecovery: tryTokenRecovery,
+            timeout: timeout,
+          );
         }
       }
       return WorkerCommandResult(
@@ -999,6 +1024,126 @@ class WorkerController {
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<WorkerCommandResult> _recoverRejectedControlToken() async {
+    if (!_isDefaultLocalControlURL()) {
+      return const WorkerCommandResult(
+        exitCode: HttpStatus.unauthorized,
+        output:
+            'Local worker control API rejected this app token.\n\nClose the older CMesh Worker app that owns the configured control API, then reopen this app.',
+      );
+    }
+
+    final stopped = await _stopProcessListeningOnControlPort();
+    if (!stopped.ok) {
+      return stopped;
+    }
+
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    final started = await ensureRunning();
+    if (!started.ok) {
+      return WorkerCommandResult(
+        exitCode: started.exitCode,
+        output:
+            'Local worker control API rejected this app token. The app stopped the stale control process, but could not start a replacement.\n\n${started.output}',
+      );
+    }
+    return const WorkerCommandResult(
+      exitCode: 0,
+      output: 'Recovered stale local worker control process.',
+    );
+  }
+
+  bool _isDefaultLocalControlURL() {
+    return (_baseURL.scheme == 'http') &&
+        (_baseURL.host == '127.0.0.1' || _baseURL.host == 'localhost') &&
+        (_baseURL.port == 9781 || _baseURL.port == 0);
+  }
+
+  Future<WorkerCommandResult> _stopProcessListeningOnControlPort() async {
+    try {
+      if (Platform.isWindows) {
+        return _stopWindowsControlPortOwner();
+      }
+      return _stopUnixControlPortOwner();
+    } on Object catch (error) {
+      return WorkerCommandResult(
+        exitCode: 1,
+        output:
+            'Local worker control API rejected this app token, and automatic recovery failed.\n\n$error',
+      );
+    }
+  }
+
+  Future<WorkerCommandResult> _stopUnixControlPortOwner() async {
+    final lookup = await Process.run('lsof', [
+      '-tiTCP:9781',
+      '-sTCP:LISTEN',
+    ]);
+    if (lookup.exitCode != 0 || lookup.stdout.toString().trim().isEmpty) {
+      return const WorkerCommandResult(exitCode: 0, output: 'No stale process');
+    }
+    final pids = lookup.stdout
+        .toString()
+        .split(RegExp(r'\s+'))
+        .map((value) => int.tryParse(value.trim()))
+        .whereType<int>()
+        .where((pid) => pid > 0)
+        .toSet();
+    for (final pid in pids) {
+      Process.killPid(pid, ProcessSignal.sigterm);
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    final stillListening = await Process.run('lsof', [
+      '-tiTCP:9781',
+      '-sTCP:LISTEN',
+    ]);
+    final remaining = stillListening.stdout
+        .toString()
+        .split(RegExp(r'\s+'))
+        .map((value) => int.tryParse(value.trim()))
+        .whereType<int>()
+        .where((pid) => pids.contains(pid))
+        .toSet();
+    for (final pid in remaining) {
+      Process.killPid(pid, ProcessSignal.sigkill);
+    }
+    return WorkerCommandResult(
+      exitCode: 0,
+      output: 'Stopped stale worker control process: ${pids.join(', ')}',
+    );
+  }
+
+  Future<WorkerCommandResult> _stopWindowsControlPortOwner() async {
+    final lookup = await Process.run('netstat', ['-ano', '-p', 'tcp']);
+    if (lookup.exitCode != 0) {
+      return WorkerCommandResult(
+        exitCode: lookup.exitCode,
+        output: 'Could not inspect local TCP ports:\n${lookup.stderr}',
+      );
+    }
+    final pids = <String>{};
+    for (final line in lookup.stdout.toString().split(RegExp(r'\r?\n'))) {
+      final normalized = line.trim().replaceAll(RegExp(r'\s+'), ' ');
+      if (!normalized.contains(':9781 ') ||
+          !normalized.toUpperCase().contains('LISTENING')) {
+        continue;
+      }
+      final parts = normalized.split(' ');
+      if (parts.isNotEmpty) {
+        pids.add(parts.last);
+      }
+    }
+    for (final pid in pids) {
+      await Process.run('taskkill', ['/PID', pid, '/T', '/F']);
+    }
+    return WorkerCommandResult(
+      exitCode: 0,
+      output: pids.isEmpty
+          ? 'No stale process'
+          : 'Stopped stale worker control process: ${pids.join(', ')}',
+    );
   }
 
   Object? _decodeResponse(String raw) {
