@@ -99,6 +99,14 @@ func (s *FileStore) AppendConversationMessage(id string, modelID string, nodeID 
 	return conversation
 }
 
+func (s *FileStore) DeleteConversation(id string) bool {
+	ok := s.State.DeleteConversation(id)
+	if ok {
+		_ = s.save()
+	}
+	return ok
+}
+
 func (s *FileStore) DeleteMemory(id string) bool {
 	ok := s.State.DeleteMemory(id)
 	if ok {

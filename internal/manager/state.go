@@ -337,6 +337,16 @@ func (s *State) Conversations() []Conversation {
 	return out
 }
 
+func (s *State) DeleteConversation(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.conversations[id]; !ok {
+		return false
+	}
+	delete(s.conversations, id)
+	return true
+}
+
 func (s *State) AppendConversationMessage(id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation {
 	now := time.Now().UTC()
 	message = normalizeChatMessage(message)

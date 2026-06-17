@@ -157,7 +157,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -523,7 +523,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperatorAuth(w, r, false) {
 		return
 	}
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -733,7 +733,7 @@ func (s *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperatorAuth(w, r, false) {
 		return
 	}
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -745,6 +745,14 @@ func (s *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 	conversations, ok := s.state.(conversationStore)
 	if !ok {
 		http.Error(w, "conversation persistence is not available", http.StatusNotImplemented)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		if !conversations.DeleteConversation(id) {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "id": id})
 		return
 	}
 	conversation, ok := conversations.Conversation(id)
@@ -1313,6 +1321,7 @@ type conversationStore interface {
 	Conversation(id string) (Conversation, bool)
 	Conversations() []Conversation
 	AppendConversationMessage(id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation
+	DeleteConversation(id string) bool
 }
 
 type memoryStore interface {
@@ -2386,6 +2395,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       text-align: left;
       cursor: pointer;
     }
+    .conversation-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: stretch;
+    }
     .conversation-item.active {
       border-color: var(--accent);
       background: #ecfdf5;
@@ -2995,10 +3010,13 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           </div>
           <div class="conversation-list" id="conversation-list">
             {{range .Conversations}}
-            <button class="conversation-item" type="button" data-conversation-id="{{.ID}}">
-              <span class="conversation-title">{{conversationTitle .}}</span>
-              <span class="conversation-meta">{{conversationSubtitle .}}</span>
-            </button>
+            <div class="conversation-row" data-conversation-id="{{.ID}}">
+              <button class="conversation-item" type="button" data-conversation-id="{{.ID}}">
+                <span class="conversation-title">{{conversationTitle .}}</span>
+                <span class="conversation-meta">{{conversationSubtitle .}}</span>
+              </button>
+              <button class="button danger conversation-delete" type="button" data-conversation-id="{{.ID}}"><svg class="icon"><use href="#icon-trash"></use></svg></button>
+            </div>
             {{else}}
             <div class="empty">No saved conversations yet.</div>
             {{end}}
@@ -3907,6 +3925,32 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       conversationList.querySelectorAll(".conversation-item").forEach(function(button) {
         button.addEventListener("click", function() {
           loadConversation(button.dataset.conversationId || "");
+        });
+      });
+      conversationList.querySelectorAll(".conversation-delete").forEach(function(button) {
+        button.addEventListener("click", function() {
+          var id = button.dataset.conversationId || "";
+          if (!id) return;
+          button.disabled = true;
+          fetch("/v1/conversations/" + encodeURIComponent(id), {
+            method: "DELETE"
+          }).then(function(response) {
+            if (!response.ok) {
+              return response.text().then(function(text) { throw new Error(text || response.statusText); });
+            }
+            return response.json();
+          }).then(function() {
+            if (chatConversationID === id) {
+              setActiveConversation("");
+              resetChatThread();
+            }
+            var row = button.closest ? button.closest(".conversation-row") : null;
+            if (row) row.remove();
+            if (modelStatus) modelStatus.innerText = "Conversation deleted.";
+          }).catch(function(error) {
+            button.disabled = false;
+            if (modelStatus) modelStatus.innerText = "Conversation delete failed: " + error.message;
+          });
         });
       });
     }

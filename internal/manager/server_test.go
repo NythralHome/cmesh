@@ -524,6 +524,29 @@ func TestConversationAPIListsAndReadsGeneratedChatContext(t *testing.T) {
 	}
 }
 
+func TestConversationAPIDeletesConversation(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	state.AppendConversationMessage("conv-delete", "qwen2.5-0.5b-instruct-q4-k-m", "node-test", "system", models.ChatMessage{
+		Role:    "user",
+		Content: "delete this conversation",
+	})
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/conversations/conv-delete", nil)
+	deleteRec := httptest.NewRecorder()
+	srv.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	readReq := httptest.NewRequest(http.MethodGet, "/v1/conversations/conv-delete", nil)
+	readRec := httptest.NewRecorder()
+	srv.ServeHTTP(readRec, readReq)
+	if readRec.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404 after delete, got %d: %s", readRec.Code, readRec.Body.String())
+	}
+}
+
 func TestMemoryAPIDeletesMemory(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
