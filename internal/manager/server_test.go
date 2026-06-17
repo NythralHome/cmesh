@@ -468,6 +468,25 @@ func TestModelDeleteCleansModelPersistence(t *testing.T) {
 	}
 }
 
+func TestJobDetailSummarizesModelDeleteCleanup(t *testing.T) {
+	job := jobs.Job{
+		Type:   models.JobDelete,
+		Result: `{"removed":true,"freed_bytes":2147483648,"deleted_memories":2,"deleted_conversations":1}`,
+	}
+
+	got := jobDetail(job)
+	for _, want := range []string{
+		"Model files removed",
+		"freed 2.0 GB",
+		"cleared 2 memory item(s)",
+		"cleared 1 conversation(s)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in detail %q", want, got)
+		}
+	}
+}
+
 func TestConversationAPIListsAndReadsGeneratedChatContext(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)

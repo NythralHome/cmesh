@@ -1567,6 +1567,65 @@ func jobTimeline(job jobs.Job) string {
 	return strings.Join(parts, " / ")
 }
 
+func jobDetail(job jobs.Job) string {
+	if job.Error != "" {
+		return job.Error
+	}
+	if job.Result == "" {
+		if job.AssignedTo == "" {
+			if job.LastFailure != "" {
+				return job.LastFailure
+			}
+			return "Waiting for a capable worker."
+		}
+		return "Waiting for worker result."
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(job.Result), &result); err != nil {
+		return job.Result
+	}
+	if output, ok := result["output"].(string); ok && strings.TrimSpace(output) != "" {
+		return output
+	}
+	if job.Type == models.JobDelete {
+		parts := []string{"Model files removed"}
+		if freed := numberResult(result, "freed_bytes"); freed > 0 {
+			parts = append(parts, fmt.Sprintf("freed %.1f GB", freed/1024/1024/1024))
+		}
+		if memories := int(numberResult(result, "deleted_memories")); memories > 0 {
+			parts = append(parts, fmt.Sprintf("cleared %d memory item(s)", memories))
+		}
+		if conversations := int(numberResult(result, "deleted_conversations")); conversations > 0 {
+			parts = append(parts, fmt.Sprintf("cleared %d conversation(s)", conversations))
+		}
+		return strings.Join(parts, "; ")
+	}
+	if runtimeValue, ok := result["worker_runtime"].(string); ok && strings.TrimSpace(runtimeValue) != "" {
+		return "Completed on " + runtimeValue
+	}
+	return "Completed."
+}
+
+func numberResult(result map[string]any, key string) float64 {
+	switch value := result[key].(type) {
+	case float64:
+		return value
+	case float32:
+		return float64(value)
+	case int:
+		return float64(value)
+	case int64:
+		return float64(value)
+	case uint64:
+		return float64(value)
+	case json.Number:
+		parsed, _ := value.Float64()
+		return parsed
+	default:
+		return 0
+	}
+}
+
 func jobWorkload(job jobs.Job) string {
 	if modelID, ok := jobModelID(job); ok {
 		switch job.Type {
@@ -1680,31 +1739,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		}
 		return job.AssignedTo[:12]
 	},
-	"jobDetail": func(job jobs.Job) string {
-		if job.Error != "" {
-			return job.Error
-		}
-		if job.Result == "" {
-			if job.AssignedTo == "" {
-				if job.LastFailure != "" {
-					return job.LastFailure
-				}
-				return "Waiting for a capable worker."
-			}
-			return "Waiting for worker result."
-		}
-		var result map[string]any
-		if err := json.Unmarshal([]byte(job.Result), &result); err != nil {
-			return job.Result
-		}
-		if output, ok := result["output"].(string); ok && strings.TrimSpace(output) != "" {
-			return output
-		}
-		if runtimeValue, ok := result["worker_runtime"].(string); ok && strings.TrimSpace(runtimeValue) != "" {
-			return "Completed on " + runtimeValue
-		}
-		return "Completed."
-	},
+	"jobDetail": jobDetail,
 	"clip": func(value string, limit int) string {
 		value = strings.TrimSpace(value)
 		if limit <= 0 || len(value) <= limit {
