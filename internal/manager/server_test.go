@@ -449,8 +449,16 @@ func TestModelDeleteCleansModelPersistence(t *testing.T) {
 		Input:      job.Input,
 		AssignedTo: "node-test",
 	}
-	if _, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{NodeID: "node-test", Result: `{"removed":true}`}); !ok {
+	completed, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{NodeID: "node-test", Result: `{"removed":true,"freed_bytes":1024}`})
+	if !ok {
 		t.Fatal("expected delete completion to succeed")
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(completed.Result), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["deleted_memories"] != float64(1) || result["deleted_conversations"] != float64(1) || result["freed_bytes"] != float64(1024) {
+		t.Fatalf("expected delete cleanup metadata, got %#v", result)
 	}
 	if got := state.Memories("qwen2.5-0.5b-instruct-q4-k-m"); len(got) != 0 {
 		t.Fatalf("expected memories to be removed, got %#v", got)

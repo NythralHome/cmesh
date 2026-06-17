@@ -308,7 +308,7 @@ func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, b
 		job.Status = jobs.StatusSucceeded
 		job.FinishedAt = now
 		s.appendAssistantMessageForJobLocked(job, now)
-		s.cleanupModelPersistenceForDeleteJobLocked(job)
+		s.cleanupModelPersistenceForDeleteJobLocked(&job)
 	}
 	s.jobs[job.ID] = job
 	s.scheduleQueuedJobsLocked(now)
@@ -481,7 +481,7 @@ func (s *State) upsertExtractedMemoriesLocked(modelID string, conversationID str
 	}
 }
 
-func (s *State) cleanupModelPersistenceForDeleteJobLocked(job jobs.Job) {
+func (s *State) cleanupModelPersistenceForDeleteJobLocked(job *jobs.Job) {
 	if job.Type != models.JobDelete {
 		return
 	}
@@ -489,16 +489,37 @@ func (s *State) cleanupModelPersistenceForDeleteJobLocked(job jobs.Job) {
 	if err := json.Unmarshal([]byte(job.Input), &input); err != nil || input.ModelID == "" {
 		return
 	}
+	deletedMemories := 0
 	for id, memory := range s.memories {
 		if memory.ModelID == input.ModelID {
 			delete(s.memories, id)
+			deletedMemories++
 		}
 	}
+	deletedConversations := 0
 	for id, conversation := range s.conversations {
 		if conversation.ModelID == input.ModelID {
 			delete(s.conversations, id)
+			deletedConversations++
 		}
 	}
+	job.Result = withDeleteCleanupResult(job.Result, deletedMemories, deletedConversations)
+}
+
+func withDeleteCleanupResult(result string, deletedMemories int, deletedConversations int) string {
+	payload := map[string]any{}
+	if strings.TrimSpace(result) != "" {
+		if err := json.Unmarshal([]byte(result), &payload); err != nil {
+			return result
+		}
+	}
+	payload["deleted_memories"] = deletedMemories
+	payload["deleted_conversations"] = deletedConversations
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return result
+	}
+	return string(body)
 }
 
 func (s *State) appendAssistantMessageForJobLocked(job jobs.Job, now time.Time) {
