@@ -1,6 +1,11 @@
 package runtimes
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestSelectLlamaCPPAsset(t *testing.T) {
 	release := githubRelease{
@@ -55,5 +60,44 @@ func TestFallbackLlamaCPPReleaseHasPlatformAssets(t *testing.T) {
 	want := "https://github.com/ggml-org/llama.cpp/releases/download/b9672/llama-b9672-bin-macos-arm64.tar.gz"
 	if got.URL != want {
 		t.Fatalf("expected %q, got %q", want, got.URL)
+	}
+}
+
+func TestEnsureLlamaCPPMigratesLegacyCache(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	legacyCache := t.TempDir()
+	newCache := t.TempDir()
+	legacyRuntime := filepath.Join(runtimeDir(legacyCache, "b9672"), "llama-b9672")
+	if err := os.MkdirAll(legacyRuntime, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyBinary := filepath.Join(legacyRuntime, llamaBinaryName())
+	if err := os.WriteFile(legacyBinary, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CMESH_LLAMA_CPP_LEGACY_CACHE_DIRS", legacyCache)
+	t.Setenv("CMESH_LLAMA_CPP_TAG", "test-no-download")
+
+	binary, status, err := EnsureLlamaCPP(t.Context(), newCache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Ready {
+		t.Fatal("expected migrated runtime to be ready")
+	}
+	if status.Source != "cmesh-runtime-cache-migrated" {
+		t.Fatalf("expected migrated source, got %q", status.Source)
+	}
+	if status.Version != "b9672" {
+		t.Fatalf("expected b9672, got %q", status.Version)
+	}
+	if binary == legacyBinary {
+		t.Fatal("expected runtime to be copied into the new cache")
+	}
+	if _, err := os.Stat(binary); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(binary, filepath.Join(newCache, "runtimes")) {
+		t.Fatalf("expected binary in new cache, got %q", binary)
 	}
 }

@@ -92,6 +92,16 @@ func EnsureLlamaCPP(ctx context.Context, cacheDir string) (string, RuntimeStatus
 			Source:     "cmesh-runtime-cache",
 		}, nil
 	}
+	if binary, version, err := migrateCachedLlamaCPP(cacheDir); err == nil {
+		return binary, RuntimeStatus{
+			Name:       LlamaCPPName,
+			Ready:      true,
+			Version:    version,
+			Platform:   platformKey(),
+			BinaryPath: binary,
+			Source:     "cmesh-runtime-cache-migrated",
+		}, nil
+	}
 	release, err := fetchLatestRelease(ctx)
 	if err != nil {
 		status := LlamaCPPStatus(cacheDir)
@@ -442,6 +452,127 @@ func cachedLlamaCPPBinary(cacheDir string) (string, string, error) {
 		}
 	}
 	return "", "", fmt.Errorf("runtime is not installed")
+}
+
+func migrateCachedLlamaCPP(cacheDir string) (string, string, error) {
+	targetRoot := filepath.Join(runtimeRoot(cacheDir), LlamaCPPName)
+	targetAbs, err := filepath.Abs(targetRoot)
+	if err != nil {
+		return "", "", err
+	}
+	for _, legacyCacheDir := range legacyCacheDirs() {
+		sourceRoot := filepath.Join(runtimeRoot(legacyCacheDir), LlamaCPPName)
+		sourceAbs, err := filepath.Abs(sourceRoot)
+		if err != nil || sourceAbs == targetAbs {
+			continue
+		}
+		entries, err := os.ReadDir(sourceRoot)
+		if err != nil {
+			continue
+		}
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			if !entry.IsDir() {
+				continue
+			}
+			version := entry.Name()
+			sourceDir := filepath.Join(sourceRoot, version)
+			if _, err := findBinary(sourceDir, llamaBinaryName()); err != nil {
+				continue
+			}
+			targetDir := filepath.Join(targetRoot, version)
+			if err := copyDir(sourceDir, targetDir); err != nil {
+				return "", "", err
+			}
+			binary, err := findBinary(targetDir, llamaBinaryName())
+			if err != nil {
+				return "", "", err
+			}
+			_ = os.Chmod(binary, 0o755)
+			return binary, version, nil
+		}
+	}
+	return "", "", fmt.Errorf("runtime is not installed")
+}
+
+func legacyCacheDirs() []string {
+	var dirs []string
+	if configured := strings.TrimSpace(os.Getenv("CMESH_LLAMA_CPP_LEGACY_CACHE_DIRS")); configured != "" {
+		for _, item := range filepath.SplitList(configured) {
+			if strings.TrimSpace(item) != "" {
+				dirs = append(dirs, strings.TrimSpace(item))
+			}
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
+		switch runtime.GOOS {
+		case "darwin":
+			dirs = append(dirs, filepath.Join(home, "Library", "Caches", "cmesh", "cache"))
+		case "windows":
+			if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+				dirs = append(dirs, filepath.Join(localAppData, "cmesh", "cache"))
+			}
+			dirs = append(dirs, filepath.Join(home, "AppData", "Local", "cmesh", "cache"))
+		default:
+			if xdgCache := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); xdgCache != "" {
+				dirs = append(dirs, filepath.Join(xdgCache, "cmesh", "cache"))
+			}
+			dirs = append(dirs, filepath.Join(home, ".cache", "cmesh", "cache"))
+		}
+	}
+	return dirs
+}
+
+func copyDir(source string, target string) error {
+	if err := os.RemoveAll(target); err != nil {
+		return err
+	}
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(target, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(dst, info.Mode().Perm())
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, dst)
+		}
+		return copyFile(path, dst, info.Mode().Perm())
+	})
+}
+
+func copyFile(source string, target string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	src, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		return err
+	}
+	return dst.Close()
 }
 
 func findBinary(root string, name string) (string, error) {
