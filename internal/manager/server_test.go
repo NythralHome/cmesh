@@ -1837,6 +1837,26 @@ func TestModelInstallExplainsNoEligibleWorker(t *testing.T) {
 	}
 }
 
+func TestModelInstallRejectsWorkerWithLowFreeDisk(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "full-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 16 * gb, FreeBytes: 512 * 1024 * 1024},
+	})
+
+	installReq := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/install", bytes.NewReader([]byte(`{}`)))
+	installRec := httptest.NewRecorder()
+	srv.ServeHTTP(installRec, installReq)
+	if installRec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", installRec.Code, installRec.Body.String())
+	}
+	if !strings.Contains(installRec.Body.String(), "free disk short") {
+		t.Fatalf("expected free disk explanation, got %q", installRec.Body.String())
+	}
+}
+
 func TestModelGenerateRequiresPrompt(t *testing.T) {
 	srv := NewServer(":0", NewState())
 

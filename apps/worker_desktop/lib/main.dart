@@ -725,6 +725,10 @@ class WorkerJobStatus {
     this.input = '',
     this.result = '',
     this.error = '',
+    this.progressBytes = 0,
+    this.totalBytes = 0,
+    this.progressPercent = 0,
+    this.progressLabel = '',
     this.startedAt,
     this.finishedAt,
     this.updatedAt,
@@ -737,6 +741,10 @@ class WorkerJobStatus {
   final String input;
   final String result;
   final String error;
+  final int progressBytes;
+  final int totalBytes;
+  final double progressPercent;
+  final String progressLabel;
   final DateTime? startedAt;
   final DateTime? finishedAt;
   final DateTime? updatedAt;
@@ -750,6 +758,10 @@ class WorkerJobStatus {
       input: json['input'] as String? ?? '',
       result: json['result'] as String? ?? '',
       error: json['error'] as String? ?? '',
+      progressBytes: (json['progress_bytes'] as num?)?.toInt() ?? 0,
+      totalBytes: (json['total_bytes'] as num?)?.toInt() ?? 0,
+      progressPercent: (json['progress_percent'] as num?)?.toDouble() ?? 0,
+      progressLabel: json['progress_label'] as String? ?? '',
       startedAt: _parseOptionalDate(json['started_at']),
       finishedAt: _parseOptionalDate(json['finished_at']),
       updatedAt: _parseOptionalDate(json['updated_at']),
@@ -779,6 +791,8 @@ class WorkerJobStatus {
   }
 
   bool get hasJob => jobId.isNotEmpty;
+
+  bool get hasProgress => progressBytes > 0 || totalBytes > 0;
 
   String get label {
     switch (state) {
@@ -3121,6 +3135,10 @@ class _WorkerJobStatusCard extends StatelessWidget {
         : _formatJobTime(current?.finishedAt ?? current?.updatedAt);
     final hasTime = timeValue != '-';
     final hasStructuredDetails = hasType || hasTime;
+    final hasProgress = current?.hasProgress == true;
+    final progressValue = current == null || current.totalBytes <= 0
+        ? null
+        : (current.progressBytes / current.totalBytes).clamp(0.0, 1.0);
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -3148,6 +3166,19 @@ class _WorkerJobStatusCard extends StatelessWidget {
           _StatusLine(label: 'Job', value: hasJob ? current!.jobId : '-'),
           if (hasType) _StatusLine(label: 'Type', value: current!.type),
           if (hasTime) _StatusLine(label: timeLabel, value: timeValue),
+          if (hasProgress) ...[
+            const SizedBox(height: 10),
+            LinearProgressIndicator(value: progressValue),
+            const SizedBox(height: 6),
+            Text(
+              _formatProgress(current!),
+              style: TextStyle(
+                color: colors.onSurfaceVariant,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
           if (hasJob && !hasStructuredDetails)
             Padding(
               padding: const EdgeInsets.only(top: 8),
@@ -3183,6 +3214,18 @@ class _WorkerJobStatusCard extends StatelessWidget {
         '${local.hour.toString().padLeft(2, '0')}:'
         '${local.minute.toString().padLeft(2, '0')}:'
         '${local.second.toString().padLeft(2, '0')}';
+  }
+
+  String _formatProgress(WorkerJobStatus status) {
+    final label = status.progressLabel.isEmpty
+        ? 'Progress'
+        : status.progressLabel;
+    final current = WorkerInstalledModel.formatBytes(status.progressBytes);
+    final total = WorkerInstalledModel.formatBytes(status.totalBytes);
+    if (status.totalBytes > 0) {
+      return '$label · ${status.progressPercent.toStringAsFixed(1)}% · $current / $total';
+    }
+    return '$label · $current downloaded';
   }
 
   String _shortResult(String value) {

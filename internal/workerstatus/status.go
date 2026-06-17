@@ -11,16 +11,20 @@ import (
 const FileName = "worker-job-status.json"
 
 type JobStatus struct {
-	State      string     `json:"state"`
-	NodeID     string     `json:"node_id,omitempty"`
-	JobID      string     `json:"job_id,omitempty"`
-	Type       string     `json:"type,omitempty"`
-	Input      string     `json:"input,omitempty"`
-	Result     string     `json:"result,omitempty"`
-	Error      string     `json:"error,omitempty"`
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	State           string     `json:"state"`
+	NodeID          string     `json:"node_id,omitempty"`
+	JobID           string     `json:"job_id,omitempty"`
+	Type            string     `json:"type,omitempty"`
+	Input           string     `json:"input,omitempty"`
+	Result          string     `json:"result,omitempty"`
+	Error           string     `json:"error,omitempty"`
+	ProgressBytes   int64      `json:"progress_bytes,omitempty"`
+	TotalBytes      int64      `json:"total_bytes,omitempty"`
+	ProgressPercent float64    `json:"progress_percent,omitempty"`
+	ProgressLabel   string     `json:"progress_label,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 func Path(cacheDir string) string {

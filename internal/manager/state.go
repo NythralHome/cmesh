@@ -697,6 +697,9 @@ func nodeMeetsRequirements(node cluster.Node, req jobs.Requirements) bool {
 	if req.DiskBytes > 0 && node.Resources.Storage.AllowedBytes < req.DiskBytes {
 		return false
 	}
+	if req.DiskBytes > 0 && node.Resources.Storage.FreeBytes > 0 && node.Resources.Storage.FreeBytes < req.DiskBytes {
+		return false
+	}
 	if !req.GPURequired && req.VRAMBytes == 0 {
 		return true
 	}

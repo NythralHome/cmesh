@@ -75,7 +75,10 @@ type GPUResources struct {
 }
 
 type StorageResources struct {
-	TotalBytes   uint64 `json:"total_bytes"`
-	AllowedBytes uint64 `json:"allowed_bytes"`
-	FreeBytes    uint64 `json:"free_bytes"`
+	TotalBytes          uint64 `json:"total_bytes"`
+	AllowedBytes        uint64 `json:"allowed_bytes"`
+	FreeBytes           uint64 `json:"free_bytes"`
+	UsedByModelsBytes   uint64 `json:"used_by_models_bytes,omitempty"`
+	UsedByRuntimesBytes uint64 `json:"used_by_runtimes_bytes,omitempty"`
+	UsedByCacheBytes    uint64 `json:"used_by_cache_bytes,omitempty"`
 }

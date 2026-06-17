@@ -769,7 +769,7 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapsh
 		fmt.Fprintf(os.Stderr, "failed to write worker job status: %v\n", err)
 	}
 
-	result, jobErr := executeJobWithRuntime(*resp.Job, snapshot, cacheDir)
+	result, jobErr := executeWorkerJob(*resp.Job, snapshot, cacheDir, nodeID, startedAt)
 	complete := jobs.CompleteRequest{
 		NodeID: nodeID,
 		Result: result,
@@ -842,6 +842,10 @@ func executeJobWithResources(job jobs.Job, snapshot cluster.ResourceSnapshot) (s
 }
 
 func executeJobWithRuntime(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir string) (string, error) {
+	return executeWorkerJob(job, snapshot, cacheDir, "", time.Time{})
+}
+
+func executeWorkerJob(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir string, nodeID string, startedAt time.Time) (string, error) {
 	if err := validateWorkerCanRunJob(job, snapshot); err != nil {
 		return "", err
 	}
@@ -851,13 +855,48 @@ func executeJobWithRuntime(job jobs.Job, snapshot cluster.ResourceSnapshot, cach
 	case "compute.matrix_multiply":
 		return executeMatrixMultiplyJob(job.Input)
 	case models.JobInstall:
-		return executeModelInstallJob(job.Input, cacheDir)
+		return executeModelInstallJob(job.Input, cacheDir, modelInstallProgressWriter(cacheDir, nodeID, job, startedAt))
 	case models.JobDelete:
 		return executeModelDeleteJob(job.Input, cacheDir)
 	case models.JobGenerate:
 		return executeModelGenerateJob(job.Input, cacheDir)
 	default:
 		return "", fmt.Errorf("unsupported job type %q", job.Type)
+	}
+}
+
+func modelInstallProgressWriter(cacheDir string, nodeID string, job jobs.Job, startedAt time.Time) func(int64, int64) {
+	if strings.TrimSpace(cacheDir) == "" || strings.TrimSpace(nodeID) == "" || startedAt.IsZero() {
+		return nil
+	}
+	lastWrite := time.Time{}
+	return func(written int64, total int64) {
+		now := time.Now().UTC()
+		if !lastWrite.IsZero() && now.Sub(lastWrite) < time.Second && written != total {
+			return
+		}
+		lastWrite = now
+		percent := 0.0
+		if total > 0 {
+			percent = (float64(written) / float64(total)) * 100
+			if percent > 100 {
+				percent = 100
+			}
+		}
+		if err := workerstatus.Write(cacheDir, workerstatus.JobStatus{
+			State:           "running",
+			NodeID:          nodeID,
+			JobID:           job.ID,
+			Type:            job.Type,
+			Input:           job.Input,
+			ProgressBytes:   written,
+			TotalBytes:      total,
+			ProgressPercent: percent,
+			ProgressLabel:   "Downloading model",
+			StartedAt:       &startedAt,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write model install progress: %v\n", err)
+		}
 	}
 }
 
@@ -918,7 +957,7 @@ type modelGenerateResult struct {
 	RuntimeVersion string `json:"runtime_version,omitempty"`
 }
 
-func executeModelInstallJob(input string, cacheDir string) (string, error) {
+func executeModelInstallJob(input string, cacheDir string, progress func(int64, int64)) (string, error) {
 	var req models.InstallInput
 	if err := json.Unmarshal([]byte(input), &req); err != nil {
 		return "", fmt.Errorf("invalid model install input: %w", err)
@@ -944,11 +983,23 @@ func executeModelInstallJob(input string, cacheDir string) (string, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("model download returned %s", resp.Status)
 	}
+	totalBytes := resp.ContentLength
+	if progress != nil {
+		progress(0, totalBytes)
+	}
 	out, err := os.Create(tmp)
 	if err != nil {
 		return "", err
 	}
-	bytesWritten, copyErr := io.Copy(out, resp.Body)
+	reader := io.Reader(resp.Body)
+	if progress != nil {
+		reader = &progressReader{
+			reader:   resp.Body,
+			total:    totalBytes,
+			progress: progress,
+		}
+	}
+	bytesWritten, copyErr := io.Copy(out, reader)
 	closeErr := out.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmp)
@@ -966,7 +1017,26 @@ func executeModelInstallJob(input string, cacheDir string) (string, error) {
 		_ = os.Remove(tmp)
 		return "", err
 	}
+	if progress != nil {
+		progress(bytesWritten, totalBytes)
+	}
 	return marshalModelInstallResult(model, path, bytesWritten)
+}
+
+type progressReader struct {
+	reader   io.Reader
+	written  int64
+	total    int64
+	progress func(int64, int64)
+}
+
+func (r *progressReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		r.written += int64(n)
+		r.progress(r.written, r.total)
+	}
+	return n, err
 }
 
 func marshalModelInstallResult(model models.Model, path string, size int64) (string, error) {

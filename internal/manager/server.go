@@ -3206,7 +3206,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <td><span class="pill">{{.Status}}</span><br><span class="sub">heartbeat {{heartbeatAge .UpdatedAt}}</span></td>
               <td>{{.Resources.CPU.CoresAllowed}} / {{.Resources.CPU.CoresTotal}} cores</td>
               <td>{{printf "%.1f" (gb .Resources.Memory.AllowedBytes)}} / {{printf "%.1f" (gb .Resources.Memory.TotalBytes)}} GB</td>
-              <td>{{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed<br><span class="sub">{{printf "%.1f" (gb .Resources.Storage.FreeBytes)}} GB free</span></td>
+              <td>
+                {{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed<br>
+                <span class="sub">{{printf "%.1f" (gb .Resources.Storage.FreeBytes)}} GB free</span><br>
+                <span class="sub">CMesh {{printf "%.1f" (gb .Resources.Storage.UsedByCacheBytes)}} GB</span><br>
+                <span class="sub">models {{printf "%.1f" (gb .Resources.Storage.UsedByModelsBytes)}} GB · runtimes {{printf "%.1f" (gb .Resources.Storage.UsedByRuntimesBytes)}} GB</span>
+              </td>
               <td>
                 {{range .Resources.Models}}
                   <div><strong>{{.Name}}</strong><br><span class="sub">{{printf "%.0f" (mb .Bytes)}} MB</span></div>

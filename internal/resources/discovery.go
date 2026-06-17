@@ -28,6 +28,7 @@ func DiscoverLocal(options DiscoveryOptions) cluster.ResourceSnapshot {
 
 	totalMemory := discoverTotalMemory()
 	totalStorage, freeStorage := discoverDisk(options.CacheDir)
+	storageUsage := discoverCMeshStorageUsage(options.CacheDir)
 
 	return cluster.ResourceSnapshot{
 		CPU: cluster.CPUResources{
@@ -40,14 +41,60 @@ func DiscoverLocal(options DiscoveryOptions) cluster.ResourceSnapshot {
 		},
 		GPU: discoverGPUs(options.Limits),
 		Storage: cluster.StorageResources{
-			TotalBytes:   totalStorage,
-			AllowedBytes: allowedBytes(options.Limits.DiskBytes, freeStorage),
-			FreeBytes:    freeStorage,
+			TotalBytes:          totalStorage,
+			AllowedBytes:        allowedBytes(options.Limits.DiskBytes, freeStorage),
+			FreeBytes:           freeStorage,
+			UsedByModelsBytes:   storageUsage.ModelsBytes,
+			UsedByRuntimesBytes: storageUsage.RuntimesBytes,
+			UsedByCacheBytes:    storageUsage.TotalBytes,
 		},
 		JobSlots: allowedInt(options.Limits.JobSlots, 1),
 		Models:   DiscoverInstalledModels(options.CacheDir),
 		Runtimes: DiscoverRuntimes(options.CacheDir),
 	}
+}
+
+type CMeshStorageUsage struct {
+	ModelsBytes   uint64
+	RuntimesBytes uint64
+	TotalBytes    uint64
+}
+
+func discoverCMeshStorageUsage(cacheDir string) CMeshStorageUsage {
+	cacheDir = strings.TrimSpace(cacheDir)
+	if cacheDir == "" {
+		return CMeshStorageUsage{}
+	}
+	modelsBytes := directorySize(filepath.Join(cacheDir, "models"))
+	runtimesBytes := directorySize(filepath.Join(cacheDir, "runtimes"))
+	totalBytes := directorySize(cacheDir)
+	return CMeshStorageUsage{
+		ModelsBytes:   modelsBytes,
+		RuntimesBytes: runtimesBytes,
+		TotalBytes:    totalBytes,
+	}
+}
+
+func directorySize(path string) uint64 {
+	var total uint64
+	err := filepath.WalkDir(path, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() <= 0 {
+			return nil
+		}
+		total += uint64(info.Size())
+		return nil
+	})
+	if err != nil {
+		return 0
+	}
+	return total
 }
 
 func DiscoverRuntimes(cacheDir string) []cluster.RuntimeResource {
