@@ -3188,13 +3188,13 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         {{if gt (installedModelCount .Models) 0}}
         {{range .Models}}
         {{if .InstalledOn}}
-        <article class="installed-model" data-model-id="{{.Model.ID}}">
+        <article class="installed-model" data-model-id="{{.Model.ID}}" data-model-surface="installed">
           <div class="model-title">
             <div>
               <h3>{{.Model.Name}}</h3>
               <p class="sub">{{.Model.Parameters}} / {{.Model.Quant}} · {{printf "%.1f" (gb .Model.DiskBytes)}} GB catalog disk</p>
             </div>
-            <span class="{{modelStatusClass .Status}}">{{.Status}}</span>
+            <span class="{{modelStatusClass .Status}}" data-model-status="{{.Model.ID}}">{{.Status}}</span>
           </div>
           <p class="sub">Installed on {{range $index, $nodeID := .InstalledOn}}{{if $index}}, {{end}}<code>{{nodeLabel $.NodesByID $nodeID}}</code>{{end}}</p>
           <div class="model-actions">
@@ -3217,13 +3217,13 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
       <div class="model-catalog">
           {{range .Models}}
-          <article class="model-card" data-model-id="{{.Model.ID}}">
+          <article class="model-card" data-model-id="{{.Model.ID}}" data-model-surface="catalog">
             <div class="model-title">
               <div>
                 <h3>{{.Model.Name}}</h3>
                 <p class="sub">{{.Model.Description}}</p>
               </div>
-              <span class="{{modelStatusClass .Status}}">{{.Status}}</span>
+              <span class="{{modelStatusClass .Status}}" data-model-status="{{.Model.ID}}">{{.Status}}</span>
             </div>
             <div class="model-specs">
               <div><span>Model</span><strong>{{.Model.Parameters}} / {{.Model.Quant}}</strong></div>
@@ -3661,9 +3661,60 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(value);
       return String(value || "").replace(/"/g, '\\"');
     }
-    function modelCardFor(modelID) {
-      if (!modelID) return null;
-      return document.querySelector('[data-model-id="' + cssIdent(modelID) + '"]');
+    function modelCardsFor(modelID) {
+      if (!modelID) return [];
+      return Array.prototype.slice.call(document.querySelectorAll('[data-model-id="' + cssIdent(modelID) + '"]'));
+    }
+    function setModelButtons(modelID, disabled) {
+      modelCardsFor(modelID).forEach(function(card) {
+        card.querySelectorAll(".model-install, .model-delete").forEach(function(button) {
+          button.disabled = disabled;
+        });
+      });
+    }
+    function modelStatusClass(status) {
+      if (status === "installed") return "pill";
+      if (status === "installing" || status === "deleting") return "pill pill-job";
+      return "pill pill-muted";
+    }
+    function updateModelStatus(summary) {
+      if (!summary || !summary.model || !summary.model.id) return;
+      var modelID = summary.model.id;
+      document.querySelectorAll('[data-model-status="' + cssIdent(modelID) + '"]').forEach(function(statusElement) {
+        statusElement.textContent = summary.status || "available";
+        statusElement.className = modelStatusClass(summary.status || "available");
+      });
+      modelCardsFor(modelID).forEach(function(card) {
+        if (card.getAttribute("data-model-surface") === "installed") {
+          card.hidden = !(summary.installed_on && summary.installed_on.length);
+        }
+        var install = card.querySelector(".model-install");
+        if (install) {
+          install.disabled = summary.status !== "available" || !(summary.capable_nodes > 0);
+          setButtonText(install, "Install");
+        }
+        card.querySelectorAll(".model-delete").forEach(function(button) {
+          button.disabled = !(summary.installed_on && summary.installed_on.length) || summary.status === "deleting";
+        });
+      });
+    }
+    function refreshModelSummary(modelID) {
+      if (!modelID) return Promise.resolve(null);
+      return fetch("/v1/models").then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(payload) {
+        var models = payload.models || [];
+        for (var i = 0; i < models.length; i++) {
+          if (models[i].model && models[i].model.id === modelID) {
+            updateModelStatus(models[i]);
+            return models[i];
+          }
+        }
+        return null;
+      });
     }
     function modelOperationText(job) {
       if (!job) return "Waiting for job...";
@@ -3683,39 +3734,39 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       return "Waiting for an eligible worker.";
     }
     function renderModelOperation(modelID, job, fallbackText) {
-      var card = modelCardFor(modelID);
-      if (!card) return;
-      var operation = card.querySelector(".model-operation");
-      if (!operation) {
-        operation = document.createElement("div");
-        operation.className = "model-operation";
-        card.appendChild(operation);
-      }
       var status = job ? String(job.status || "queued") : "queued";
       var jobID = job ? String(job.id || "") : "";
       var text = fallbackText || modelOperationText(job);
-      operation.innerHTML = "";
-      var title = document.createElement("strong");
-      title.textContent = "Operation " + status;
-      operation.appendChild(title);
-      if (jobID) {
-        var code = document.createElement("code");
-        code.textContent = jobID;
-        operation.appendChild(code);
-      }
-      var body = document.createElement("span");
-      body.className = "sub";
-      body.textContent = text;
-      operation.appendChild(body);
-      if (jobID && status !== "succeeded" && status !== "failed" && status !== "canceled") {
-        var cancelButton = document.createElement("button");
-        cancelButton.className = "button danger model-operation-cancel";
-        cancelButton.type = "button";
-        cancelButton.dataset.jobId = jobID;
-        cancelButton.dataset.modelId = modelID;
-        cancelButton.innerHTML = '<svg class="icon"><use href="#icon-x"></use></svg><span>Cancel</span>';
-        operation.appendChild(cancelButton);
-      }
+      modelCardsFor(modelID).forEach(function(card) {
+        var operation = card.querySelector(".model-operation");
+        if (!operation) {
+          operation = document.createElement("div");
+          operation.className = "model-operation";
+          card.appendChild(operation);
+        }
+        operation.innerHTML = "";
+        var title = document.createElement("strong");
+        title.textContent = "Operation " + status;
+        operation.appendChild(title);
+        if (jobID) {
+          var code = document.createElement("code");
+          code.textContent = jobID;
+          operation.appendChild(code);
+        }
+        var body = document.createElement("span");
+        body.className = "sub";
+        body.textContent = text;
+        operation.appendChild(body);
+        if (jobID && status !== "succeeded" && status !== "failed" && status !== "canceled") {
+          var cancelButton = document.createElement("button");
+          cancelButton.className = "button danger model-operation-cancel";
+          cancelButton.type = "button";
+          cancelButton.dataset.jobId = jobID;
+          cancelButton.dataset.modelId = modelID;
+          cancelButton.innerHTML = '<svg class="icon"><use href="#icon-x"></use></svg><span>Cancel</span>';
+          operation.appendChild(cancelButton);
+        }
+      });
     }
     document.addEventListener("click", function(event) {
       var button = event.target.closest ? event.target.closest(".model-operation-cancel") : null;
@@ -3734,7 +3785,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         return response.json();
       }).then(function(job) {
         renderModelOperation(modelID, job, "Canceled by operator.");
-        setTimeout(function() { window.location.reload(); }, 900);
+        refreshModelSummary(modelID);
       }).catch(function(error) {
         button.disabled = false;
         setButtonText(button, "Cancel");
@@ -3751,7 +3802,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       }).then(function(job) {
         renderModelOperation(modelID, job);
         if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
-          setTimeout(function() { window.location.reload(); }, 900);
+          refreshModelSummary(modelID).catch(function(error) {
+            renderModelOperation(modelID, job, modelOperationText(job) + " Refresh failed: " + error.message);
+          });
           return;
         }
         if (attempt < 240) {
@@ -3765,7 +3818,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       button.addEventListener("click", function() {
         var modelID = button.dataset.modelId;
         if (!modelID) return;
-        button.disabled = true;
+        setModelButtons(modelID, true);
         setButtonText(button, "Installing...");
         fetch("/v1/models/" + encodeURIComponent(modelID) + "/install", {
           method: "POST",
@@ -3780,11 +3833,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           var statusElement = document.getElementById("model-status");
           if (statusElement) statusElement.innerText = "Install job " + job.id + " submitted.";
           renderModelOperation(modelID, job, "Install submitted.");
+          refreshModelSummary(modelID);
           pollModelLifecycleJob(modelID, job.id, 0);
         }).catch(function(error) {
-          button.disabled = false;
+          refreshModelSummary(modelID).catch(function() { setModelButtons(modelID, false); });
           setButtonText(button, "Install");
-          alert("Install failed: " + error.message);
+          renderModelOperation(modelID, null, "Install failed: " + error.message);
         });
       });
     });
@@ -3793,7 +3847,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         var modelID = button.dataset.modelId;
         var nodeID = button.dataset.nodeId;
         if (!modelID || !nodeID) return;
-        button.disabled = true;
+        var originalText = button.textContent.trim() || "Delete";
+        setModelButtons(modelID, true);
         setButtonText(button, "Deleting...");
         fetch("/v1/models/" + encodeURIComponent(modelID) + "/delete", {
           method: "POST",
@@ -3808,11 +3863,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           var statusElement = document.getElementById("model-status");
           if (statusElement) statusElement.innerText = "Delete job " + job.id + " submitted.";
           renderModelOperation(modelID, job, "Delete submitted.");
+          refreshModelSummary(modelID);
           pollModelLifecycleJob(modelID, job.id, 0);
         }).catch(function(error) {
-          button.disabled = false;
-          setButtonText(button, "Delete");
-          alert("Delete failed: " + error.message);
+          refreshModelSummary(modelID).catch(function() { setModelButtons(modelID, false); });
+          setButtonText(button, originalText);
+          renderModelOperation(modelID, null, "Delete failed: " + error.message);
         });
       });
     });
