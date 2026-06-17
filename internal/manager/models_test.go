@@ -110,3 +110,49 @@ func TestModelSummariesIgnoreStaleInstallJobWithoutInventory(t *testing.T) {
 		t.Fatalf("expected no installed nodes, got %#v", summaries[0].InstalledOn)
 	}
 }
+
+func TestModelCapabilitiesReportBusyJobSlots(t *testing.T) {
+	catalog := []models.Model{{
+		ID:          "qwen-test",
+		Name:        "Qwen Test",
+		MemoryBytes: 1 * gb,
+		DiskBytes:   1 * gb,
+	}}
+	nodes := []cluster.Node{
+		{
+			ID:     "node-busy",
+			Name:   "busy-worker",
+			Role:   cluster.NodeRoleWorker,
+			Status: cluster.NodeStatusOnline,
+			Resources: cluster.ResourceSnapshot{
+				CPU:      cluster.CPUResources{CoresAllowed: 4},
+				Memory:   cluster.MemoryResources{AllowedBytes: 8 * gb},
+				Storage:  cluster.StorageResources{AllowedBytes: 8 * gb},
+				JobSlots: 1,
+			},
+		},
+	}
+	runningJobs := []jobs.Job{{
+		ID:         "job-running",
+		Status:     jobs.StatusRunning,
+		AssignedTo: "node-busy",
+	}}
+
+	summaries := modelSummaries(catalog, runningJobs, nodes)
+	if summaries[0].CapableNodes != 0 {
+		t.Fatalf("expected busy worker not to count as capable, got %d", summaries[0].CapableNodes)
+	}
+	if len(summaries[0].Capabilities) != 1 {
+		t.Fatalf("expected one capability, got %#v", summaries[0].Capabilities)
+	}
+	capability := summaries[0].Capabilities[0]
+	if capability.Capable {
+		t.Fatalf("expected busy worker to be blocked")
+	}
+	if capability.ActiveJobs != 1 || capability.JobSlots != 1 {
+		t.Fatalf("expected active slot metadata, got %#v", capability)
+	}
+	if len(capability.Reasons) != 1 || capability.Reasons[0] != "all job slots busy (1/1)" {
+		t.Fatalf("expected busy slot reason, got %#v", capability.Reasons)
+	}
+}

@@ -1616,6 +1616,27 @@ func TestModelCatalogAndInstallJob(t *testing.T) {
 	}
 }
 
+func TestModelInstallExplainsNoEligibleWorker(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "tiny-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 2, CoresAllowed: 1},
+		Memory:  cluster.MemoryResources{TotalBytes: 2 * gb, AllowedBytes: 1 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 8 * gb, AllowedBytes: 1 * gb, FreeBytes: 1 * gb},
+	})
+
+	installReq := httptest.NewRequest(http.MethodPost, "/v1/models/gemma-3-12b-it-q4-k-m/install", bytes.NewReader([]byte(`{}`)))
+	installRec := httptest.NewRecorder()
+	srv.ServeHTTP(installRec, installReq)
+	if installRec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", installRec.Code, installRec.Body.String())
+	}
+	body := installRec.Body.String()
+	if !strings.Contains(body, "no eligible worker") || !strings.Contains(body, "RAM short") || !strings.Contains(body, "disk short") {
+		t.Fatalf("expected actionable eligibility explanation, got %q", body)
+	}
+}
+
 func TestModelGenerateRequiresPrompt(t *testing.T) {
 	srv := NewServer(":0", NewState())
 

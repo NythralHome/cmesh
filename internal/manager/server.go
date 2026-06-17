@@ -571,6 +571,15 @@ func (s *Server) handleModelInstall(w http.ResponseWriter, r *http.Request, mode
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
+	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
+	if len(summaries) == 0 {
+		http.Error(w, "model is not available", http.StatusNotFound)
+		return
+	}
+	if ok, reason := modelInstallEligibility(summaries[0], req.NodeID); !ok {
+		http.Error(w, "no eligible worker for model install: "+reason, http.StatusConflict)
+		return
+	}
 	input, err := json.Marshal(models.InstallInput{ModelID: model.ID})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -3046,9 +3055,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <div class="capability-row">
                 <strong>{{.Name}}</strong>
                 {{if .Capable}}
-                <span>ready · {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM · {{printf "%.1f" (gb .AllowedStorageBytes)}} GB disk{{if gt .AllowedVRAMBytes 0}} · {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
+                <span>ready · jobs {{.ActiveJobs}}/{{.JobSlots}} · {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM · {{printf "%.1f" (gb .AllowedStorageBytes)}} GB disk{{if gt .AllowedVRAMBytes 0}} · {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
                 {{else}}
-                <span>{{range $index, $reason := .Reasons}}{{if $index}}; {{end}}{{$reason}}{{end}} · has {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM / {{printf "%.1f" (gb .AllowedStorageBytes)}} GB disk{{if gt .AllowedVRAMBytes 0}} / {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
+                <span>{{range $index, $reason := .Reasons}}{{if $index}}; {{end}}{{$reason}}{{end}} · jobs {{.ActiveJobs}}/{{.JobSlots}} · has {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM / {{printf "%.1f" (gb .AllowedStorageBytes)}} GB disk{{if gt .AllowedVRAMBytes 0}} / {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
                 {{end}}
               </div>
               {{end}}
@@ -3081,7 +3090,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <th>Job</th>
               <th>Status</th>
               <th>Workload</th>
+              <th>Requirements</th>
               <th>Worker</th>
+              <th>Timeline</th>
               <th>Result</th>
             </tr>
           </thead>
@@ -3091,7 +3102,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <td><code>{{shortID .ID}}</code><br><span class="sub">{{.Type}}</span></td>
               <td><span class="{{jobPillClass .Status}}">{{.Status}}</span></td>
               <td><code>{{clip (jobWorkload .) 90}}</code></td>
+              <td><code>{{jobRequirements .}}</code></td>
               <td><code>{{jobWorkerLabel $.NodesByID .}}</code></td>
+              <td><div class="timeline">{{jobTimeline .}}<br>attempt {{.Attempts}} / {{.MaxAttempts}}{{if .LastFailure}}<br>{{.LastFailure}}{{end}}</div></td>
               <td class="mono-output"><code>{{clip (jobDetail .) 160}}</code></td>
             </tr>
           {{end}}{{end}}

@@ -31,6 +31,8 @@ type ModelCapability struct {
 	AllowedMemoryBytes  uint64   `json:"allowed_memory_bytes"`
 	AllowedStorageBytes uint64   `json:"allowed_storage_bytes"`
 	AllowedVRAMBytes    uint64   `json:"allowed_vram_bytes,omitempty"`
+	ActiveJobs          int      `json:"active_jobs"`
+	JobSlots            int      `json:"job_slots"`
 	Reasons             []string `json:"reasons,omitempty"`
 }
 
@@ -44,7 +46,7 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 		summary := ModelSummary{
 			Model:        model,
 			Status:       "available",
-			Capabilities: modelCapabilities(model, nodes),
+			Capabilities: modelCapabilities(model, nodes, jobsList),
 		}
 		summary.CapableNodes = capableModelNodes(summary.Capabilities)
 		installed := make(map[string]bool)
@@ -95,7 +97,7 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 	return out
 }
 
-func modelCapabilities(model models.Model, nodes []cluster.Node) []ModelCapability {
+func modelCapabilities(model models.Model, nodes []cluster.Node, jobsList []jobs.Job) []ModelCapability {
 	out := make([]ModelCapability, 0, len(nodes))
 	for _, node := range nodes {
 		if node.Role != cluster.NodeRoleWorker || node.Status != cluster.NodeStatusOnline {
@@ -107,6 +109,8 @@ func modelCapabilities(model models.Model, nodes []cluster.Node) []ModelCapabili
 			AllowedMemoryBytes:  node.Resources.Memory.AllowedBytes,
 			AllowedStorageBytes: node.Resources.Storage.AllowedBytes,
 			AllowedVRAMBytes:    maxAllowedVRAM(node.Resources.GPU),
+			ActiveJobs:          activeModelJobsForNode(jobsList, node.ID),
+			JobSlots:            workerJobSlots(node),
 		}
 		if strings.TrimSpace(item.Name) == "" {
 			item.Name = node.ID
@@ -120,6 +124,9 @@ func modelCapabilities(model models.Model, nodes []cluster.Node) []ModelCapabili
 		if model.VRAMBytes > 0 && !hasAllowedVRAM(node.Resources.GPU, model.VRAMBytes) {
 			item.Reasons = append(item.Reasons, fmt.Sprintf("VRAM short by %.1f GB", gbDiff(model.VRAMBytes, item.AllowedVRAMBytes)))
 		}
+		if item.JobSlots > 0 && item.ActiveJobs >= item.JobSlots {
+			item.Reasons = append(item.Reasons, fmt.Sprintf("all job slots busy (%d/%d)", item.ActiveJobs, item.JobSlots))
+		}
 		item.Capable = len(item.Reasons) == 0
 		out = append(out, item)
 	}
@@ -130,6 +137,19 @@ func modelCapabilities(model models.Model, nodes []cluster.Node) []ModelCapabili
 		return out[i].Name < out[j].Name
 	})
 	return out
+}
+
+func activeModelJobsForNode(jobsList []jobs.Job, nodeID string) int {
+	var total int
+	for _, job := range jobsList {
+		if job.AssignedTo != nodeID {
+			continue
+		}
+		if job.Status == jobs.StatusQueued || job.Status == jobs.StatusScheduled || job.Status == jobs.StatusRunning {
+			total++
+		}
+	}
+	return total
 }
 
 func capableModelNodes(capabilities []ModelCapability) int {
@@ -204,4 +224,38 @@ func findModelSummary(summaries []ModelSummary, modelID string) (ModelSummary, b
 		}
 	}
 	return ModelSummary{}, false
+}
+
+func modelInstallEligibility(summary ModelSummary, nodeID string) (bool, string) {
+	if nodeID != "" {
+		for _, capability := range summary.Capabilities {
+			if capability.NodeID != nodeID {
+				continue
+			}
+			if capability.Capable {
+				return true, ""
+			}
+			return false, capability.Name + ": " + strings.Join(capability.Reasons, "; ")
+		}
+		return false, "selected worker is not online or does not exist"
+	}
+	if summary.CapableNodes > 0 {
+		return true, ""
+	}
+	if len(summary.Capabilities) == 0 {
+		return false, "no online workers are reporting resources"
+	}
+	reasons := make([]string, 0, len(summary.Capabilities))
+	for _, capability := range summary.Capabilities {
+		if capability.Capable {
+			continue
+		}
+		reason := strings.Join(capability.Reasons, "; ")
+		if reason == "" {
+			reason = "not eligible"
+		}
+		reasons = append(reasons, capability.Name+": "+reason)
+	}
+	sort.Strings(reasons)
+	return false, strings.Join(reasons, " | ")
 }
