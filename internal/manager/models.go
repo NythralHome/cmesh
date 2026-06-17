@@ -17,12 +17,23 @@ type ModelSummary struct {
 	Status        string            `json:"status"`
 	InstalledOn   []string          `json:"installed_on"`
 	GeneratableOn []string          `json:"generatable_on,omitempty"`
+	Installed     []ModelInstall    `json:"installed,omitempty"`
 	ActiveJobID   string            `json:"active_job_id,omitempty"`
 	LastJobID     string            `json:"last_job_id,omitempty"`
 	LastError     string            `json:"last_error,omitempty"`
 	LastUpdated   time.Time         `json:"last_updated,omitempty"`
 	CapableNodes  int               `json:"capable_nodes"`
 	Capabilities  []ModelCapability `json:"capabilities,omitempty"`
+}
+
+type ModelInstall struct {
+	NodeID        string                  `json:"node_id"`
+	NodeName      string                  `json:"node_name"`
+	Path          string                  `json:"path"`
+	Bytes         uint64                  `json:"bytes"`
+	Runtime       string                  `json:"runtime"`
+	RuntimeReady  bool                    `json:"runtime_ready"`
+	RuntimeStatus cluster.RuntimeResource `json:"runtime_status,omitempty"`
 }
 
 type ModelCapability struct {
@@ -59,7 +70,17 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 			for _, installedModel := range node.Resources.Models {
 				if installedModel.ID == model.ID {
 					installed[node.ID] = true
-					if nodeRuntimeReady(node, string(model.Runtime)) {
+					runtimeStatus, runtimeReady := nodeRuntimeStatus(node, string(model.Runtime))
+					summary.Installed = append(summary.Installed, ModelInstall{
+						NodeID:        node.ID,
+						NodeName:      nodeDisplayName(node),
+						Path:          installedModel.Path,
+						Bytes:         installedModel.Bytes,
+						Runtime:       string(model.Runtime),
+						RuntimeReady:  runtimeReady,
+						RuntimeStatus: runtimeStatus,
+					})
+					if runtimeReady {
 						summary.GeneratableOn = append(summary.GeneratableOn, node.ID)
 					}
 				}
@@ -95,6 +116,12 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 		}
 		sort.Strings(summary.InstalledOn)
 		sort.Strings(summary.GeneratableOn)
+		sort.Slice(summary.Installed, func(i, j int) bool {
+			if summary.Installed[i].NodeName == summary.Installed[j].NodeName {
+				return summary.Installed[i].NodeID < summary.Installed[j].NodeID
+			}
+			return summary.Installed[i].NodeName < summary.Installed[j].NodeName
+		})
 		if len(summary.InstalledOn) > 0 && summary.Status == "available" {
 			summary.Status = "installed"
 		}
@@ -104,16 +131,31 @@ func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster
 }
 
 func nodeRuntimeReady(node cluster.Node, runtimeName string) bool {
+	_, ready := nodeRuntimeStatus(node, runtimeName)
+	return ready
+}
+
+func nodeRuntimeStatus(node cluster.Node, runtimeName string) (cluster.RuntimeResource, bool) {
 	runtimeName = strings.TrimSpace(runtimeName)
 	if runtimeName == "" {
-		return true
+		return cluster.RuntimeResource{Ready: true}, true
 	}
 	for _, runtime := range node.Resources.Runtimes {
 		if runtime.Name == runtimeName && runtime.Ready {
-			return true
+			return runtime, true
+		}
+		if runtime.Name == runtimeName {
+			return runtime, false
 		}
 	}
-	return false
+	return cluster.RuntimeResource{Name: runtimeName, Error: "runtime not reported"}, false
+}
+
+func nodeDisplayName(node cluster.Node) string {
+	if strings.TrimSpace(node.Name) != "" {
+		return node.Name
+	}
+	return node.ID
 }
 
 func modelCapabilities(model models.Model, nodes []cluster.Node, jobsList []jobs.Job) []ModelCapability {

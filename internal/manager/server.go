@@ -1465,6 +1465,14 @@ func installedModelCount(in []ModelSummary) int {
 	return count
 }
 
+func installedModelInstanceCount(in []ModelSummary) int {
+	count := 0
+	for _, summary := range in {
+		count += len(summary.Installed)
+	}
+	return count
+}
+
 func generatableModelCount(in []ModelSummary) int {
 	count := 0
 	for _, summary := range in {
@@ -1944,37 +1952,27 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		}
 		return percent
 	},
-	"hasActiveJobs":        hasActiveJobs,
-	"schedulerJobs":        schedulerJobs,
-	"isModelJob":           isModelJob,
-	"modelJobCount":        modelJobCount,
-	"installedModelCount":  installedModelCount,
-	"generatableCount":     generatableModelCount,
-	"modelFailureHint":     modelFailureHint,
-	"workerSlots":          workerJobSlots,
-	"jobCanCancel":         jobCanBeCanceled,
-	"jobDuration":          jobDuration,
-	"jobTimeline":          jobTimeline,
-	"jobWorkload":          jobWorkload,
-	"jobRequirements":      jobRequirements,
-	"conversationTitle":    conversationTitle,
-	"conversationSubtitle": conversationSubtitle,
-	"memoryLabel":          memoryLabel,
-	"memorySubtitle":       memorySubtitle,
-	"runtimeSummary":       runtimeSummary,
-	"heartbeatAge":         heartbeatAge,
-	"workerModelBytes":     workerModelBytes,
-	"modelInstalledOn":     modelInstalledOn,
-	"modelNodeOptions": func(nodes map[string]cluster.Node, summary ModelSummary) []cluster.Node {
-		out := make([]cluster.Node, 0, len(summary.InstalledOn))
-		for _, nodeID := range summary.InstalledOn {
-			if node, ok := nodes[nodeID]; ok {
-				out = append(out, node)
-			}
-		}
-		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-		return out
-	},
+	"hasActiveJobs":          hasActiveJobs,
+	"schedulerJobs":          schedulerJobs,
+	"isModelJob":             isModelJob,
+	"modelJobCount":          modelJobCount,
+	"installedModelCount":    installedModelCount,
+	"installedInstanceCount": installedModelInstanceCount,
+	"generatableCount":       generatableModelCount,
+	"modelFailureHint":       modelFailureHint,
+	"workerSlots":            workerJobSlots,
+	"jobCanCancel":           jobCanBeCanceled,
+	"jobDuration":            jobDuration,
+	"jobTimeline":            jobTimeline,
+	"jobWorkload":            jobWorkload,
+	"jobRequirements":        jobRequirements,
+	"conversationTitle":      conversationTitle,
+	"conversationSubtitle":   conversationSubtitle,
+	"memoryLabel":            memoryLabel,
+	"memorySubtitle":         memorySubtitle,
+	"runtimeSummary":         runtimeSummary,
+	"heartbeatAge":           heartbeatAge,
+	"workerModelBytes":       workerModelBytes,
 	"modelReadyNodeOptions": func(nodes map[string]cluster.Node, summary ModelSummary) []cluster.Node {
 		out := make([]cluster.Node, 0, len(summary.GeneratableOn))
 		for _, nodeID := range summary.GeneratableOn {
@@ -2845,10 +2843,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       gap: 12px;
+      padding: 16px;
+      background: #fbfcfd;
     }
     .installed-models {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
       gap: 12px;
       padding: 16px;
       border-bottom: 1px solid var(--line);
@@ -3068,7 +3068,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <button class="tab-button" type="button" data-tab-target="chat"><svg class="icon"><use href="#icon-send"></use></svg>Chat</button>
       <button class="tab-button" type="button" data-tab-target="memory"><svg class="icon"><use href="#icon-brain"></use></svg>Memory</button>
       <button class="tab-button" type="button" data-tab-target="conversations"><svg class="icon"><use href="#icon-terminal"></use></svg>Conversations</button>
-      <button class="tab-button" type="button" data-tab-target="models"><svg class="icon"><use href="#icon-brain"></use></svg>Models</button>
+      <button class="tab-button" type="button" data-tab-target="installed-models"><svg class="icon"><use href="#icon-download"></use></svg>Installed Models</button>
+      <button class="tab-button" type="button" data-tab-target="models"><svg class="icon"><use href="#icon-brain"></use></svg>Model Catalog</button>
       <button class="tab-button" type="button" data-tab-target="prompt-debug"><svg class="icon"><use href="#icon-terminal"></use></svg>Prompt Debug</button>
       <button class="tab-button" type="button" data-tab-target="model-activity"><svg class="icon"><use href="#icon-terminal"></use></svg>Model Activity</button>
       <button class="tab-button" type="button" data-tab-target="scheduler"><svg class="icon"><use href="#icon-chart"></use></svg>Scheduler</button>
@@ -3404,62 +3405,60 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
     </section>
     </div>
-    <div class="tab-panel" id="tab-models" hidden>
-    <section id="models">
+    <div class="tab-panel" id="tab-installed-models" hidden>
+    <section id="installed-models">
       <div class="section-head">
-        <h2>Model Catalog</h2>
-        <code>{{installedModelCount .Models}} installed / {{len .Models}} catalog entries</code>
+        <h2>Installed Models</h2>
+        <code>{{installedInstanceCount .Models}} worker installs</code>
       </div>
-      <div class="model-run-guide" aria-label="First model run">
-        <div class="model-run-step {{if .OnlineNodes}}done{{else}}current{{end}}">
-          <span class="step-index">{{if .OnlineNodes}}✓{{else}}1{{end}}</span>
-          <h3>Connect a worker</h3>
-          <p class="sub">{{if .OnlineNodes}}{{len .OnlineNodes}} online worker(s) can receive model jobs.{{else}}Install and start CMesh Worker before installing models.{{end}}</p>
-          {{if not .OnlineNodes}}<a class="button primary" href="{{.InviteURL}}"><svg class="icon"><use href="#icon-plus"></use></svg>Invite worker</a>{{else}}<button class="button" type="button" data-tab-shortcut="workers"><svg class="icon"><use href="#icon-workers"></use></svg>View workers</button>{{end}}
-        </div>
-        <div class="model-run-step {{if gt (installedModelCount .Models) 0}}done{{else if .OnlineNodes}}current{{end}}">
-          <span class="step-index">{{if gt (installedModelCount .Models) 0}}✓{{else}}2{{end}}</span>
-          <h3>Install a model</h3>
-          <p class="sub">{{if gt (installedModelCount .Models) 0}}{{installedModelCount .Models}} model(s) are installed on worker storage.{{else if .OnlineNodes}}Pick the smallest capable catalog model first, then move up.{{else}}A worker must be online before install buttons can run.{{end}}</p>
-          <button class="button" type="button" onclick="document.querySelector('.model-catalog')?.scrollIntoView({behavior:'smooth', block:'start'});"><svg class="icon"><use href="#icon-download"></use></svg>Open catalog</button>
-        </div>
-        <div class="model-run-step {{if gt (generatableCount .Models) 0}}done{{else if gt (installedModelCount .Models) 0}}current{{end}}">
-          <span class="step-index">{{if gt (generatableCount .Models) 0}}✓{{else}}3{{end}}</span>
-          <h3>Chat locally</h3>
-          <p class="sub">{{if gt (generatableCount .Models) 0}}{{generatableCount .Models}} ready model(s) can answer prompts through this manager.{{else}}The model must be installed and llama.cpp must be ready on that worker.{{end}}</p>
-          <button class="button {{if gt (generatableCount .Models) 0}}primary{{end}}" type="button" data-tab-shortcut="chat" {{if eq (generatableCount .Models) 0}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Open Chat</button>
-        </div>
-      </div>
+      {{if gt (installedInstanceCount .Models) 0}}
       <div class="installed-models">
-        {{if gt (installedModelCount .Models) 0}}
         {{range .Models}}
-        {{if .InstalledOn}}
-        <article class="installed-model" data-model-id="{{.Model.ID}}" data-model-surface="installed">
+        {{$modelID := .Model.ID}}
+        {{$modelName := .Model.Name}}
+        {{range .Installed}}
+        <article class="installed-model" data-model-id="{{$modelID}}" data-model-surface="installed">
           <div class="model-title">
             <div>
-              <h3>{{.Model.Name}}</h3>
-              <p class="sub">{{.Model.Parameters}} / {{.Model.Quant}} · {{printf "%.1f" (gb .Model.DiskBytes)}} GB catalog disk</p>
+              <h3>{{$modelName}}</h3>
+              <p class="sub"><code>{{.NodeName}}</code></p>
             </div>
-            <span class="{{modelStatusClass .Status}}" data-model-status="{{.Model.ID}}">{{.Status}}</span>
+            {{if .RuntimeReady}}<span class="pill">ready</span>{{else}}<span class="pill pill-failed">runtime blocked</span>{{end}}
           </div>
-          <p class="sub">Installed on {{range $index, $nodeID := .InstalledOn}}{{if $index}}, {{end}}<code>{{nodeLabel $.NodesByID $nodeID}}</code>{{end}}</p>
+          <div class="model-specs">
+            <div><span>Size</span><strong>{{printf "%.0f" (mb .Bytes)}} MB</strong></div>
+            <div><span>Runtime</span><strong>{{.Runtime}}</strong></div>
+            <div><span>Worker</span><strong>{{shortID .NodeID}}</strong></div>
+          </div>
+          <p class="sub">Path <code>{{.Path}}</code></p>
+          {{if .RuntimeReady}}
+          <p class="sub">Runtime ready{{if .RuntimeStatus.Version}} · {{.RuntimeStatus.Version}}{{end}}{{if .RuntimeStatus.Source}} · {{.RuntimeStatus.Source}}{{end}}</p>
+          {{else}}
+          <div class="hint">Runtime is not ready on this worker: {{if .RuntimeStatus.Error}}{{.RuntimeStatus.Error}}{{else}}not reported{{end}}</div>
+          {{end}}
           <div class="model-actions">
-            {{$modelID := .Model.ID}}
-            {{range modelNodeOptions $.NodesByID .}}
-            <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.ID}}"><svg class="icon"><use href="#icon-trash"></use></svg><span>Delete from {{.Name}}</span></button>
-            {{end}}
+            <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.NodeID}}"><svg class="icon"><use href="#icon-trash"></use></svg><span>Delete from {{.NodeName}}</span></button>
           </div>
         </article>
         {{end}}
         {{end}}
-        {{else}}
-        <div class="empty-action">
-          <div>
-            <h3>No installed models</h3>
-            <p>Install one catalog model on a capable online worker before using Chat.</p>
-          </div>
+      </div>
+      {{else}}
+      <div class="empty-action">
+        <div>
+          <h3>No installed models</h3>
+          <p>Install a catalog model on a capable online worker before using Chat.</p>
+          <button class="button primary" type="button" data-tab-shortcut="models"><svg class="icon"><use href="#icon-brain"></use></svg>Open Model Catalog</button>
         </div>
-        {{end}}
+      </div>
+      {{end}}
+    </section>
+    </div>
+    <div class="tab-panel" id="tab-models" hidden>
+    <section id="models">
+      <div class="section-head">
+        <h2>Model Catalog</h2>
+        <code>{{len .Models}} catalog entries</code>
       </div>
       <div class="model-catalog">
           {{range .Models}}

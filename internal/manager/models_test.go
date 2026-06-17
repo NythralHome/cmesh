@@ -55,7 +55,7 @@ func TestModelSummariesKeepActionableJobError(t *testing.T) {
 }
 
 func TestModelSummariesUseWorkerReportedInventory(t *testing.T) {
-	catalog := []models.Model{{ID: "qwen-test", Name: "Qwen Test"}}
+	catalog := []models.Model{{ID: "qwen-test", Name: "Qwen Test", Runtime: models.RuntimeLlamaCPP}}
 	nodes := []cluster.Node{
 		{
 			ID:     "node-online",
@@ -65,8 +65,10 @@ func TestModelSummariesUseWorkerReportedInventory(t *testing.T) {
 			Resources: cluster.ResourceSnapshot{
 				Models: []cluster.ModelResource{{ID: "qwen-test", Name: "Qwen Test", Bytes: 123}},
 				Runtimes: []cluster.RuntimeResource{{
-					Name:  "llama.cpp",
-					Ready: true,
+					Name:       "llama.cpp",
+					Ready:      true,
+					Version:    "b9672",
+					BinaryPath: "/tmp/llama-cli",
 				}},
 			},
 		},
@@ -84,6 +86,16 @@ func TestModelSummariesUseWorkerReportedInventory(t *testing.T) {
 	}
 	if len(summaries[0].GeneratableOn) != 1 || summaries[0].GeneratableOn[0] != "node-online" {
 		t.Fatalf("expected ready runtime node from inventory, got %#v", summaries[0].GeneratableOn)
+	}
+	if len(summaries[0].Installed) != 1 {
+		t.Fatalf("expected installed metadata, got %#v", summaries[0].Installed)
+	}
+	install := summaries[0].Installed[0]
+	if install.NodeID != "node-online" || install.NodeName != "worker-a" || install.Bytes != 123 {
+		t.Fatalf("unexpected installed metadata: %#v", install)
+	}
+	if !install.RuntimeReady || install.RuntimeStatus.Version != "b9672" || install.RuntimeStatus.BinaryPath != "/tmp/llama-cli" {
+		t.Fatalf("expected runtime metadata on install, got %#v", install)
 	}
 }
 
