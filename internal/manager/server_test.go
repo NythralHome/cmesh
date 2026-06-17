@@ -1698,6 +1698,52 @@ func TestDashboardShowsWorkerHealthAndRuntimeInventory(t *testing.T) {
 	}
 }
 
+func TestClusterReadinessReadyWhenRuntimeAndModelAreReady(t *testing.T) {
+	node := cluster.Node{
+		ID:     "node-ready",
+		Name:   "ready-worker",
+		Role:   cluster.NodeRoleWorker,
+		Status: cluster.NodeStatusOnline,
+		Resources: cluster.ResourceSnapshot{
+			Models: []cluster.ModelResource{{ID: "qwen-test", Name: "Qwen Test"}},
+			Runtimes: []cluster.RuntimeResource{{
+				Name:  "llama.cpp",
+				Ready: true,
+			}},
+		},
+	}
+	modelsView := modelSummaries([]models.Model{{ID: "qwen-test", Name: "Qwen Test", Runtime: "llama.cpp"}}, nil, []cluster.Node{node})
+
+	readiness := clusterReadiness([]cluster.Node{node}, modelsView, nil)
+	if readiness.Status != "ready" {
+		t.Fatalf("expected ready status, got %#v", readiness)
+	}
+	if readiness.RuntimeReadyWorkers != 1 || readiness.GeneratableModels != 1 {
+		t.Fatalf("expected ready runtime and model counts, got %#v", readiness)
+	}
+}
+
+func TestDashboardShowsReadinessTab(t *testing.T) {
+	srv := NewServer(":0", NewState())
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected dashboard status 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, expected := range []string{
+		"Cluster Readiness",
+		"No workers are online.",
+		"data-tab-target=\"readiness\"",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("expected dashboard to contain %q", expected)
+		}
+	}
+}
+
 func TestDashboardShowsSchedulerTab(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)

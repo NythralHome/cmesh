@@ -125,6 +125,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Benchmarks         map[string]NodeBenchmarkSummary
 		ClusterBenchmarks  []ClusterBenchmarkSummary
 		Models             []ModelSummary
+		Readiness          ReadinessSummary
 		NodesByID          map[string]cluster.Node
 		WorkerActiveJobs   map[string]int
 		MaxClusterGFLOPS   float64
@@ -140,6 +141,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Benchmarks:         s.state.BenchmarkSummaryByNode(),
 		ClusterBenchmarks:  clusterBenchmarks,
 		Models:             modelsView,
+		Readiness:          clusterReadiness(onlineWorkerNodes(nodes), modelsView, allJobs),
 		NodesByID:          nodesByID(nodes),
 		WorkerActiveJobs:   activeJobsByWorker(allJobs),
 		MaxClusterGFLOPS:   maxClusterBenchmarkGFLOPS(clusterBenchmarks),
@@ -1280,6 +1282,151 @@ func hasActiveJobs(in []jobs.Job) bool {
 	return false
 }
 
+type ReadinessSummary struct {
+	Status              string
+	WorkersOnline       int
+	RuntimeReadyWorkers int
+	InstalledModels     int
+	GeneratableModels   int
+	ActiveJobs          int
+	RecentFailures      int
+	Checks              []ReadinessCheck
+}
+
+type ReadinessCheck struct {
+	Name   string
+	Status string
+	Detail string
+	Action string
+	Tab    string
+}
+
+func clusterReadiness(onlineNodes []cluster.Node, modelsView []ModelSummary, jobsList []jobs.Job) ReadinessSummary {
+	readiness := ReadinessSummary{
+		WorkersOnline:       len(onlineNodes),
+		RuntimeReadyWorkers: runtimeReadyWorkerCount(onlineNodes),
+		InstalledModels:     installedModelCount(modelsView),
+		GeneratableModels:   generatableModelCount(modelsView),
+		ActiveJobs:          activeJobCount(jobsList),
+		RecentFailures:      recentFailureCount(jobsList),
+		Status:              "ready",
+	}
+	readiness.Checks = []ReadinessCheck{
+		readinessWorkersCheck(readiness.WorkersOnline),
+		readinessRuntimeCheck(readiness.WorkersOnline, readiness.RuntimeReadyWorkers),
+		readinessModelsCheck(readiness.InstalledModels, readiness.GeneratableModels),
+		readinessJobsCheck(readiness.ActiveJobs),
+		readinessFailuresCheck(readiness.RecentFailures),
+	}
+	for _, check := range readiness.Checks {
+		if check.Status == "blocked" {
+			readiness.Status = "blocked"
+			return readiness
+		}
+		if check.Status == "warn" && readiness.Status == "ready" {
+			readiness.Status = "warn"
+		}
+	}
+	return readiness
+}
+
+func readinessWorkersCheck(workersOnline int) ReadinessCheck {
+	if workersOnline == 0 {
+		return ReadinessCheck{
+			Name:   "Workers",
+			Status: "blocked",
+			Detail: "No workers are online.",
+			Action: "Invite and start at least one worker.",
+			Tab:    "workers",
+		}
+	}
+	return ReadinessCheck{
+		Name:   "Workers",
+		Status: "ready",
+		Detail: fmt.Sprintf("%d online worker(s).", workersOnline),
+		Action: "Worker plane is available.",
+		Tab:    "workers",
+	}
+}
+
+func readinessRuntimeCheck(workersOnline int, runtimeReadyWorkers int) ReadinessCheck {
+	if workersOnline == 0 {
+		return ReadinessCheck{Name: "Runtime", Status: "blocked", Detail: "No worker runtime can be checked.", Action: "Connect a worker first.", Tab: "workers"}
+	}
+	if runtimeReadyWorkers == 0 {
+		return ReadinessCheck{Name: "Runtime", Status: "blocked", Detail: "No online worker reports a ready AI runtime.", Action: "Open worker app and repair llama.cpp runtime.", Tab: "workers"}
+	}
+	if runtimeReadyWorkers < workersOnline {
+		return ReadinessCheck{Name: "Runtime", Status: "warn", Detail: fmt.Sprintf("%d of %d worker(s) have ready runtime.", runtimeReadyWorkers, workersOnline), Action: "Repair runtime on workers that report missing llama.cpp.", Tab: "workers"}
+	}
+	return ReadinessCheck{Name: "Runtime", Status: "ready", Detail: fmt.Sprintf("%d worker(s) runtime-ready.", runtimeReadyWorkers), Action: "Runtime plane is available.", Tab: "workers"}
+}
+
+func readinessModelsCheck(installedModels int, generatableModels int) ReadinessCheck {
+	if installedModels == 0 {
+		return ReadinessCheck{Name: "Models", Status: "blocked", Detail: "No model is installed.", Action: "Install a small catalog model first.", Tab: "models"}
+	}
+	if generatableModels == 0 {
+		return ReadinessCheck{Name: "Models", Status: "blocked", Detail: fmt.Sprintf("%d model(s) installed but none are runtime-ready.", installedModels), Action: "Repair runtime or reinstall the model on a ready worker.", Tab: "models"}
+	}
+	if generatableModels < installedModels {
+		return ReadinessCheck{Name: "Models", Status: "warn", Detail: fmt.Sprintf("%d installed, %d ready for chat.", installedModels, generatableModels), Action: "Some installed models are not generatable yet.", Tab: "models"}
+	}
+	return ReadinessCheck{Name: "Models", Status: "ready", Detail: fmt.Sprintf("%d model(s) ready for chat.", generatableModels), Action: "Model chat can run locally.", Tab: "chat"}
+}
+
+func readinessJobsCheck(activeJobs int) ReadinessCheck {
+	if activeJobs == 0 {
+		return ReadinessCheck{Name: "Jobs", Status: "ready", Detail: "No active jobs.", Action: "Scheduler is idle.", Tab: "jobs"}
+	}
+	return ReadinessCheck{Name: "Jobs", Status: "warn", Detail: fmt.Sprintf("%d queued/scheduled/running job(s).", activeJobs), Action: "Wait for active jobs before release smoke testing.", Tab: "scheduler"}
+}
+
+func readinessFailuresCheck(recentFailures int) ReadinessCheck {
+	if recentFailures == 0 {
+		return ReadinessCheck{Name: "Failures", Status: "ready", Detail: "No recent terminal failures.", Action: "Recent job history is clean.", Tab: "model-activity"}
+	}
+	return ReadinessCheck{Name: "Failures", Status: "warn", Detail: fmt.Sprintf("%d recent failed/canceled job(s).", recentFailures), Action: "Review Model Activity and Jobs before release.", Tab: "model-activity"}
+}
+
+func runtimeReadyWorkerCount(nodes []cluster.Node) int {
+	total := 0
+	for _, node := range nodes {
+		for _, runtime := range node.Resources.Runtimes {
+			if runtime.Ready {
+				total++
+				break
+			}
+		}
+	}
+	return total
+}
+
+func activeJobCount(in []jobs.Job) int {
+	total := 0
+	for _, job := range in {
+		switch job.Status {
+		case jobs.StatusQueued, jobs.StatusScheduled, jobs.StatusRunning:
+			total++
+		}
+	}
+	return total
+}
+
+func recentFailureCount(in []jobs.Job) int {
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	total := 0
+	for _, job := range in {
+		if job.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		if job.Status == jobs.StatusFailed || job.Status == jobs.StatusCanceled {
+			total++
+		}
+	}
+	return total
+}
+
 func schedulerJobs(in []jobs.Job) []jobs.Job {
 	out := make([]jobs.Job, 0)
 	for _, job := range in {
@@ -2031,6 +2178,60 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     }
     .first-test-form .wide {
       grid-column: 1 / -1;
+    }
+    .readiness-hero {
+      display: grid;
+      grid-template-columns: minmax(240px, .85fr) minmax(0, 1.15fr);
+      gap: 14px;
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .readiness-status {
+      display: grid;
+      align-content: start;
+      gap: 12px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .readiness-status strong {
+      font-size: 28px;
+      text-transform: capitalize;
+    }
+    .readiness-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .readiness-checks {
+      display: grid;
+      gap: 10px;
+    }
+    .readiness-check {
+      display: grid;
+      grid-template-columns: 120px 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .readiness-check strong {
+      font-size: 14px;
+    }
+    .readiness-check p {
+      margin: 0;
+    }
+    .readiness-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 16px;
+      border-top: 1px solid var(--line);
+      background: #fbfcfd;
     }
     .model-run-guide {
       display: grid;
@@ -2812,6 +3013,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       header, main { padding-left: 18px; padding-right: 18px; }
       table { display: block; overflow-x: auto; }
       .onboarding-body { grid-template-columns: 1fr; }
+      .readiness-hero { grid-template-columns: 1fr; }
+      .readiness-grid { grid-template-columns: 1fr; }
+      .readiness-check { grid-template-columns: 1fr; }
       .model-run-guide { grid-template-columns: 1fr; }
       .step { grid-template-columns: 30px 1fr; }
       .step .pill, .step .pill-job, .step .pill-muted { grid-column: 2; width: fit-content; }
@@ -2859,6 +3063,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
   <main>
     <nav class="console-tabs" aria-label="Dashboard sections">
       <button class="tab-button active" type="button" data-tab-target="overview"><svg class="icon"><use href="#icon-workers"></use></svg>Overview</button>
+      <button class="tab-button" type="button" data-tab-target="readiness"><svg class="icon"><use href="#icon-chart"></use></svg>Readiness</button>
       <button class="tab-button" type="button" data-tab-target="workers"><svg class="icon"><use href="#icon-workers"></use></svg>Workers</button>
       <button class="tab-button" type="button" data-tab-target="chat"><svg class="icon"><use href="#icon-send"></use></svg>Chat</button>
       <button class="tab-button" type="button" data-tab-target="memory"><svg class="icon"><use href="#icon-brain"></use></svg>Memory</button>
@@ -2927,6 +3132,47 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <div class="metric"><span>Allowed storage</span><strong>{{printf "%.1f" (gb .Summary.Resources.Storage.AllowedBytes)}} GB</strong></div>
       <div class="metric"><span>Benchmark score</span><strong>{{printf "%.0f" .Summary.BenchmarkScore}}</strong></div>
     </div>
+    </div>
+    <div class="tab-panel" id="tab-readiness" hidden>
+    <section id="readiness">
+      <div class="section-head">
+        <h2>Cluster Readiness</h2>
+        <code>{{.Readiness.Status}}</code>
+      </div>
+      <div class="readiness-hero">
+        <div class="readiness-status">
+          <span class="{{if eq .Readiness.Status "ready"}}pill{{else if eq .Readiness.Status "warn"}}pill pill-job{{else}}pill pill-failed{{end}}">{{.Readiness.Status}}</span>
+          <strong>{{if eq .Readiness.Status "ready"}}Ready for alpha test{{else if eq .Readiness.Status "warn"}}Ready with warnings{{else}}Blocked{{end}}</strong>
+          <p class="sub">This screen checks whether the cluster is ready for a real model smoke test without jumping between Workers, Models, Jobs, and Activity.</p>
+          <div class="readiness-grid">
+            <div class="first-test-stat"><span>Workers</span><strong>{{.Readiness.WorkersOnline}}</strong></div>
+            <div class="first-test-stat"><span>Runtime ready</span><strong>{{.Readiness.RuntimeReadyWorkers}}</strong></div>
+            <div class="first-test-stat"><span>Ready models</span><strong>{{.Readiness.GeneratableModels}}</strong></div>
+            <div class="first-test-stat"><span>Installed models</span><strong>{{.Readiness.InstalledModels}}</strong></div>
+            <div class="first-test-stat"><span>Active jobs</span><strong>{{.Readiness.ActiveJobs}}</strong></div>
+            <div class="first-test-stat"><span>Recent failures</span><strong>{{.Readiness.RecentFailures}}</strong></div>
+          </div>
+        </div>
+        <div class="readiness-checks">
+          {{range .Readiness.Checks}}
+          <div class="readiness-check">
+            <strong>{{.Name}}</strong>
+            <div>
+              <p>{{.Detail}}</p>
+              <p class="sub">{{.Action}}</p>
+            </div>
+            <button class="button" type="button" data-tab-shortcut="{{.Tab}}">{{.Status}}</button>
+          </div>
+          {{end}}
+        </div>
+      </div>
+      <div class="readiness-actions">
+        <button class="button" type="button" data-tab-shortcut="workers"><svg class="icon"><use href="#icon-workers"></use></svg>Workers</button>
+        <button class="button" type="button" data-tab-shortcut="models"><svg class="icon"><use href="#icon-brain"></use></svg>Models</button>
+        <button class="button" type="button" data-tab-shortcut="model-activity"><svg class="icon"><use href="#icon-terminal"></use></svg>Model Activity</button>
+        <button class="button {{if eq .Readiness.Status "ready"}}primary{{end}}" type="button" data-tab-shortcut="chat" {{if ne .Readiness.Status "ready"}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Open Chat</button>
+      </div>
+    </section>
     </div>
     <div class="tab-panel" id="tab-workers" hidden>
     <section>
