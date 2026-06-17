@@ -211,7 +211,12 @@ Returns recent benchmark runs reconstructed from jobs. Each summary includes wor
 GET /v1/models
 ```
 
-Returns catalog entries with current cluster capability and installed inventory. A model is considered installed only when an online worker reports it in heartbeat `resources.models`.
+Returns catalog entries with current cluster capability, installed inventory, and runtime-ready inventory.
+
+- `installed_on`: online workers that report the model file in heartbeat `resources.models`.
+- `generatable_on`: installed workers whose required runtime, such as `llama.cpp`, is also reported ready in heartbeat `resources.runtimes`.
+
+A model can be installed but not generatable when the model file exists but the runtime is missing, outdated, or still installing.
 
 ```http
 POST /v1/models/{model_id}/install
@@ -241,7 +246,7 @@ Example:
 }
 ```
 
-Delete removes the worker model directory and returns `freed_bytes` in the job result when the worker completes the operation. Successful delete also clears model-scoped memory and conversations in the manager.
+Delete removes the worker model directory and returns `freed_bytes` in the job result when the worker completes the operation. Successful delete also clears model-scoped memory and conversations in the manager and adds `deleted_memories` plus `deleted_conversations` to the job result.
 
 ```http
 POST /v1/models/{model_id}/generate
@@ -262,6 +267,8 @@ Example:
 ```
 
 Generation uses model-family prompt adapters, model-scoped memory, and conversation history. Responses run on the selected worker, not an external API.
+
+The selected worker must be listed in `generatable_on` for that model. If the model is installed but the runtime is not ready, the API returns `409 Conflict` before creating a generate job.
 
 ## Conversations
 

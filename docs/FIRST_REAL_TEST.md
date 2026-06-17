@@ -21,6 +21,7 @@ Prove that several machines can join one manager, advertise resources, run bench
 4. Watch Workers, Models, Model Activity, Jobs, and Benchmarks during the test.
 5. Record the node count and total advertised CPU, RAM, disk, GPU, and VRAM before and after each worker joins.
 6. Confirm each worker reports runtime status and installed model inventory.
+7. Confirm `/v1/models` lists installed models under `installed_on` and only runtime-ready workers under `generatable_on`.
 
 ## Worker Donor
 
