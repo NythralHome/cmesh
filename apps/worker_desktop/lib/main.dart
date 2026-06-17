@@ -1131,7 +1131,7 @@ class _WorkerHomePageState extends State<WorkerHomePage>
   Future<void> _showTrayMenu() async {
     if (!DesktopTrayController._isDesktop) return;
     try {
-      await trayManager.popUpContextMenu(bringAppToFront: false);
+      await trayManager.popUpContextMenu();
     } on Object {
       await _showWindow();
     }
