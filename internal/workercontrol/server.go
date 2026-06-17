@@ -99,6 +99,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/v1/stop", s.handleStop)
 	mux.HandleFunc("/v1/restart", s.handleRestart)
 	mux.HandleFunc("/v1/disconnect", s.handleDisconnect)
+	mux.HandleFunc("/v1/runtime/llama.cpp/ensure", s.handleEnsureLlamaCPP)
 
 	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -210,6 +211,29 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	_ = s.stopWorker()
 	if err := s.startWorker(); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.status())
+}
+
+func (s *Server) handleEnsureLlamaCPP(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	cacheDir := s.config.WorkerCacheDir
+	s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	_, runtimeStatus, err := runtimes.EnsureLlamaCPP(ctx, cacheDir)
+	if err != nil {
+		status := s.status()
+		status.Runtime = runtimeStatus
+		writeJSON(w, http.StatusConflict, status)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.status())

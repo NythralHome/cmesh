@@ -65,6 +65,7 @@ void main() {
       'pid': 4120,
       'started_at': '2026-06-15T05:30:00Z',
       'log_tail': 'started worker pid=4120\n',
+      'config': {'worker_cache_dir': '/tmp/cmesh/cache'},
       'runtime_status': {
         'name': 'llama.cpp',
         'ready': true,
@@ -90,6 +91,7 @@ void main() {
     expect(status.running, isTrue);
     expect(status.pid, 4120);
     expect(status.label, 'Running');
+    expect(status.cacheDir, '/tmp/cmesh/cache');
     expect(status.jobStatus?.label, 'Running job');
     expect(status.jobStatus?.jobId, 'job-123');
     expect(status.modelRuntime?.label, 'llama.cpp b9672 ready');

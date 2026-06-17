@@ -566,6 +566,7 @@ class WorkerRuntimeStatus {
     this.exitCode,
     this.lastError,
     this.managerUrl = '',
+    this.cacheDir = '',
     this.joinTokenConfigured = false,
     this.configPath = '',
     this.logTail = '',
@@ -580,6 +581,7 @@ class WorkerRuntimeStatus {
   final int? exitCode;
   final String? lastError;
   final String managerUrl;
+  final String cacheDir;
   final bool joinTokenConfigured;
   final String configPath;
   final String logTail;
@@ -620,6 +622,7 @@ class WorkerRuntimeStatus {
       exitCode: json['exit_code'] as int?,
       lastError: json['last_error'] as String?,
       managerUrl: config['manager_url'] as String? ?? '',
+      cacheDir: config['worker_cache_dir'] as String? ?? '',
       joinTokenConfigured: joinToken.trim().isNotEmpty,
       configPath: json['config_path'] as String? ?? '',
       logTail: logTail,
@@ -660,6 +663,10 @@ class WorkerInstalledModel {
   }
 
   String get sizeLabel {
+    return formatBytes(bytes);
+  }
+
+  static String formatBytes(int bytes) {
     if (bytes <= 0) return '-';
     final gb = bytes / 1024 / 1024 / 1024;
     if (gb >= 1) return '${gb.toStringAsFixed(1)} GB';
@@ -895,11 +902,48 @@ class WorkerController {
     return _request('POST', '/v1/$action');
   }
 
+  Future<WorkerCommandResult> ensureRuntime() {
+    return _request(
+      'POST',
+      '/v1/runtime/llama.cpp/ensure',
+      timeout: const Duration(minutes: 10),
+    );
+  }
+
+  Future<WorkerCommandResult> openCacheFolder(String path) async {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty) {
+      return const WorkerCommandResult(
+        exitCode: 1,
+        output: 'Worker cache path is not reported yet.',
+      );
+    }
+    final dir = Directory(trimmed);
+    if (!await dir.exists()) {
+      return WorkerCommandResult(
+        exitCode: 1,
+        output: 'Worker cache folder does not exist yet:\n$trimmed',
+      );
+    }
+    final result = Platform.isMacOS
+        ? await Process.run('open', [trimmed])
+        : Platform.isWindows
+        ? await Process.run('explorer.exe', [trimmed])
+        : await Process.run('xdg-open', [trimmed]);
+    return WorkerCommandResult(
+      exitCode: result.exitCode,
+      output: result.exitCode == 0
+          ? 'Opened worker cache folder:\n$trimmed'
+          : '${result.stderr}${result.stdout}'.trim(),
+    );
+  }
+
   Future<WorkerCommandResult> _request(
     String method,
     String path, {
     Map<String, dynamic>? body,
     bool tryStart = true,
+    Duration timeout = _requestTimeout,
   }) async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
     try {
@@ -911,8 +955,8 @@ class WorkerController {
       if (body != null) {
         req.write(jsonEncode(body));
       }
-      final resp = await req.close().timeout(_requestTimeout);
-      final raw = await utf8.decodeStream(resp).timeout(_requestTimeout);
+      final resp = await req.close().timeout(timeout);
+      final raw = await utf8.decodeStream(resp).timeout(timeout);
       final decoded = _decodeResponse(raw);
       final output = _formatResponse(resp.statusCode, raw, decoded, path);
       final ok = resp.statusCode >= 200 && resp.statusCode < 300;
@@ -1480,6 +1524,17 @@ class _WorkerHomePageState extends State<WorkerHomePage>
     return _run(action, () => _controller.serviceAction(action));
   }
 
+  Future<void> _repairRuntime() {
+    return _run('Repairing runtime', () => _controller.ensureRuntime());
+  }
+
+  Future<void> _openCacheFolder() {
+    return _run(
+      'Opening cache folder',
+      () => _controller.openCacheFolder(_runtimeStatus?.cacheDir ?? ''),
+    );
+  }
+
   Future<void> _disconnect() async {
     final config = _readConfig();
     final result = await _run(
@@ -1785,6 +1840,8 @@ class _WorkerHomePageState extends State<WorkerHomePage>
                               child: _ModelsRuntimePanel(
                                 status: _runtimeStatus,
                                 onRefresh: _refreshStatus,
+                                onRepairRuntime: _repairRuntime,
+                                onOpenCacheFolder: _openCacheFolder,
                               ),
                             ),
                             _TabSurface(
@@ -2629,10 +2686,17 @@ class _LogsPanel extends StatelessWidget {
 }
 
 class _ModelsRuntimePanel extends StatelessWidget {
-  const _ModelsRuntimePanel({required this.status, required this.onRefresh});
+  const _ModelsRuntimePanel({
+    required this.status,
+    required this.onRefresh,
+    required this.onRepairRuntime,
+    required this.onOpenCacheFolder,
+  });
 
   final WorkerRuntimeStatus? status;
   final VoidCallback onRefresh;
+  final VoidCallback onRepairRuntime;
+  final VoidCallback onOpenCacheFolder;
 
   @override
   Widget build(BuildContext context) {
@@ -2644,16 +2708,32 @@ class _ModelsRuntimePanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: OutlinedButton.icon(
-              onPressed: onRefresh,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Refresh status'),
-            ),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              OutlinedButton.icon(
+                onPressed: onRefresh,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Refresh status'),
+              ),
+              FilledButton.icon(
+                onPressed: runtime?.ready == true ? null : onRepairRuntime,
+                icon: const Icon(Icons.build_circle_outlined),
+                label: const Text('Repair runtime'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onOpenCacheFolder,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('Open cache folder'),
+              ),
+            ],
           ),
           const SizedBox(height: 14),
-          _RuntimeDetailCard(runtime: runtime),
+          _RuntimeDetailCard(
+            runtime: runtime,
+            cacheDir: status?.cacheDir ?? '',
+          ),
           const SizedBox(height: 12),
           _WorkerJobStatusCard(status: status?.jobStatus),
           const SizedBox(height: 12),
@@ -2665,9 +2745,10 @@ class _ModelsRuntimePanel extends StatelessWidget {
 }
 
 class _RuntimeDetailCard extends StatelessWidget {
-  const _RuntimeDetailCard({required this.runtime});
+  const _RuntimeDetailCard({required this.runtime, required this.cacheDir});
 
   final WorkerModelRuntimeStatus? runtime;
+  final String cacheDir;
 
   @override
   Widget build(BuildContext context) {
@@ -2703,6 +2784,7 @@ class _RuntimeDetailCard extends StatelessWidget {
           _StatusLine(label: 'Platform', value: runtime?.platform ?? '-'),
           _StatusLine(label: 'Source', value: runtime?.source ?? '-'),
           _StatusLine(label: 'Binary', value: runtime?.binaryPath ?? '-'),
+          _StatusLine(label: 'Cache', value: cacheDir.isEmpty ? '-' : cacheDir),
           if (runtime?.error.isNotEmpty == true)
             _StatusLine(label: 'Error', value: runtime!.error),
         ],
@@ -2719,6 +2801,10 @@ class _InstalledModelsCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final totalBytes = models.fold<int>(
+      0,
+      (total, model) => total + model.bytes,
+    );
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -2728,11 +2814,24 @@ class _InstalledModelsCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            'Installed models',
-            style: Theme.of(
-              context,
-            ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Installed models',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+                ),
+              ),
+              Text(
+                '${models.length} · ${WorkerInstalledModel.formatBytes(totalBytes)}',
+                style: TextStyle(
+                  color: colors.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 10),
           if (models.isEmpty)
