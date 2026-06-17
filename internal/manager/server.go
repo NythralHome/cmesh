@@ -2295,9 +2295,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <div class="capability-row">
                 <strong>{{.Name}}</strong>
                 {{if .Capable}}
-                <span>ready</span>
+                <span>ready · {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM · {{printf "%.1f" (gb .AllowedStorageBytes)}} GB disk{{if gt .AllowedVRAMBytes 0}} · {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
                 {{else}}
-                <span>{{range $index, $reason := .Reasons}}{{if $index}}; {{end}}{{$reason}}{{end}}</span>
+                <span>{{range $index, $reason := .Reasons}}{{if $index}}; {{end}}{{$reason}}{{end}} · has {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM / {{printf "%.1f" (gb .AllowedStorageBytes)}} GB disk{{if gt .AllowedVRAMBytes 0}} / {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
                 {{end}}
               </div>
               {{end}}

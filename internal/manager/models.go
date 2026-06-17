@@ -25,10 +25,13 @@ type ModelSummary struct {
 }
 
 type ModelCapability struct {
-	NodeID  string   `json:"node_id"`
-	Name    string   `json:"name"`
-	Capable bool     `json:"capable"`
-	Reasons []string `json:"reasons,omitempty"`
+	NodeID              string   `json:"node_id"`
+	Name                string   `json:"name"`
+	Capable             bool     `json:"capable"`
+	AllowedMemoryBytes  uint64   `json:"allowed_memory_bytes"`
+	AllowedStorageBytes uint64   `json:"allowed_storage_bytes"`
+	AllowedVRAMBytes    uint64   `json:"allowed_vram_bytes,omitempty"`
+	Reasons             []string `json:"reasons,omitempty"`
 }
 
 func modelSummaries(catalog []models.Model, jobsList []jobs.Job, nodes []cluster.Node) []ModelSummary {
@@ -99,8 +102,11 @@ func modelCapabilities(model models.Model, nodes []cluster.Node) []ModelCapabili
 			continue
 		}
 		item := ModelCapability{
-			NodeID: node.ID,
-			Name:   node.Name,
+			NodeID:              node.ID,
+			Name:                node.Name,
+			AllowedMemoryBytes:  node.Resources.Memory.AllowedBytes,
+			AllowedStorageBytes: node.Resources.Storage.AllowedBytes,
+			AllowedVRAMBytes:    maxAllowedVRAM(node.Resources.GPU),
 		}
 		if strings.TrimSpace(item.Name) == "" {
 			item.Name = node.ID
@@ -112,7 +118,7 @@ func modelCapabilities(model models.Model, nodes []cluster.Node) []ModelCapabili
 			item.Reasons = append(item.Reasons, fmt.Sprintf("disk short by %.1f GB", gbDiff(model.DiskBytes, node.Resources.Storage.AllowedBytes)))
 		}
 		if model.VRAMBytes > 0 && !hasAllowedVRAM(node.Resources.GPU, model.VRAMBytes) {
-			item.Reasons = append(item.Reasons, fmt.Sprintf("VRAM short by %.1f GB", gbDiff(model.VRAMBytes, maxAllowedVRAM(node.Resources.GPU))))
+			item.Reasons = append(item.Reasons, fmt.Sprintf("VRAM short by %.1f GB", gbDiff(model.VRAMBytes, item.AllowedVRAMBytes)))
 		}
 		item.Capable = len(item.Reasons) == 0
 		out = append(out, item)
