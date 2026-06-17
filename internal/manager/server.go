@@ -3083,8 +3083,9 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
         <p class="sub">Install the worker app on the machine that will share resources. The invite link pre-fills this manager URL and one-time join token.</p>
         <div class="steps">
           <div class="step-card"><strong>1. Install</strong><span>Download the worker installer and move the app to Applications.</span></div>
-          <div class="step-card"><strong>2. Open invite</strong><span>The installed app receives the manager URL and join token automatically.</span></div>
-          <div class="step-card"><strong>3. Start worker</strong><span>Choose resource limits, save settings, then connect to the cluster.</span></div>
+          <div class="step-card"><strong>2. First launch</strong><span>On macOS, open it once from Applications with Control-click, then Open.</span></div>
+          <div class="step-card"><strong>3. Open invite</strong><span>The installed app receives the manager URL and join token automatically.</span></div>
+          <div class="step-card"><strong>4. Start worker</strong><span>Choose resource limits, save settings, then connect to the cluster.</span></div>
         </div>
       </div>
 
@@ -3095,13 +3096,13 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
         </div>
         <div class="desktop-primary">
           <h3>Use the installer first</h3>
-          <p>Install CMesh Worker on this machine, then open the invite so the app can prefill the manager URL and join token.</p>
+          <p>Install CMesh Worker on this machine. On macOS, launch it once from Applications with Control-click, then Open, before using the invite button.</p>
           <div class="actions">
             <a class="button primary" id="worker-download" href="{{.DownloadURL}}">Download Worker App</a>
-            <a class="button secondary" href="{{.DesktopInviteHref}}">Open installed app</a>
+            <a class="button secondary" href="{{.DesktopInviteHref}}">Open invite in app</a>
             <a class="button" href="https://github.com/NythralHome/cmesh/releases/latest">Other platforms</a>
           </div>
-          <p class="hint" id="worker-download-hint">Direct downloads use the latest CMesh release.</p>
+          <p class="hint" id="worker-download-hint">Direct downloads use the latest CMesh release. macOS requires the first launch from Finder before browser invite links can open the app.</p>
         </div>
         <details class="manual-invite">
           <summary>Manual invite link</summary>
@@ -3185,12 +3186,12 @@ iwr https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-wor
         macApple: {
           label: "Download for Apple Silicon",
           asset: "CMesh-Worker-Apple-Silicon.dmg",
-          hint: "Install CMesh Worker, then open the invite to prefill this cluster."
+          hint: "After installing, open CMesh Worker once from Applications with Control-click, then Open. Then use the invite button."
         },
         macIntel: {
           label: "Download for Intel Mac",
           asset: "CMesh-Worker-Intel-Mac.dmg",
-          hint: "Install CMesh Worker, then open the invite to prefill this cluster."
+          hint: "After installing, open CMesh Worker once from Applications with Control-click, then Open. Then use the invite button."
         },
         windows: {
           label: "Download for Windows",
