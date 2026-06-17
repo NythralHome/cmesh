@@ -399,6 +399,70 @@ func TestConversationStoresAssistantMessageAfterGenerateCompletes(t *testing.T) 
 	}
 }
 
+func TestConversationAPIListsAndReadsGeneratedChatContext(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU: cluster.CPUResources{
+			CoresTotal:   4,
+			CoresAllowed: 2,
+		},
+		Memory: cluster.MemoryResources{
+			TotalBytes:   64 * gb,
+			AllowedBytes: 48 * gb,
+		},
+		Storage: cluster.StorageResources{
+			TotalBytes:   256 * gb,
+			AllowedBytes: 64 * gb,
+			FreeBytes:    128 * gb,
+		},
+		Models: []cluster.ModelResource{{
+			ID:   "qwen2.5-0.5b-instruct-q4-k-m",
+			Name: "Qwen2.5 0.5B Instruct",
+		}},
+	})
+
+	body := bytes.NewReader([]byte(`{"node_id":"` + worker.NodeID + `","prompt":"Мене звати Сергій.","system_prompt":"Remember names."}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/generate", body)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var job jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	var input models.GenerateInput
+	if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.ConversationID == "" {
+		t.Fatal("expected conversation id in generated job input")
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/conversations", nil)
+	listRec := httptest.NewRecorder()
+	srv.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", listRec.Code, listRec.Body.String())
+	}
+	if !strings.Contains(listRec.Body.String(), input.ConversationID) {
+		t.Fatalf("expected conversation list to include id %q, got %s", input.ConversationID, listRec.Body.String())
+	}
+
+	readReq := httptest.NewRequest(http.MethodGet, "/v1/conversations/"+input.ConversationID, nil)
+	readRec := httptest.NewRecorder()
+	srv.ServeHTTP(readRec, readReq)
+	if readRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", readRec.Code, readRec.Body.String())
+	}
+	if !strings.Contains(readRec.Body.String(), "Мене звати Сергій.") || !strings.Contains(readRec.Body.String(), "Remember names.") {
+		t.Fatalf("expected conversation body to include saved prompt and system prompt, got %s", readRec.Body.String())
+	}
+}
+
 func TestReadAPIRequiresOperatorTokenWhenConfigured(t *testing.T) {
 	srv := NewServerWithOptions(ServerOptions{
 		Addr:          ":0",

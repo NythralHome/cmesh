@@ -320,6 +320,18 @@ func (s *State) Conversation(id string) (Conversation, bool) {
 	return conversation, ok
 }
 
+func (s *State) Conversations() []Conversation {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]Conversation, 0, len(s.conversations))
+	for _, conversation := range s.conversations {
+		conversation.Messages = append([]models.ChatMessage(nil), conversation.Messages...)
+		out = append(out, conversation)
+	}
+	return out
+}
+
 func (s *State) AppendConversationMessage(id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation {
 	now := time.Now().UTC()
 	message = normalizeChatMessage(message)
