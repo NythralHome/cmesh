@@ -44,6 +44,17 @@ jobs:
     needs: cli
     permissions:
       contents: write
+    env:
+      CMESH_MACOS_CERTIFICATE_P12: ${{ secrets.CMESH_MACOS_CERTIFICATE_P12 }}
+      CMESH_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.CMESH_MACOS_CERTIFICATE_PASSWORD }}
+      CMESH_MACOS_DEVELOPER_IDENTITY: ${{ secrets.CMESH_MACOS_DEVELOPER_IDENTITY }}
+      CMESH_MACOS_KEYCHAIN_PASSWORD: ${{ secrets.CMESH_MACOS_KEYCHAIN_PASSWORD }}
+      CMESH_MACOS_NOTARY_APPLE_ID: ${{ secrets.CMESH_MACOS_NOTARY_APPLE_ID }}
+      CMESH_MACOS_NOTARY_KEY_ID: ${{ secrets.CMESH_MACOS_NOTARY_KEY_ID }}
+      CMESH_MACOS_NOTARY_KEY_P8: ${{ secrets.CMESH_MACOS_NOTARY_KEY_P8 }}
+      CMESH_MACOS_NOTARY_ISSUER_ID: ${{ secrets.CMESH_MACOS_NOTARY_ISSUER_ID }}
+      CMESH_MACOS_NOTARY_PASSWORD: ${{ secrets.CMESH_MACOS_NOTARY_PASSWORD }}
+      CMESH_MACOS_NOTARY_TEAM_ID: ${{ secrets.CMESH_MACOS_NOTARY_TEAM_ID }}
     strategy:
       fail-fast: false
       matrix:
@@ -66,6 +77,40 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Import Developer ID certificate
+        if: ${{ env.CMESH_MACOS_CERTIFICATE_P12 != '' }}
+        run: |
+          set -eu
+          if [ -z "${CMESH_MACOS_CERTIFICATE_PASSWORD:-}" ]; then
+            echo "CMESH_MACOS_CERTIFICATE_PASSWORD is required when CMESH_MACOS_CERTIFICATE_P12 is set" >&2
+            exit 1
+          fi
+          if [ -z "${CMESH_MACOS_KEYCHAIN_PASSWORD:-}" ]; then
+            echo "CMESH_MACOS_KEYCHAIN_PASSWORD is required when CMESH_MACOS_CERTIFICATE_P12 is set" >&2
+            exit 1
+          fi
+
+          certificate_path="$RUNNER_TEMP/cmesh-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/cmesh-signing.keychain-db"
+
+          echo "$CMESH_MACOS_CERTIFICATE_P12" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$CMESH_MACOS_KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$CMESH_MACOS_KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" \
+            -P "$CMESH_MACOS_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$CMESH_MACOS_KEYCHAIN_PASSWORD" \
+            "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+
       - name: Build
         run: |
           set -eu
@@ -84,11 +129,48 @@ jobs:
           flutter build macos --dart-define=CMESH_WORKER_VERSION=${GITHUB_REF_NAME}
           app_bundle="build/macos/Build/Products/Release/CMesh Worker.app"
           cp ../../bin/cmesh "$app_bundle/Contents/Resources/cmesh"
-          codesign --force --sign - "$app_bundle/Contents/Resources/cmesh"
-          codesign --force --deep --sign - "$app_bundle"
+
+          sign_identity="-"
+          sign_args=(--force --sign "$sign_identity")
+          if [ -n "${CMESH_MACOS_CERTIFICATE_P12:-}" ]; then
+            sign_identity="${CMESH_MACOS_DEVELOPER_IDENTITY:-Developer ID Application: Sergey Plagov (V989445HKJ)}"
+            sign_args=(--force --options runtime --timestamp --sign "$sign_identity")
+          else
+            echo "warning: Developer ID secrets are not configured; building an ad-hoc signed DMG that macOS Gatekeeper will block on first launch" >&2
+          fi
+
+          codesign "${sign_args[@]}" "$app_bundle/Contents/Resources/cmesh"
+          codesign "${sign_args[@]}" --deep "$app_bundle"
           codesign --verify --deep --strict --verbose=2 "$app_bundle"
           dmg_name="CMesh-Worker-Apple-Silicon.dmg"
           ../../scripts/package-macos-dmg.sh "$app_bundle" "../../dist/$dmg_name" "CMesh Worker ${GITHUB_REF_NAME}"
+
+          if [ "$sign_identity" != "-" ]; then
+            codesign "${sign_args[@]}" "../../dist/$dmg_name"
+            codesign --verify --verbose=2 "../../dist/$dmg_name"
+
+            if [ -n "${CMESH_MACOS_NOTARY_KEY_ID:-}" ] && [ -n "${CMESH_MACOS_NOTARY_KEY_P8:-}" ] && [ -n "${CMESH_MACOS_NOTARY_ISSUER_ID:-}" ]; then
+              notary_key_path="$RUNNER_TEMP/AuthKey_${CMESH_MACOS_NOTARY_KEY_ID}.p8"
+              echo "$CMESH_MACOS_NOTARY_KEY_P8" | base64 --decode > "$notary_key_path"
+              xcrun notarytool submit "../../dist/$dmg_name" \
+                --key "$notary_key_path" \
+                --key-id "$CMESH_MACOS_NOTARY_KEY_ID" \
+                --issuer "$CMESH_MACOS_NOTARY_ISSUER_ID" \
+                --wait
+            elif [ -n "${CMESH_MACOS_NOTARY_APPLE_ID:-}" ] && [ -n "${CMESH_MACOS_NOTARY_PASSWORD:-}" ] && [ -n "${CMESH_MACOS_NOTARY_TEAM_ID:-}" ]; then
+              xcrun notarytool submit "../../dist/$dmg_name" \
+                --apple-id "$CMESH_MACOS_NOTARY_APPLE_ID" \
+                --password "$CMESH_MACOS_NOTARY_PASSWORD" \
+                --team-id "$CMESH_MACOS_NOTARY_TEAM_ID" \
+                --wait
+            else
+              echo "macOS notarization credentials are missing" >&2
+              exit 1
+            fi
+
+            xcrun stapler staple "../../dist/$dmg_name"
+            spctl -a -vv -t open --context context:primary-signature "../../dist/$dmg_name"
+          fi
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
