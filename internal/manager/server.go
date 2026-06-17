@@ -1276,6 +1276,20 @@ func hasActiveJobs(in []jobs.Job) bool {
 	return false
 }
 
+func schedulerJobs(in []jobs.Job) []jobs.Job {
+	out := make([]jobs.Job, 0)
+	for _, job := range in {
+		switch job.Status {
+		case jobs.StatusQueued, jobs.StatusScheduled, jobs.StatusRunning:
+			out = append(out, job)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out
+}
+
 func isModelJob(job jobs.Job) bool {
 	return job.Type == models.JobInstall || job.Type == models.JobDelete || job.Type == models.JobGenerate
 }
@@ -1745,6 +1759,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		return percent
 	},
 	"hasActiveJobs":        hasActiveJobs,
+	"schedulerJobs":        schedulerJobs,
 	"isModelJob":           isModelJob,
 	"modelJobCount":        modelJobCount,
 	"installedModelCount":  installedModelCount,
@@ -2766,6 +2781,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <button class="tab-button" type="button" data-tab-target="models"><svg class="icon"><use href="#icon-brain"></use></svg>Models</button>
       <button class="tab-button" type="button" data-tab-target="prompt-debug"><svg class="icon"><use href="#icon-terminal"></use></svg>Prompt Debug</button>
       <button class="tab-button" type="button" data-tab-target="model-activity"><svg class="icon"><use href="#icon-terminal"></use></svg>Model Activity</button>
+      <button class="tab-button" type="button" data-tab-target="scheduler"><svg class="icon"><use href="#icon-chart"></use></svg>Scheduler</button>
       <button class="tab-button" type="button" data-tab-target="jobs"><svg class="icon"><use href="#icon-terminal"></use></svg>Jobs</button>
       <button class="tab-button" type="button" data-tab-target="benchmarks"><svg class="icon"><use href="#icon-chart"></use></svg>Benchmarks</button>
     </nav>
@@ -3243,6 +3259,49 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
       {{else}}
       <div class="empty">No cluster benchmark runs yet.</div>
+      {{end}}
+    </section>
+    </div>
+    <div class="tab-panel" id="tab-scheduler" hidden>
+    <section id="scheduler">
+      <div class="section-head">
+        <h2>Scheduler</h2>
+        <code>{{len (schedulerJobs .Jobs)}} active decisions</code>
+      </div>
+      {{if schedulerJobs .Jobs}}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>Status</th>
+              <th>Worker</th>
+              <th>Requirements</th>
+              <th>Attempts</th>
+              <th>Decision</th>
+            </tr>
+          </thead>
+          <tbody>
+          {{range schedulerJobs .Jobs}}
+            <tr>
+              <td><code>{{shortID .ID}}</code><br><span class="sub">{{.Type}}</span></td>
+              <td><span class="{{jobPillClass .Status}}">{{.Status}}</span></td>
+              <td><code>{{jobWorkerLabel $.NodesByID .}}</code>{{if .AssignedTo}}<br><span class="sub">{{shortID .AssignedTo}}</span>{{end}}</td>
+              <td><code>{{jobRequirements .}}</code></td>
+              <td>{{.Attempts}} / {{.MaxAttempts}}</td>
+              <td class="mono-output"><code>{{if .LastFailure}}{{.LastFailure}}{{else}}{{jobDetail .}}{{end}}</code></td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="empty-action">
+        <div>
+          <h3>No active scheduler decisions</h3>
+          <p>Queued, scheduled, and running jobs will appear here with placement requirements and last failure reasons.</p>
+        </div>
+      </div>
       {{end}}
     </section>
     </div>

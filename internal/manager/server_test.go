@@ -1637,6 +1637,37 @@ func TestDashboardShowsWorkerHealthAndRuntimeInventory(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsSchedulerTab(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	_, err := state.CreateJob(jobs.CreateRequest{
+		Type: "compute.matrix_multiply",
+		Requirements: jobs.Requirements{
+			CPUCores: 4,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected dashboard status 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, expected := range []string{
+		"Scheduler",
+		"active decisions",
+		"waiting for capable worker",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("expected dashboard to contain %q", expected)
+		}
+	}
+}
+
 func TestModelCatalogAndInstallJob(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
