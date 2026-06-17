@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cmesh/cmesh/internal/models"
@@ -70,6 +71,38 @@ Exiting...
 	want := "CMesh is a cluster for sharing compute across connected workers."
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestCleanLlamaOutputRemovesChatTemplateTokens(t *testing.T) {
+	output := `<|im_end|>
+</|im_start|>
+</|im_end|>
+how are you?
+<|im_end|>
+<|im_start|>help
+<|im_end|>`
+
+	got := cleanLlamaOutput(output, "how are you?")
+	if strings.Contains(got, "<|im_") || strings.Contains(got, "</|im_") {
+		t.Fatalf("expected chat template tokens to be removed, got %q", got)
+	}
+	if !strings.Contains(got, "how are you?") {
+		t.Fatalf("expected remaining text, got %q", got)
+	}
+}
+
+func TestModelPromptUsesQwenChatTemplate(t *testing.T) {
+	model, err := models.MustFind("qwen2.5-0.5b-instruct-q4-k-m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := modelPrompt(model, "hello")
+	if !strings.Contains(got, "<|im_start|>user\nhello<|im_end|>") {
+		t.Fatalf("expected qwen user template, got %q", got)
+	}
+	if !strings.HasSuffix(got, "<|im_start|>assistant\n") {
+		t.Fatalf("expected assistant prefix, got %q", got)
 	}
 }
 

@@ -1047,7 +1047,7 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	defer cancel()
 	args := []string{
 		"-m", path,
-		"-p", req.Prompt,
+		"-p", modelPrompt(model, req.Prompt),
 		"-n", strconv.Itoa(maxTokens),
 		"--temp", temperature,
 		"--threads", "1",
@@ -1076,7 +1076,7 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	}
 	text := cleanLlamaOutput(stdout.String(), req.Prompt)
 	if text == "" {
-		text = strings.TrimSpace(stdout.String())
+		text = sanitizeModelText(stdout.String())
 	}
 	if text == "" {
 		return "", fmt.Errorf("%s returned an empty response", model.Runtime)
@@ -1142,6 +1142,14 @@ func modelContextSize(model models.Model) int {
 	return 2048
 }
 
+func modelPrompt(model models.Model, prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if strings.EqualFold(model.Family, "Qwen") {
+		return "<|im_start|>system\nYou are a concise assistant. Answer only the user's question. Do not print chat template tokens.<|im_end|>\n<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n"
+	}
+	return prompt
+}
+
 func cleanLlamaOutput(output string, prompt string) string {
 	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
 	collected := make([]string, 0, len(lines))
@@ -1157,6 +1165,19 @@ func cleanLlamaOutput(output string, prompt string) string {
 		case strings.HasPrefix(trimmed, "> "):
 			afterPrompt = true
 			continue
+		case strings.Contains(trimmed, "<|im_start|>assistant"):
+			afterPrompt = true
+			continue
+		case strings.Contains(trimmed, "<|im_start|>") || strings.Contains(trimmed, "<|im_end|>"):
+			if afterPrompt {
+				line = removeChatTemplateTokens(line)
+				trimmed = strings.TrimSpace(line)
+				if trimmed == "" {
+					continue
+				}
+				break
+			}
+			continue
 		case trimmed == "Exiting..." || trimmed == "Loading model..." || strings.HasPrefix(trimmed, "build      :") || strings.HasPrefix(trimmed, "model      :") || strings.HasPrefix(trimmed, "modalities :"):
 			continue
 		case strings.Contains(trimmed, "available commands:") || strings.HasPrefix(trimmed, "/exit ") || strings.HasPrefix(trimmed, "/regen") || strings.HasPrefix(trimmed, "/clear") || strings.HasPrefix(trimmed, "/read ") || strings.HasPrefix(trimmed, "/glob "):
@@ -1171,12 +1192,43 @@ func cleanLlamaOutput(output string, prompt string) string {
 	}
 	text := strings.TrimSpace(strings.Join(collected, "\n"))
 	if text == "" {
-		return strings.TrimSpace(output)
+		return sanitizeModelText(output)
 	}
+	text = sanitizeModelText(text)
 	if len([]byte(text)) > 8192 {
 		return string([]byte(text)[:8192])
 	}
 	return text
+}
+
+func sanitizeModelText(text string) string {
+	text = removeChatTemplateTokens(text)
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			if len(cleaned) > 0 && cleaned[len(cleaned)-1] != "" {
+				cleaned = append(cleaned, "")
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "</|im_start|") || strings.HasPrefix(trimmed, "</|im_end|") || trimmed == "</" {
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
+func removeChatTemplateTokens(text string) string {
+	replacer := strings.NewReplacer(
+		"<|im_start|>", "",
+		"<|im_end|>", "",
+		"</|im_start|>", "",
+		"</|im_end|>", "",
+	)
+	return replacer.Replace(text)
 }
 
 func ensureModelRuntime(modelRuntime models.Runtime, cacheDir string) (string, runtimes.RuntimeStatus, error) {
