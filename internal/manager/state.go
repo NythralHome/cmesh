@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -393,6 +394,25 @@ func (s *State) DeleteMemory(id string) bool {
 	return true
 }
 
+func (s *State) DeleteMemoriesByModel(modelID string) int {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return 0
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	deleted := 0
+	for id, memory := range s.memories {
+		if memory.ModelID == modelID {
+			delete(s.memories, id)
+			deleted++
+		}
+	}
+	return deleted
+}
+
 func (s *State) upsertExtractedMemoriesLocked(modelID string, conversationID string, content string, now time.Time) {
 	for _, memory := range extractMemories(modelID, conversationID, content, now) {
 		existingID := ""
@@ -458,7 +478,7 @@ func (s *State) appendAssistantMessageForJobLocked(job jobs.Job, now time.Time) 
 		}
 	}
 	conversation.ModelID = input.ModelID
-	if input.SystemPrompt != "" {
+	if input.SystemPrompt != "" && conversation.SystemPrompt == "" {
 		conversation.SystemPrompt = input.SystemPrompt
 	}
 	conversation.Messages = append(conversation.Messages, models.ChatMessage{

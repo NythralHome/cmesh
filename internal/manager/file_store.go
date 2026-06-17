@@ -107,6 +107,14 @@ func (s *FileStore) DeleteMemory(id string) bool {
 	return ok
 }
 
+func (s *FileStore) DeleteMemoriesByModel(modelID string) int {
+	deleted := s.State.DeleteMemoriesByModel(modelID)
+	if deleted > 0 {
+		_ = s.save()
+	}
+	return deleted
+}
+
 func (s *FileStore) CancelJob(jobID string) (jobs.Job, bool) {
 	job, ok := s.State.CancelJob(jobID)
 	if ok {

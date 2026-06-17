@@ -547,6 +547,88 @@ func TestMemoryAPIDeletesMemory(t *testing.T) {
 	}
 }
 
+func TestMemoryAPIPreviewsAndClearsModelMemory(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	state.AppendConversationMessage("conv-test", "qwen2.5-0.5b-instruct-q4-k-m", "node-test", "Base prompt.", models.ChatMessage{
+		Role:    "user",
+		Content: "My name is Sergiy.",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/memories/preview?model_id=qwen2.5-0.5b-instruct-q4-k-m&system_prompt=Base+prompt.", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var preview struct {
+		MemoryContext         string `json:"memory_context"`
+		EffectiveSystemPrompt string `json:"effective_system_prompt"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(preview.MemoryContext, "user.name: Sergiy") {
+		t.Fatalf("expected memory context, got %#v", preview)
+	}
+	if !strings.Contains(preview.EffectiveSystemPrompt, "Base prompt.") || !strings.Contains(preview.EffectiveSystemPrompt, "Known memory") {
+		t.Fatalf("expected effective prompt with memory, got %#v", preview)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/v1/memories?model_id=qwen2.5-0.5b-instruct-q4-k-m", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := state.Memories("qwen2.5-0.5b-instruct-q4-k-m"); len(got) != 0 {
+		t.Fatalf("expected model memory cleared, got %#v", got)
+	}
+}
+
+func TestGenerateCompletionKeepsStoredSystemPromptClean(t *testing.T) {
+	state := NewState()
+	state.AppendConversationMessage("conv-test", "qwen2.5-0.5b-instruct-q4-k-m", "node-test", "Base prompt.", models.ChatMessage{
+		Role:    "user",
+		Content: "My name is Sergiy.",
+	})
+	input, err := json.Marshal(models.GenerateInput{
+		ModelID:        "qwen2.5-0.5b-instruct-q4-k-m",
+		ConversationID: "conv-test",
+		SystemPrompt:   systemPromptWithMemory("Base prompt.", "qwen2.5-0.5b-instruct-q4-k-m", state),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerate,
+		Input:       string(input),
+		RequestedBy: "test",
+		AssignedTo:  "node-test",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.jobs[job.ID] = jobs.Job{
+		ID:         job.ID,
+		Type:       job.Type,
+		Status:     jobs.StatusRunning,
+		Input:      job.Input,
+		AssignedTo: "node-test",
+	}
+	if _, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{NodeID: "node-test", Result: `{"output":"hello"}`}); !ok {
+		t.Fatal("expected generate completion to succeed")
+	}
+	conversation, ok := state.Conversation("conv-test")
+	if !ok {
+		t.Fatal("expected conversation")
+	}
+	if conversation.SystemPrompt != "Base prompt." {
+		t.Fatalf("expected clean system prompt, got %q", conversation.SystemPrompt)
+	}
+}
+
 func TestReadAPIRequiresOperatorTokenWhenConfigured(t *testing.T) {
 	srv := NewServerWithOptions(ServerOptions{
 		Addr:          ":0",

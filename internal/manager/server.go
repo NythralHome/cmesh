@@ -749,11 +749,25 @@ func (s *Server) handleMemories(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperatorAuth(w, r, false) {
 		return
 	}
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	modelID := strings.TrimSpace(r.URL.Query().Get("model_id"))
+	if r.Method == http.MethodDelete {
+		if modelID == "" {
+			http.Error(w, "model_id is required", http.StatusBadRequest)
+			return
+		}
+		memories, ok := s.state.(memoryStore)
+		if !ok {
+			http.Error(w, "memory persistence is not available", http.StatusNotImplemented)
+			return
+		}
+		deleted := memories.DeleteMemoriesByModel(modelID)
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"memories": memoriesForModel(s.state, modelID),
 	})
@@ -764,6 +778,10 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/memories/"), "/")
+	if id == "preview" {
+		s.handleMemoryPreview(w, r)
+		return
+	}
 	if id == "" {
 		http.NotFound(w, r)
 		return
@@ -782,6 +800,30 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+func (s *Server) handleMemoryPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	modelID := strings.TrimSpace(r.URL.Query().Get("model_id"))
+	model, ok := models.Find(modelID)
+	if !ok {
+		http.Error(w, "unknown model", http.StatusNotFound)
+		return
+	}
+	systemPrompt := strings.TrimSpace(r.URL.Query().Get("system_prompt"))
+	if systemPrompt == "" {
+		systemPrompt = modelDefaultSystemPrompt(model)
+	}
+	memories := memoriesForModel(s.state, model.ID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model_id":                model.ID,
+		"memories":                memories,
+		"memory_context":          memoryContext(model.ID, memories),
+		"effective_system_prompt": systemPromptWithMemory(systemPrompt, model.ID, s.state),
+	})
 }
 
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
@@ -1199,6 +1241,7 @@ type conversationStore interface {
 type memoryStore interface {
 	Memories(modelID string) []Memory
 	DeleteMemory(id string) bool
+	DeleteMemoriesByModel(modelID string) int
 }
 
 func appendConversationMessage(store Store, id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation {
@@ -2108,6 +2151,16 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       margin: 0;
       font-size: 15px;
     }
+    .memory-panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .memory-panel-head .button {
+      padding: 6px 8px;
+      font-size: 12px;
+    }
     .memory-list {
       display: grid;
       gap: 8px;
@@ -2130,6 +2183,23 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .memory-value {
       font-weight: 800;
       word-break: break-word;
+    }
+    .memory-preview {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+    .memory-preview pre {
+      max-height: 180px;
+      margin: 0;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 12px;
+      line-height: 1.35;
     }
     .conversation-item {
       display: grid;
@@ -2593,20 +2663,16 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <div class="sub">Conversation history is stored in this cluster manager.</div>
           </div>
           <div class="memory-panel">
-            <h3>Model memory</h3>
+            <div class="memory-panel-head">
+              <h3>Model memory</h3>
+              <button class="button danger" id="memory-clear-model" type="button"><svg class="icon"><use href="#icon-trash"></use></svg>Clear</button>
+            </div>
             <div class="memory-list" id="memory-list">
-              {{range .Memories}}
-              <div class="memory-item" data-memory-id="{{.ID}}">
-                <div class="memory-main">
-                  <span class="conversation-meta">{{memoryLabel .}}</span>
-                  <span class="memory-value">{{.Value}}</span>
-                  <span class="conversation-meta">{{memorySubtitle .}}</span>
-                </div>
-                <button class="button danger memory-delete" type="button" data-memory-id="{{.ID}}"><svg class="icon"><use href="#icon-trash"></use></svg></button>
-              </div>
-              {{else}}
-              <div class="sub">No model memory yet.</div>
-              {{end}}
+              <div class="sub">Select a model to load memory.</div>
+            </div>
+            <div class="memory-preview">
+              <span class="conversation-meta">Effective system context</span>
+              <pre id="memory-preview-text">Select a model to preview the prompt context.</pre>
             </div>
           </div>
           <div class="conversation-list" id="conversation-list">
@@ -3150,6 +3216,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var newChatButton = document.getElementById("new-chat-button");
     var conversationList = document.getElementById("conversation-list");
     var memoryList = document.getElementById("memory-list");
+    var memoryClearModel = document.getElementById("memory-clear-model");
+    var memoryPreviewText = document.getElementById("memory-preview-text");
     var chatSystemPrompt = document.getElementById("chat-system-prompt");
     var chatTemperature = document.getElementById("chat-temperature");
     var chatMaxTokens = document.getElementById("chat-max-tokens");
@@ -3192,6 +3260,87 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       chatThread.appendChild(message);
       chatThread.scrollTop = chatThread.scrollHeight;
     }
+    function currentChatModelID() {
+      return chatModel ? String(chatModel.value || "").trim() : "";
+    }
+    function renderMemoryList(memories) {
+      if (!memoryList) return;
+      memoryList.innerHTML = "";
+      if (!memories || memories.length === 0) {
+        var empty = document.createElement("div");
+        empty.className = "sub";
+        empty.textContent = currentChatModelID() ? "No memory stored for this model yet." : "Select a model to load memory.";
+        memoryList.appendChild(empty);
+        return;
+      }
+      memories.forEach(function(memory) {
+        var item = document.createElement("div");
+        item.className = "memory-item";
+        item.dataset.memoryId = memory.id || "";
+        var main = document.createElement("div");
+        main.className = "memory-main";
+        var label = document.createElement("span");
+        label.className = "conversation-meta";
+        label.textContent = memory.key || "-";
+        var value = document.createElement("span");
+        value.className = "memory-value";
+        value.textContent = memory.value || "";
+        var meta = document.createElement("span");
+        meta.className = "conversation-meta";
+        meta.textContent = memory.model_id || "";
+        main.appendChild(label);
+        main.appendChild(value);
+        main.appendChild(meta);
+        var button = document.createElement("button");
+        button.className = "button danger memory-delete";
+        button.type = "button";
+        button.dataset.memoryId = memory.id || "";
+        button.innerHTML = '<svg class="icon"><use href="#icon-trash"></use></svg>';
+        item.appendChild(main);
+        item.appendChild(button);
+        memoryList.appendChild(item);
+      });
+    }
+    function loadModelMemory() {
+      var modelID = currentChatModelID();
+      if (!memoryList || !modelID) {
+        renderMemoryList([]);
+        if (memoryPreviewText) memoryPreviewText.textContent = "Select a model to preview the prompt context.";
+        return;
+      }
+      fetch("/v1/memories?model_id=" + encodeURIComponent(modelID)).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(payload) {
+        renderMemoryList(payload.memories || []);
+      }).catch(function(error) {
+        if (memoryList) memoryList.innerHTML = '<div class="sub">Memory load failed: ' + error.message + '</div>';
+      });
+      updateMemoryPreview();
+    }
+    function updateMemoryPreview() {
+      if (!memoryPreviewText) return;
+      var modelID = currentChatModelID();
+      if (!modelID) {
+        memoryPreviewText.textContent = "Select a model to preview the prompt context.";
+        return;
+      }
+      var params = new URLSearchParams();
+      params.set("model_id", modelID);
+      if (chatSystemPrompt && chatSystemPrompt.value) params.set("system_prompt", chatSystemPrompt.value);
+      fetch("/v1/memories/preview?" + params.toString()).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(payload) {
+        memoryPreviewText.textContent = payload.effective_system_prompt || "No effective prompt context.";
+      }).catch(function(error) {
+        memoryPreviewText.textContent = "Preview failed: " + error.message;
+      });
+    }
     function setActiveConversation(id) {
       chatConversationID = id || "";
       try {
@@ -3224,6 +3373,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       if (chatModel && conversation.model_id) chatModel.value = conversation.model_id;
       syncChatNodes();
       if (chatNode && conversation.node_id) chatNode.value = conversation.node_id;
+      loadModelMemory();
       if (modelStatus) modelStatus.innerText = "Loaded conversation " + conversation.id + ".";
     }
     function loadConversation(id) {
@@ -3281,8 +3431,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       });
     }
     if (chatModel) {
-      chatModel.addEventListener("change", syncChatNodes);
+      chatModel.addEventListener("change", function() {
+        syncChatNodes();
+        loadModelMemory();
+      });
       syncChatNodes();
+      loadModelMemory();
     }
     if (conversationList) {
       conversationList.querySelectorAll(".conversation-item").forEach(function(button) {
@@ -3296,30 +3450,58 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         setActiveConversation("");
         resetChatThread();
         if (chatSystemPrompt) chatSystemPrompt.value = "";
+        loadModelMemory();
         if (modelStatus) modelStatus.innerText = "New chat ready.";
       });
     }
+    if (chatSystemPrompt) {
+      chatSystemPrompt.addEventListener("input", updateMemoryPreview);
+    }
     if (memoryList) {
-      memoryList.querySelectorAll(".memory-delete").forEach(function(button) {
-        button.addEventListener("click", function() {
-          var memoryID = button.dataset.memoryId;
-          if (!memoryID) return;
-          button.disabled = true;
-          fetch("/v1/memories/" + encodeURIComponent(memoryID), {
-            method: "DELETE"
-          }).then(function(response) {
-            if (!response.ok) {
-              return response.text().then(function(text) { throw new Error(text || response.statusText); });
-            }
-            return response.json();
-          }).then(function() {
-            var item = memoryList.querySelector('[data-memory-id="' + memoryID + '"]');
-            if (item) item.remove();
-            if (modelStatus) modelStatus.innerText = "Memory deleted.";
-          }).catch(function(error) {
-            button.disabled = false;
-            if (modelStatus) modelStatus.innerText = "Memory delete failed: " + error.message;
-          });
+      memoryList.addEventListener("click", function(event) {
+        var button = event.target.closest ? event.target.closest(".memory-delete") : null;
+        if (!button) return;
+        var memoryID = button.dataset.memoryId;
+        if (!memoryID) return;
+        button.disabled = true;
+        fetch("/v1/memories/" + encodeURIComponent(memoryID), {
+          method: "DELETE"
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function() {
+          if (modelStatus) modelStatus.innerText = "Memory deleted.";
+          loadModelMemory();
+        }).catch(function(error) {
+          button.disabled = false;
+          if (modelStatus) modelStatus.innerText = "Memory delete failed: " + error.message;
+        });
+      });
+    }
+    if (memoryClearModel) {
+      memoryClearModel.addEventListener("click", function() {
+        var modelID = currentChatModelID();
+        if (!modelID) {
+          if (modelStatus) modelStatus.innerText = "Select a model before clearing memory.";
+          return;
+        }
+        memoryClearModel.disabled = true;
+        fetch("/v1/memories?model_id=" + encodeURIComponent(modelID), {
+          method: "DELETE"
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function(payload) {
+          if (modelStatus) modelStatus.innerText = "Cleared " + (payload.deleted || 0) + " memory item(s).";
+          loadModelMemory();
+        }).catch(function(error) {
+          if (modelStatus) modelStatus.innerText = "Clear memory failed: " + error.message;
+        }).finally(function() {
+          memoryClearModel.disabled = false;
         });
       });
     }
@@ -3371,6 +3553,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               setActiveConversation(input.conversation_id);
             }
           } catch (error) {}
+          loadModelMemory();
           modelStatus.innerText = "Generate job " + job.id + " submitted.";
           pollModelJob(job.id, 0);
         }).catch(function(error) {
