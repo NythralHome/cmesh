@@ -157,6 +157,13 @@ jobs:
                 --key-id "$CMESH_MACOS_NOTARY_KEY_ID" \
                 --issuer "$CMESH_MACOS_NOTARY_ISSUER_ID" \
                 --wait
+            elif [ -n "${CMESH_MACOS_NOTARY_KEY_ID:-}" ] && [ -n "${CMESH_MACOS_NOTARY_KEY_P8:-}" ]; then
+              notary_key_path="$RUNNER_TEMP/AuthKey_${CMESH_MACOS_NOTARY_KEY_ID}.p8"
+              echo "$CMESH_MACOS_NOTARY_KEY_P8" | base64 --decode > "$notary_key_path"
+              xcrun notarytool submit "../../dist/$dmg_name" \
+                --key "$notary_key_path" \
+                --key-id "$CMESH_MACOS_NOTARY_KEY_ID" \
+                --wait
             elif [ -n "${CMESH_MACOS_NOTARY_APPLE_ID:-}" ] && [ -n "${CMESH_MACOS_NOTARY_PASSWORD:-}" ] && [ -n "${CMESH_MACOS_NOTARY_TEAM_ID:-}" ]; then
               xcrun notarytool submit "../../dist/$dmg_name" \
                 --apple-id "$CMESH_MACOS_NOTARY_APPLE_ID" \
