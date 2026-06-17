@@ -1450,6 +1450,31 @@ func runtimeSummary(runtimes []cluster.RuntimeResource) string {
 	return strings.Join(parts, "; ")
 }
 
+func heartbeatAge(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	age := time.Since(t)
+	if age < 0 {
+		age = 0
+	}
+	if age < time.Minute {
+		return fmt.Sprintf("%.0fs ago", age.Seconds())
+	}
+	if age < time.Hour {
+		return fmt.Sprintf("%.0fm ago", age.Minutes())
+	}
+	return fmt.Sprintf("%.1fh ago", age.Hours())
+}
+
+func workerModelBytes(models []cluster.ModelResource) uint64 {
+	var total uint64
+	for _, model := range models {
+		total += model.Bytes
+	}
+	return total
+}
+
 func conversationTitle(conversation Conversation) string {
 	for _, message := range conversation.Messages {
 		if message.Role == "user" && strings.TrimSpace(message.Content) != "" {
@@ -1727,6 +1752,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 	"memoryLabel":          memoryLabel,
 	"memorySubtitle":       memorySubtitle,
 	"runtimeSummary":       runtimeSummary,
+	"heartbeatAge":         heartbeatAge,
+	"workerModelBytes":     workerModelBytes,
 	"modelInstalledOn":     modelInstalledOn,
 	"modelNodeOptions": func(nodes map[string]cluster.Node, summary ModelSummary) []cluster.Node {
 		out := make([]cluster.Node, 0, len(summary.InstalledOn))
@@ -2813,7 +2840,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           {{range .OnlineNodes}}
             <tr>
               <td><code>{{.Name}}</code><br><span class="sub">{{.ID}}</span></td>
-              <td><span class="pill">{{.Status}}</span></td>
+              <td><span class="pill">{{.Status}}</span><br><span class="sub">heartbeat {{heartbeatAge .UpdatedAt}}</span></td>
               <td>{{.Resources.CPU.CoresAllowed}} / {{.Resources.CPU.CoresTotal}} cores</td>
               <td>{{printf "%.1f" (gb .Resources.Memory.AllowedBytes)}} / {{printf "%.1f" (gb .Resources.Memory.TotalBytes)}} GB</td>
               <td>{{printf "%.1f" (gb .Resources.Storage.AllowedBytes)}} GB allowed<br><span class="sub">{{printf "%.1f" (gb .Resources.Storage.FreeBytes)}} GB free</span></td>
@@ -2823,12 +2850,13 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 {{else}}
                   <span class="sub">No installed models reported</span>
                 {{end}}
+                {{if .Resources.Models}}<div class="sub">total {{printf "%.0f" (mb (workerModelBytes .Resources.Models))}} MB</div>{{end}}
               </td>
               <td><span class="sub">{{runtimeSummary .Resources.Runtimes}}</span></td>
               <td>{{range .Resources.GPU}}<div>{{.Name}}</div>{{else}}0{{end}}</td>
               <td>{{index $.WorkerActiveJobs .ID}} / {{workerSlots .}} active</td>
               <td>{{with index $.Benchmarks .ID}}{{printf "%.0f" .TotalScore}}{{else}}Not run{{end}}</td>
-              <td>{{.UpdatedAt.Format "15:04:05 MST"}}</td>
+              <td>{{heartbeatAge .UpdatedAt}}<br><span class="sub">{{.UpdatedAt.Format "15:04:05 MST"}}</span></td>
             </tr>
           {{end}}
           </tbody>

@@ -1575,6 +1575,45 @@ func TestClusterBenchmarkRequiresOnlineWorkers(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsWorkerHealthAndRuntimeInventory(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "health-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Models: []cluster.ModelResource{{
+			ID:    "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:  "Qwen2.5 0.5B Instruct",
+			Bytes: 512 * 1024 * 1024,
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:    "llama.cpp",
+			Ready:   true,
+			Version: "b9672",
+			Source:  "cmesh-runtime-cache",
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected dashboard status 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, expected := range []string{
+		"health-worker",
+		"heartbeat",
+		"llama.cpp ready b9672",
+		"total 512 MB",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("expected dashboard to contain %q", expected)
+		}
+	}
+}
+
 func TestModelCatalogAndInstallJob(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
