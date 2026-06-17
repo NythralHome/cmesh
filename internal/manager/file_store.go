@@ -10,6 +10,7 @@ import (
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
+	"github.com/cmesh/cmesh/internal/models"
 	"github.com/cmesh/cmesh/internal/resources"
 )
 
@@ -19,10 +20,11 @@ type FileStore struct {
 }
 
 type fileStoreSnapshot struct {
-	StartedAt  time.Time                                                        `json:"started_at"`
-	Nodes      map[string]cluster.Node                                          `json:"nodes"`
-	Benchmarks map[string]map[resources.BenchmarkKind]resources.BenchmarkResult `json:"benchmarks"`
-	Jobs       map[string]jobs.Job                                              `json:"jobs"`
+	StartedAt     time.Time                                                        `json:"started_at"`
+	Nodes         map[string]cluster.Node                                          `json:"nodes"`
+	Benchmarks    map[string]map[resources.BenchmarkKind]resources.BenchmarkResult `json:"benchmarks"`
+	Jobs          map[string]jobs.Job                                              `json:"jobs"`
+	Conversations map[string]Conversation                                          `json:"conversations,omitempty"`
 }
 
 func NewFileStore(path string) (*FileStore, error) {
@@ -90,6 +92,12 @@ func (s *FileStore) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Jo
 	return job, ok
 }
 
+func (s *FileStore) AppendConversationMessage(id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation {
+	conversation := s.State.AppendConversationMessage(id, modelID, nodeID, systemPrompt, message)
+	_ = s.save()
+	return conversation
+}
+
 func (s *FileStore) CancelJob(jobID string) (jobs.Job, bool) {
 	job, ok := s.State.CancelJob(jobID)
 	if ok {
@@ -130,16 +138,20 @@ func (s *FileStore) load() error {
 	if snapshot.Jobs != nil {
 		s.jobs = snapshot.Jobs
 	}
+	if snapshot.Conversations != nil {
+		s.conversations = snapshot.Conversations
+	}
 	return nil
 }
 
 func (s *FileStore) save() error {
 	s.mu.RLock()
 	snapshot := fileStoreSnapshot{
-		StartedAt:  s.startedAt,
-		Nodes:      cloneNodes(s.nodes),
-		Benchmarks: cloneBenchmarks(s.benchmarks),
-		Jobs:       cloneJobs(s.jobs),
+		StartedAt:     s.startedAt,
+		Nodes:         cloneNodes(s.nodes),
+		Benchmarks:    cloneBenchmarks(s.benchmarks),
+		Jobs:          cloneJobs(s.jobs),
+		Conversations: cloneConversations(s.conversations),
 	}
 	s.mu.RUnlock()
 

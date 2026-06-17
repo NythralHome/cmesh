@@ -1047,18 +1047,19 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	defer cancel()
 	args := []string{
 		"-m", path,
-		"-p", strings.TrimSpace(req.Prompt),
+		"-p", modelPrompt(model, req),
 		"-n", strconv.Itoa(maxTokens),
 		"--temp", temperature,
 		"--threads", "1",
 		"--ctx-size", strconv.Itoa(modelContextSize(model)),
-		"-sys", modelSystemPrompt(model),
-		"-r", "<|im_end|>",
 		"--log-disable",
 		"--no-display-prompt",
 		"--no-show-timings",
 		"--simple-io",
 		"--single-turn",
+	}
+	for _, stop := range modelStopSequences(model) {
+		args = append(args, "-r", stop)
 	}
 	cmd := exec.CommandContext(ctx, cli, args...)
 	cmd.Env = os.Environ()
@@ -1145,10 +1146,210 @@ func modelContextSize(model models.Model) int {
 }
 
 func modelSystemPrompt(model models.Model) string {
-	if strings.EqualFold(model.Family, "Qwen") {
-		return "You are a concise assistant. Answer only the user's question. Do not print role names or chat template tokens."
+	base := "You are CMesh's local AI assistant. Continue the conversation using the provided history. Answer the latest user message directly. If the user shared personal details earlier in this conversation, remember and use them. Do not print role names, chat template tokens, or hidden reasoning."
+	if strings.Contains(strings.ToLower(model.ID), "deepseek") {
+		return base + " Return only the final answer unless the user explicitly asks for reasoning."
 	}
-	return "You are a concise assistant. Answer only the user's question."
+	if strings.EqualFold(model.Family, "Qwen") {
+		return base + " Prefer concise, natural answers."
+	}
+	return base
+}
+
+func modelPrompt(model models.Model, req models.GenerateInput) string {
+	systemPrompt := strings.TrimSpace(req.SystemPrompt)
+	if systemPrompt == "" {
+		systemPrompt = modelSystemPrompt(model)
+	}
+	messages := normalizePromptMessages(req.Messages, req.Prompt)
+	if len(messages) == 0 {
+		messages = []models.ChatMessage{{Role: "user", Content: strings.TrimSpace(req.Prompt)}}
+	}
+
+	id := strings.ToLower(model.ID)
+	family := strings.ToLower(model.Family)
+	switch {
+	case strings.Contains(id, "deepseek") || family == "qwen":
+		return qwenChatPrompt(systemPrompt, messages)
+	case family == "gemma":
+		return gemmaChatPrompt(systemPrompt, messages)
+	case family == "mistral":
+		return mistralChatPrompt(systemPrompt, messages)
+	case family == "phi":
+		return phiChatPrompt(systemPrompt, messages)
+	default:
+		return llamaChatPrompt(systemPrompt, messages)
+	}
+}
+
+func normalizePromptMessages(messages []models.ChatMessage, fallbackPrompt string) []models.ChatMessage {
+	out := make([]models.ChatMessage, 0, len(messages)+1)
+	for _, message := range messages {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		if role != "assistant" && role != "system" {
+			role = "user"
+		}
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+		out = append(out, models.ChatMessage{Role: role, Content: content})
+	}
+	if len(out) == 0 && strings.TrimSpace(fallbackPrompt) != "" {
+		out = append(out, models.ChatMessage{Role: "user", Content: strings.TrimSpace(fallbackPrompt)})
+	}
+	return out
+}
+
+func qwenChatPrompt(systemPrompt string, messages []models.ChatMessage) string {
+	var b strings.Builder
+	b.WriteString("<|im_start|>system\n")
+	b.WriteString(systemPrompt)
+	b.WriteString("<|im_end|>\n")
+	for _, message := range messages {
+		if message.Role == "system" {
+			continue
+		}
+		b.WriteString("<|im_start|>")
+		b.WriteString(qwenRole(message.Role))
+		b.WriteString("\n")
+		b.WriteString(message.Content)
+		b.WriteString("<|im_end|>\n")
+	}
+	b.WriteString("<|im_start|>assistant\n")
+	return b.String()
+}
+
+func qwenRole(role string) string {
+	if role == "assistant" {
+		return "assistant"
+	}
+	return "user"
+}
+
+func gemmaChatPrompt(systemPrompt string, messages []models.ChatMessage) string {
+	var b strings.Builder
+	if systemPrompt != "" {
+		b.WriteString("<start_of_turn>user\n")
+		b.WriteString(systemPrompt)
+		b.WriteString("<end_of_turn>\n<start_of_turn>model\nUnderstood.<end_of_turn>\n")
+	}
+	for _, message := range messages {
+		if message.Role == "system" {
+			continue
+		}
+		role := "user"
+		if message.Role == "assistant" {
+			role = "model"
+		}
+		b.WriteString("<start_of_turn>")
+		b.WriteString(role)
+		b.WriteString("\n")
+		b.WriteString(message.Content)
+		b.WriteString("<end_of_turn>\n")
+	}
+	b.WriteString("<start_of_turn>model\n")
+	return b.String()
+}
+
+func mistralChatPrompt(systemPrompt string, messages []models.ChatMessage) string {
+	var b strings.Builder
+	pendingUser := ""
+	for _, message := range messages {
+		if message.Role == "system" {
+			continue
+		}
+		if message.Role == "assistant" {
+			if pendingUser != "" {
+				b.WriteString("[INST] ")
+				if systemPrompt != "" {
+					b.WriteString(systemPrompt)
+					b.WriteString("\n\n")
+					systemPrompt = ""
+				}
+				b.WriteString(pendingUser)
+				b.WriteString(" [/INST] ")
+				pendingUser = ""
+			}
+			b.WriteString(message.Content)
+			b.WriteString(" ")
+			continue
+		}
+		if pendingUser != "" {
+			pendingUser += "\n\n" + message.Content
+		} else {
+			pendingUser = message.Content
+		}
+	}
+	if pendingUser != "" {
+		b.WriteString("[INST] ")
+		if systemPrompt != "" {
+			b.WriteString(systemPrompt)
+			b.WriteString("\n\n")
+		}
+		b.WriteString(pendingUser)
+		b.WriteString(" [/INST]")
+	}
+	return b.String()
+}
+
+func phiChatPrompt(systemPrompt string, messages []models.ChatMessage) string {
+	var b strings.Builder
+	b.WriteString("<|system|>\n")
+	b.WriteString(systemPrompt)
+	b.WriteString("<|end|>\n")
+	for _, message := range messages {
+		if message.Role == "system" {
+			continue
+		}
+		role := "user"
+		if message.Role == "assistant" {
+			role = "assistant"
+		}
+		b.WriteString("<|")
+		b.WriteString(role)
+		b.WriteString("|>\n")
+		b.WriteString(message.Content)
+		b.WriteString("<|end|>\n")
+	}
+	b.WriteString("<|assistant|>\n")
+	return b.String()
+}
+
+func llamaChatPrompt(systemPrompt string, messages []models.ChatMessage) string {
+	var b strings.Builder
+	b.WriteString("System: ")
+	b.WriteString(systemPrompt)
+	b.WriteString("\n\n")
+	for _, message := range messages {
+		if message.Role == "system" {
+			continue
+		}
+		role := "User"
+		if message.Role == "assistant" {
+			role = "Assistant"
+		}
+		b.WriteString(role)
+		b.WriteString(": ")
+		b.WriteString(message.Content)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Assistant:")
+	return b.String()
+}
+
+func modelStopSequences(model models.Model) []string {
+	stops := []string{
+		"<|im_end|>",
+		"<|im_start|>user",
+		"<|end|>",
+		"<end_of_turn>",
+		"<start_of_turn>user",
+		"<|user|>",
+		"</s>",
+		"User:",
+	}
+	return stops
 }
 
 func cleanLlamaOutput(output string, prompt string) string {
@@ -1204,6 +1405,7 @@ func cleanLlamaOutput(output string, prompt string) string {
 
 func sanitizeModelText(text string) string {
 	text = removeChatTemplateTokens(text)
+	text = removeReasoningText(text)
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	cleaned := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -1223,6 +1425,29 @@ func sanitizeModelText(text string) string {
 		cleaned = append(cleaned, line)
 	}
 	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
+func removeReasoningText(text string) string {
+	for {
+		start := strings.Index(strings.ToLower(text), "<think>")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(strings.ToLower(text[start:]), "</think>")
+		if end < 0 {
+			text = text[:start]
+			break
+		}
+		text = text[:start] + text[start+end+len("</think>"):]
+	}
+	lower := strings.ToLower(text)
+	if idx := strings.LastIndex(lower, "[start thinking]"); idx >= 0 {
+		after := text[idx+len("[start thinking]"):]
+		if trimmed := strings.TrimSpace(after); trimmed != "" {
+			text = trimmed
+		}
+	}
+	return strings.TrimSpace(strings.ReplaceAll(text, "[Start thinking]", ""))
 }
 
 func removeChatTemplateTokens(text string) string {

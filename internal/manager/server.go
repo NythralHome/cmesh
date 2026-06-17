@@ -628,10 +628,12 @@ func (s *Server) handleModelGenerate(w http.ResponseWriter, r *http.Request, mod
 		return
 	}
 	var req struct {
-		NodeID      string `json:"node_id"`
-		Prompt      string `json:"prompt"`
-		MaxTokens   int    `json:"max_tokens"`
-		Temperature string `json:"temperature"`
+		NodeID         string `json:"node_id"`
+		Prompt         string `json:"prompt"`
+		ConversationID string `json:"conversation_id"`
+		SystemPrompt   string `json:"system_prompt"`
+		MaxTokens      int    `json:"max_tokens"`
+		Temperature    string `json:"temperature"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -650,11 +652,26 @@ func (s *Server) handleModelGenerate(w http.ResponseWriter, r *http.Request, mod
 		http.Error(w, "model is not installed on the selected worker", http.StatusConflict)
 		return
 	}
+	conversationID := strings.TrimSpace(req.ConversationID)
+	if conversationID == "" {
+		conversationID = newConversationID()
+	}
+	systemPrompt := strings.TrimSpace(req.SystemPrompt)
+	if systemPrompt == "" {
+		systemPrompt = modelDefaultSystemPrompt(model)
+	}
+	conversation := appendConversationMessage(s.state, conversationID, model.ID, req.NodeID, systemPrompt, models.ChatMessage{
+		Role:    "user",
+		Content: req.Prompt,
+	})
 	input, err := json.Marshal(models.GenerateInput{
-		ModelID:     model.ID,
-		Prompt:      req.Prompt,
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
+		ModelID:        model.ID,
+		Prompt:         req.Prompt,
+		Messages:       conversation.Messages,
+		SystemPrompt:   conversation.SystemPrompt,
+		ConversationID: conversation.ID,
+		MaxTokens:      req.MaxTokens,
+		Temperature:    req.Temperature,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1084,6 +1101,45 @@ func modelFailureHint(summary ModelSummary) string {
 		return ""
 	}
 	return ""
+}
+
+type conversationStore interface {
+	Conversation(id string) (Conversation, bool)
+	AppendConversationMessage(id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation
+}
+
+func appendConversationMessage(store Store, id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation {
+	if conversations, ok := store.(conversationStore); ok {
+		return conversations.AppendConversationMessage(id, modelID, nodeID, systemPrompt, message)
+	}
+	return Conversation{
+		ID:           id,
+		ModelID:      modelID,
+		NodeID:       nodeID,
+		SystemPrompt: systemPrompt,
+		Messages:     []models.ChatMessage{normalizeChatMessage(message)},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+}
+
+func modelDefaultSystemPrompt(model models.Model) string {
+	base := "You are CMesh's local AI assistant. Continue the conversation using the provided history. Answer the latest user message directly. If the user shared personal details earlier in this conversation, remember and use them. Do not print role names, chat template tokens, or hidden reasoning."
+	if strings.Contains(strings.ToLower(model.ID), "deepseek") {
+		return base + " Return only the final answer unless the user explicitly asks for reasoning."
+	}
+	switch strings.ToLower(model.Family) {
+	case "qwen":
+		return base + " Prefer concise, natural answers."
+	case "gemma":
+		return base + " Keep answers clear and conversational."
+	case "mistral":
+		return base + " Be practical and concise."
+	case "phi":
+		return base + " Keep answers short unless more detail is needed."
+	default:
+		return base
+	}
 }
 
 func activeJobsByWorker(in []jobs.Job) map[string]int {
@@ -2747,6 +2803,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var chatNode = document.getElementById("chat-node");
     var chatThread = document.getElementById("chat-thread");
     var modelStatus = document.getElementById("model-status");
+    var chatConversationKey = "cmesh.chat.conversation";
+    var chatConversationID = "";
+    try {
+      chatConversationID = window.localStorage.getItem(chatConversationKey) || "";
+    } catch (error) {}
     function syncChatNodes() {
       if (!chatModel || !chatNode) return;
       var modelID = chatModel.value;
@@ -2846,13 +2907,26 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         fetch("/v1/models/" + encodeURIComponent(modelID) + "/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ node_id: nodeID, prompt: prompt, max_tokens: 64, temperature: "0.7" })
+          body: JSON.stringify({
+            node_id: nodeID,
+            conversation_id: chatConversationID,
+            prompt: prompt,
+            max_tokens: 512,
+            temperature: "0.7"
+          })
         }).then(function(response) {
           if (!response.ok) {
             return response.text().then(function(text) { throw new Error(text || response.statusText); });
           }
           return response.json();
         }).then(function(job) {
+          try {
+            var input = JSON.parse(job.input || "{}");
+            if (input.conversation_id) {
+              chatConversationID = input.conversation_id;
+              window.localStorage.setItem(chatConversationKey, chatConversationID);
+            }
+          } catch (error) {}
           modelStatus.innerText = "Generate job " + job.id + " submitted.";
           pollModelJob(job.id, 0);
         }).catch(function(error) {

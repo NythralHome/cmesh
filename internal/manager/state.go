@@ -3,12 +3,14 @@ package manager
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"sync"
 	"time"
 
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
+	"github.com/cmesh/cmesh/internal/models"
 	"github.com/cmesh/cmesh/internal/resources"
 )
 
@@ -21,6 +23,7 @@ type State struct {
 	nodes            map[string]cluster.Node
 	benchmarks       map[string]map[resources.BenchmarkKind]resources.BenchmarkResult
 	jobs             map[string]jobs.Job
+	conversations    map[string]Conversation
 }
 
 func NewState() *State {
@@ -30,6 +33,7 @@ func NewState() *State {
 		nodes:            make(map[string]cluster.Node),
 		benchmarks:       make(map[string]map[resources.BenchmarkKind]resources.BenchmarkResult),
 		jobs:             make(map[string]jobs.Job),
+		conversations:    make(map[string]Conversation),
 	}
 }
 
@@ -299,11 +303,86 @@ func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, b
 	} else {
 		job.Status = jobs.StatusSucceeded
 		job.FinishedAt = now
+		s.appendAssistantMessageForJobLocked(job, now)
 	}
 	s.jobs[job.ID] = job
 	s.scheduleQueuedJobsLocked(now)
 
 	return job, true
+}
+
+func (s *State) Conversation(id string) (Conversation, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	conversation, ok := s.conversations[id]
+	conversation.Messages = append([]models.ChatMessage(nil), conversation.Messages...)
+	return conversation, ok
+}
+
+func (s *State) AppendConversationMessage(id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation {
+	now := time.Now().UTC()
+	message = normalizeChatMessage(message)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conversation, ok := s.conversations[id]
+	if !ok {
+		conversation = Conversation{
+			ID:        id,
+			CreatedAt: now,
+		}
+	}
+	conversation.ModelID = modelID
+	conversation.NodeID = nodeID
+	if systemPrompt != "" {
+		conversation.SystemPrompt = systemPrompt
+	}
+	if message.Content != "" {
+		conversation.Messages = append(conversation.Messages, message)
+		conversation.Messages = trimConversationMessages(conversation.Messages)
+	}
+	conversation.UpdatedAt = now
+	s.conversations[id] = conversation
+
+	conversation.Messages = append([]models.ChatMessage(nil), conversation.Messages...)
+	return conversation
+}
+
+func (s *State) appendAssistantMessageForJobLocked(job jobs.Job, now time.Time) {
+	if job.Type != models.JobGenerate || job.Result == "" {
+		return
+	}
+	var input models.GenerateInput
+	if err := json.Unmarshal([]byte(job.Input), &input); err != nil || input.ConversationID == "" {
+		return
+	}
+	var result struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal([]byte(job.Result), &result); err != nil || result.Output == "" {
+		return
+	}
+	conversation, ok := s.conversations[input.ConversationID]
+	if !ok {
+		conversation = Conversation{
+			ID:        input.ConversationID,
+			ModelID:   input.ModelID,
+			CreatedAt: now,
+		}
+	}
+	conversation.ModelID = input.ModelID
+	if input.SystemPrompt != "" {
+		conversation.SystemPrompt = input.SystemPrompt
+	}
+	conversation.Messages = append(conversation.Messages, models.ChatMessage{
+		Role:    "assistant",
+		Content: result.Output,
+	})
+	conversation.Messages = trimConversationMessages(conversation.Messages)
+	conversation.UpdatedAt = now
+	s.conversations[input.ConversationID] = conversation
 }
 
 func (s *State) CancelJob(jobID string) (jobs.Job, bool) {

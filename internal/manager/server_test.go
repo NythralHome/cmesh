@@ -343,6 +343,62 @@ func TestRecentChatJobsOnlyIncludesSuccessfulDashboardChat(t *testing.T) {
 	}
 }
 
+func TestConversationStoresAssistantMessageAfterGenerateCompletes(t *testing.T) {
+	state := NewState()
+	conversation := state.AppendConversationMessage("conv-test", "qwen2.5-0.5b-instruct-q4-k-m", "node-test", "system", models.ChatMessage{
+		Role:    "user",
+		Content: "Мене звати Сергій.",
+	})
+	if len(conversation.Messages) != 1 {
+		t.Fatalf("expected one user message, got %d", len(conversation.Messages))
+	}
+
+	input, err := json.Marshal(models.GenerateInput{
+		ModelID:        "qwen2.5-0.5b-instruct-q4-k-m",
+		ConversationID: "conv-test",
+		SystemPrompt:   "system",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerate,
+		Input:       string(input),
+		RequestedBy: "dashboard-chat",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.jobs[job.ID] = job
+	state.jobs[job.ID] = jobs.Job{
+		ID:          job.ID,
+		Type:        job.Type,
+		Status:      jobs.StatusRunning,
+		Input:       job.Input,
+		AssignedTo:  "node-test",
+		RequestedBy: "dashboard-chat",
+	}
+
+	result, err := json.Marshal(map[string]string{"output": "Тебе звати Сергій."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{NodeID: "node-test", Result: string(result)}); !ok {
+		t.Fatal("expected job completion to succeed")
+	}
+	conversation, ok := state.Conversation("conv-test")
+	if !ok {
+		t.Fatal("expected conversation to exist")
+	}
+	if len(conversation.Messages) != 2 {
+		t.Fatalf("expected user and assistant messages, got %#v", conversation.Messages)
+	}
+	if conversation.Messages[1].Role != "assistant" || conversation.Messages[1].Content != "Тебе звати Сергій." {
+		t.Fatalf("expected assistant output in conversation, got %#v", conversation.Messages[1])
+	}
+}
+
 func TestReadAPIRequiresOperatorTokenWhenConfigured(t *testing.T) {
 	srv := NewServerWithOptions(ServerOptions{
 		Addr:          ":0",

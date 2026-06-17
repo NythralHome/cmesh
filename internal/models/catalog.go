@@ -41,11 +41,19 @@ type DeleteInput struct {
 }
 
 type GenerateInput struct {
-	ModelID     string `json:"model_id"`
-	Prompt      string `json:"prompt"`
-	MaxTokens   int    `json:"max_tokens,omitempty"`
-	Temperature string `json:"temperature,omitempty"`
-	CacheDir    string `json:"cache_dir,omitempty"`
+	ModelID        string        `json:"model_id"`
+	Prompt         string        `json:"prompt"`
+	Messages       []ChatMessage `json:"messages,omitempty"`
+	SystemPrompt   string        `json:"system_prompt,omitempty"`
+	ConversationID string        `json:"conversation_id,omitempty"`
+	MaxTokens      int           `json:"max_tokens,omitempty"`
+	Temperature    string        `json:"temperature,omitempty"`
+	CacheDir       string        `json:"cache_dir,omitempty"`
+}
+
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 const gb = 1024 * 1024 * 1024

@@ -106,6 +106,28 @@ func TestModelSystemPromptUsesQwenGuardrails(t *testing.T) {
 	}
 }
 
+func TestModelPromptIncludesChatHistory(t *testing.T) {
+	model, err := models.MustFind("qwen2.5-0.5b-instruct-q4-k-m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := modelPrompt(model, models.GenerateInput{
+		SystemPrompt: "Remember user details.",
+		Prompt:       "Як мене звати?",
+		Messages: []models.ChatMessage{
+			{Role: "user", Content: "Мене звати Сергій."},
+			{Role: "assistant", Content: "Запамʼятав."},
+			{Role: "user", Content: "Як мене звати?"},
+		},
+	})
+	if !strings.Contains(got, "Мене звати Сергій.") || !strings.Contains(got, "Як мене звати?") {
+		t.Fatalf("expected prompt to include chat history, got %q", got)
+	}
+	if !strings.HasSuffix(got, "<|im_start|>assistant\n") {
+		t.Fatalf("expected qwen assistant turn suffix, got %q", got)
+	}
+}
+
 func TestModelContextSizeCapsLargeCatalogContext(t *testing.T) {
 	model, err := models.MustFind("qwen2.5-0.5b-instruct-q4-k-m")
 	if err != nil {
