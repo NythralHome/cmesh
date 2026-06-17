@@ -164,6 +164,33 @@ func TestTokenProtectsControlRoutes(t *testing.T) {
 	}
 }
 
+func TestStatusReportsInstalledModels(t *testing.T) {
+	server, baseURL, stop := startTestServer(t)
+	defer stop()
+
+	cacheDir := t.TempDir()
+	modelDir := filepath.Join(cacheDir, "models", "qwen2.5-0.5b-instruct-q4-k-m")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	modelPath := filepath.Join(modelDir, "qwen2.5-0.5b-instruct-q4_k_m.gguf")
+	if err := os.WriteFile(modelPath, []byte("fake model"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server.config.WorkerCacheDir = cacheDir
+
+	status := fetchStatus(t, baseURL)
+	if len(status.Models) != 1 {
+		t.Fatalf("expected one installed model, got %+v", status.Models)
+	}
+	if status.Models[0].ID != "qwen2.5-0.5b-instruct-q4-k-m" {
+		t.Fatalf("expected qwen model, got %+v", status.Models[0])
+	}
+	if status.Models[0].Path != modelPath {
+		t.Fatalf("expected model path %q, got %q", modelPath, status.Models[0].Path)
+	}
+}
+
 func TestWorkerArgs(t *testing.T) {
 	args := workerArgs(Config{
 		ManagerURL:     "https://cmesh.example.com",

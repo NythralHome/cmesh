@@ -71,6 +71,14 @@ void main() {
         'version': 'b9672',
         'platform': 'darwin/arm64',
       },
+      'models': [
+        {
+          'id': 'qwen2.5-0.5b-instruct-q4-k-m',
+          'name': 'Qwen2.5 0.5B Instruct',
+          'path': '/tmp/cmesh/models/qwen.gguf',
+          'bytes': 1073741824,
+        },
+      ],
       'job_status': {
         'state': 'running',
         'job_id': 'job-123',
@@ -85,6 +93,9 @@ void main() {
     expect(status.jobStatus?.label, 'Running job');
     expect(status.jobStatus?.jobId, 'job-123');
     expect(status.modelRuntime?.label, 'llama.cpp b9672 ready');
+    expect(status.models, hasLength(1));
+    expect(status.models.first.name, 'Qwen2.5 0.5B Instruct');
+    expect(status.models.first.sizeLabel, '1.0 GB');
     expect(
       status.startedAt?.toUtc().toIso8601String(),
       '2026-06-15T05:30:00.000Z',

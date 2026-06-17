@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cluster"
+	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/cmesh/cmesh/internal/runtimes"
 	"github.com/cmesh/cmesh/internal/workerstatus"
 )
@@ -45,6 +47,7 @@ type Status struct {
 	LogTail    string                  `json:"log_tail"`
 	JobStatus  *workerstatus.JobStatus `json:"job_status,omitempty"`
 	Runtime    runtimes.RuntimeStatus  `json:"runtime_status"`
+	Models     []cluster.ModelResource `json:"models,omitempty"`
 	Config     Config                  `json:"config"`
 	ConfigPath string                  `json:"config_path"`
 }
@@ -367,6 +370,7 @@ func (s *Server) status() Status {
 		LastError:  s.lastError,
 		LogTail:    s.logTail.String(),
 		Runtime:    runtimes.LlamaCPPStatus(s.config.WorkerCacheDir),
+		Models:     resources.DiscoverInstalledModels(s.config.WorkerCacheDir),
 		Config:     s.config,
 		ConfigPath: s.configPath,
 	}

@@ -1983,6 +1983,41 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .first-test-form .wide {
       grid-column: 1 / -1;
     }
+    .model-run-guide {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .model-run-step {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+      min-height: 150px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .model-run-step h3 {
+      margin: 0;
+      font-size: 16px;
+    }
+    .model-run-step .step-index {
+      width: 30px;
+      height: 30px;
+      margin-bottom: 2px;
+    }
+    .model-run-step.done {
+      border-color: #b7e4cf;
+      background: #f0fdf7;
+    }
+    .model-run-step.current {
+      border-color: #91c5b9;
+      box-shadow: inset 0 0 0 1px #91c5b9;
+    }
     .metric {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -2728,6 +2763,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       header, main { padding-left: 18px; padding-right: 18px; }
       table { display: block; overflow-x: auto; }
       .onboarding-body { grid-template-columns: 1fr; }
+      .model-run-guide { grid-template-columns: 1fr; }
       .step { grid-template-columns: 30px 1fr; }
       .step .pill, .step .pill-job, .step .pill-muted { grid-column: 2; width: fit-content; }
       .first-test-form { grid-template-columns: 1fr; }
@@ -3078,6 +3114,26 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       <div class="section-head">
         <h2>Model Catalog</h2>
         <code>{{installedModelCount .Models}} installed / {{len .Models}} catalog entries</code>
+      </div>
+      <div class="model-run-guide" aria-label="First model run">
+        <div class="model-run-step {{if .OnlineNodes}}done{{else}}current{{end}}">
+          <span class="step-index">{{if .OnlineNodes}}✓{{else}}1{{end}}</span>
+          <h3>Connect a worker</h3>
+          <p class="sub">{{if .OnlineNodes}}{{len .OnlineNodes}} online worker(s) can receive model jobs.{{else}}Install and start CMesh Worker before installing models.{{end}}</p>
+          {{if not .OnlineNodes}}<a class="button primary" href="{{.InviteURL}}"><svg class="icon"><use href="#icon-plus"></use></svg>Invite worker</a>{{else}}<button class="button" type="button" data-tab-shortcut="workers"><svg class="icon"><use href="#icon-workers"></use></svg>View workers</button>{{end}}
+        </div>
+        <div class="model-run-step {{if gt (installedModelCount .Models) 0}}done{{else if .OnlineNodes}}current{{end}}">
+          <span class="step-index">{{if gt (installedModelCount .Models) 0}}✓{{else}}2{{end}}</span>
+          <h3>Install a model</h3>
+          <p class="sub">{{if gt (installedModelCount .Models) 0}}{{installedModelCount .Models}} model(s) are installed on worker storage.{{else if .OnlineNodes}}Pick the smallest capable catalog model first, then move up.{{else}}A worker must be online before install buttons can run.{{end}}</p>
+          <button class="button" type="button" onclick="document.querySelector('.model-catalog')?.scrollIntoView({behavior:'smooth', block:'start'});"><svg class="icon"><use href="#icon-download"></use></svg>Open catalog</button>
+        </div>
+        <div class="model-run-step {{if gt (generatableCount .Models) 0}}done{{else if gt (installedModelCount .Models) 0}}current{{end}}">
+          <span class="step-index">{{if gt (generatableCount .Models) 0}}✓{{else}}3{{end}}</span>
+          <h3>Chat locally</h3>
+          <p class="sub">{{if gt (generatableCount .Models) 0}}{{generatableCount .Models}} ready model(s) can answer prompts through this manager.{{else}}The model must be installed and llama.cpp must be ready on that worker.{{end}}</p>
+          <button class="button {{if gt (generatableCount .Models) 0}}primary{{end}}" type="button" data-tab-shortcut="chat" {{if eq (generatableCount .Models) 0}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Open Chat</button>
+        </div>
       </div>
       <div class="installed-models">
         {{if gt (installedModelCount .Models) 0}}

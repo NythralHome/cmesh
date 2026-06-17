@@ -571,6 +571,7 @@ class WorkerRuntimeStatus {
     this.logTail = '',
     this.jobStatus,
     this.modelRuntime,
+    this.models = const [],
   });
 
   final bool running;
@@ -584,6 +585,7 @@ class WorkerRuntimeStatus {
   final String logTail;
   final WorkerJobStatus? jobStatus;
   final WorkerModelRuntimeStatus? modelRuntime;
+  final List<WorkerInstalledModel> models;
 
   factory WorkerRuntimeStatus.fromJson(Map<String, dynamic> json) {
     final startedAtRaw = json['started_at'] as String?;
@@ -600,6 +602,17 @@ class WorkerRuntimeStatus {
             json['runtime_status'] as Map<String, dynamic>,
           )
         : null;
+    final rawModels = json['models'];
+    final parsedModels = rawModels is List
+        ? rawModels
+              .whereType<Map>()
+              .map(
+                (model) => WorkerInstalledModel.fromJson(
+                  Map<String, dynamic>.from(model),
+                ),
+              )
+              .toList()
+        : const <WorkerInstalledModel>[];
     return WorkerRuntimeStatus(
       running: json['running'] as bool? ?? false,
       pid: json['pid'] as int?,
@@ -612,6 +625,7 @@ class WorkerRuntimeStatus {
       logTail: logTail,
       jobStatus: parsedJobStatus ?? WorkerJobStatus.fromLogTail(logTail),
       modelRuntime: parsedModelRuntime,
+      models: parsedModels,
     );
   }
 
@@ -620,6 +634,37 @@ class WorkerRuntimeStatus {
     if (lastError != null && lastError!.isNotEmpty) return 'Error';
     if (exitCode != null) return 'Stopped';
     return 'Not running';
+  }
+}
+
+class WorkerInstalledModel {
+  const WorkerInstalledModel({
+    required this.id,
+    required this.name,
+    this.path = '',
+    this.bytes = 0,
+  });
+
+  final String id;
+  final String name;
+  final String path;
+  final int bytes;
+
+  factory WorkerInstalledModel.fromJson(Map<String, dynamic> json) {
+    return WorkerInstalledModel(
+      id: json['id'] as String? ?? '',
+      name: json['name'] as String? ?? json['id'] as String? ?? 'Model',
+      path: json['path'] as String? ?? '',
+      bytes: (json['bytes'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  String get sizeLabel {
+    if (bytes <= 0) return '-';
+    final gb = bytes / 1024 / 1024 / 1024;
+    if (gb >= 1) return '${gb.toStringAsFixed(1)} GB';
+    final mb = bytes / 1024 / 1024;
+    return '${mb.toStringAsFixed(0)} MB';
   }
 }
 
@@ -1653,7 +1698,7 @@ class _WorkerHomePageState extends State<WorkerHomePage>
     );
 
     return DefaultTabController(
-      length: 3,
+      length: 4,
       child: Scaffold(
         body: Container(
           decoration: const BoxDecoration(
@@ -1737,6 +1782,12 @@ class _WorkerHomePageState extends State<WorkerHomePage>
                             ),
                             _TabSurface(child: connectionPanel),
                             _TabSurface(
+                              child: _ModelsRuntimePanel(
+                                status: _runtimeStatus,
+                                onRefresh: _refreshStatus,
+                              ),
+                            ),
+                            _TabSurface(
                               child: _LogsPanel(
                                 output: _output,
                                 onRefresh: _refreshStatus,
@@ -1782,6 +1833,7 @@ class _WorkerTabs extends StatelessWidget {
             tabs: [
               Tab(icon: Icon(Icons.speed), text: 'Overview'),
               Tab(icon: Icon(Icons.tune), text: 'Connection'),
+              Tab(icon: Icon(Icons.hub_outlined), text: 'Models'),
               Tab(icon: Icon(Icons.terminal), text: 'Logs'),
             ],
           ),
@@ -2570,6 +2622,161 @@ class _LogsPanel extends StatelessWidget {
           ),
           const SizedBox(height: 14),
           _LogBox(output: output, minHeight: 420),
+        ],
+      ),
+    );
+  }
+}
+
+class _ModelsRuntimePanel extends StatelessWidget {
+  const _ModelsRuntimePanel({required this.status, required this.onRefresh});
+
+  final WorkerRuntimeStatus? status;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    final runtime = status?.modelRuntime;
+    final models = status?.models ?? const <WorkerInstalledModel>[];
+    return _Panel(
+      title: 'Models and runtime',
+      icon: Icons.hub_outlined,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: onRefresh,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Refresh status'),
+            ),
+          ),
+          const SizedBox(height: 14),
+          _RuntimeDetailCard(runtime: runtime),
+          const SizedBox(height: 12),
+          _WorkerJobStatusCard(status: status?.jobStatus),
+          const SizedBox(height: 12),
+          _InstalledModelsCard(models: models),
+        ],
+      ),
+    );
+  }
+}
+
+class _RuntimeDetailCard extends StatelessWidget {
+  const _RuntimeDetailCard({required this.runtime});
+
+  final WorkerModelRuntimeStatus? runtime;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final ready = runtime?.ready ?? false;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                ready ? Icons.check_circle : Icons.error_outline,
+                color: ready ? const Color(0xFF1B7F4B) : colors.error,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  runtime?.label ?? 'Runtime not reported',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _StatusLine(label: 'Platform', value: runtime?.platform ?? '-'),
+          _StatusLine(label: 'Source', value: runtime?.source ?? '-'),
+          _StatusLine(label: 'Binary', value: runtime?.binaryPath ?? '-'),
+          if (runtime?.error.isNotEmpty == true)
+            _StatusLine(label: 'Error', value: runtime!.error),
+        ],
+      ),
+    );
+  }
+}
+
+class _InstalledModelsCard extends StatelessWidget {
+  const _InstalledModelsCard({required this.models});
+
+  final List<WorkerInstalledModel> models;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Installed models',
+            style: Theme.of(
+              context,
+            ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 10),
+          if (models.isEmpty)
+            Text(
+              'No models are installed in this worker cache yet.',
+              style: TextStyle(color: colors.onSurfaceVariant),
+            )
+          else
+            ...models.map(
+              (model) => Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.36),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: colors.outlineVariant),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      model.name,
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${model.id} · ${model.sizeLabel}',
+                      style: TextStyle(color: colors.onSurfaceVariant),
+                    ),
+                    if (model.path.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        model.path,
+                        style: TextStyle(
+                          color: colors.onSurfaceVariant,
+                          fontFamily: 'monospace',
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );
