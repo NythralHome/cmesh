@@ -817,8 +817,10 @@ func (s *Server) handleModelDistributedPlan(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	plan := distributedModelPlan(model, s.state.Nodes())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"plan": distributedModelPlan(model, s.state.Nodes()),
+		"plan":          plan,
+		"cdip_proposal": cdipPlanProposal(plan),
 	})
 }
 

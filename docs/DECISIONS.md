@@ -24,3 +24,12 @@ CMesh will include storage functionality for AI artifacts: models, tokenizer fil
 
 CMesh will not attempt to provide block storage, POSIX filesystem semantics, or a full Ceph replacement in V1.
 
+## ADR-0004: CDIP As The Distributed Inference Protocol
+
+Status: accepted
+
+CMesh will define distributed inference through CDIP, the CMesh Distributed Inference Protocol.
+
+The protocol is versioned separately from manager dashboard APIs. CDIP defines roles, message envelopes, stage lifecycle, distributed plan shape, activation frame envelopes, and conformance validation. Manager REST endpoints may expose CDIP messages, but those endpoints are not themselves the protocol.
+
+The first CDIP version is intentionally limited to planning, stage job graph construction, lifecycle messages, and activation frame envelopes. Worker-to-worker activation transport and runtime-specific layer execution can be implemented behind the CDIP contract without changing the high-level protocol semantics.

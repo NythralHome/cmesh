@@ -114,7 +114,19 @@ func TestModelDistributedPlanEndpoint(t *testing.T) {
 	}
 
 	var payload struct {
-		Plan DistributedModelPlan `json:"plan"`
+		Plan         DistributedModelPlan `json:"plan"`
+		CDIPProposal struct {
+			Protocol string `json:"protocol"`
+			Version  string `json:"version"`
+			Type     string `json:"type"`
+			ModelID  string `json:"model_id"`
+			Stages   []struct {
+				Index      int    `json:"index"`
+				NodeID     string `json:"node_id"`
+				LayerStart int    `json:"layer_start"`
+				LayerEnd   int    `json:"layer_end"`
+			} `json:"stages"`
+		} `json:"cdip_proposal"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
@@ -124,6 +136,12 @@ func TestModelDistributedPlanEndpoint(t *testing.T) {
 	}
 	if len(payload.Plan.Stages) != 2 {
 		t.Fatalf("expected two planned stages, got %#v", payload.Plan.Stages)
+	}
+	if payload.CDIPProposal.Protocol != "cdip" || payload.CDIPProposal.Version != "0.1" || payload.CDIPProposal.Type != "plan.proposal" {
+		t.Fatalf("expected cdip plan proposal, got %#v", payload.CDIPProposal)
+	}
+	if payload.CDIPProposal.ModelID != payload.Plan.ModelID || len(payload.CDIPProposal.Stages) != len(payload.Plan.Stages) {
+		t.Fatalf("expected cdip proposal to mirror plan, got %#v", payload.CDIPProposal)
 	}
 }
 
