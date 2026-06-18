@@ -179,6 +179,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	modelCatalog := models.Catalog()
 	modelsView := modelSummaries(modelCatalog, allJobs, nodes)
 	rpcPoolSummary, rpcPoolWorkers, rpcPoolEndpoints := runtimeRPCPoolReport(nodes)
+	rpcHealth := s.state.RPCHealth()
+	rankedRPCEndpoints := rankRPCEndpoints(rpcPoolEndpoints, rpcHealth)
 	data := struct {
 		Summary            ClusterSummary
 		OnlineNodes        []cluster.Node
@@ -209,8 +211,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Models:             modelsView,
 		RPCPool:            rpcPoolSummary,
 		RPCWorkers:         rpcPoolWorkers,
-		RPCEndpoints:       rpcPoolEndpoints,
-		RPCHealth:          s.state.RPCHealth(),
+		RPCEndpoints:       rankedRPCEndpoints,
+		RPCHealth:          rpcHealth,
 		Readiness:          clusterReadiness(onlineWorkerNodes(nodes), modelsView, allJobs),
 		Capacity:           clusterCapacity(s.state.ClusterSummary(), modelsView, onlineWorkerNodes(nodes)),
 		NodesByID:          nodesByID(nodes),
@@ -658,12 +660,14 @@ func (s *Server) handleRuntimeRPCPool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	summary, workers, endpoints := runtimeRPCPoolReport(s.state.Nodes())
+	health := s.state.RPCHealth()
+	rankedEndpoints := rankRPCEndpoints(endpoints, health)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"summary":           summary,
 		"workers":           workers,
-		"endpoints":         endpoints,
-		"health":            s.state.RPCHealth(),
-		"llama_cli_rpc_arg": strings.Join(endpoints, ","),
+		"endpoints":         rankedEndpoints,
+		"health":            health,
+		"llama_cli_rpc_arg": strings.Join(rankedEndpoints, ","),
 	})
 }
 
@@ -683,7 +687,7 @@ func (s *Server) handleRuntimeRPCPoolSmoke(w http.ResponseWriter, r *http.Reques
 		timeoutMS = 5000
 	}
 	_, workers, endpoints := runtimeRPCPoolReport(s.state.Nodes())
-	report := smokeRuntimeRPCEndpoints(r.Context(), endpoints, time.Duration(timeoutMS)*time.Millisecond)
+	report := smokeRuntimeRPCEndpoints(r.Context(), rankRPCEndpoints(endpoints, s.state.RPCHealth()), time.Duration(timeoutMS)*time.Millisecond)
 	s.recordRPCHealthReport(workers, report)
 	report.TimeoutMS = timeoutMS
 	status := http.StatusOK
@@ -798,6 +802,72 @@ func runtimeRPCPoolReport(nodes []cluster.Node) (RuntimeRPCPoolSummary, []Runtim
 	})
 	summary.Endpoints = len(endpoints)
 	return summary, workers, endpoints
+}
+
+func rankRPCEndpoints(endpoints []string, health []RPCHealthRecord) []string {
+	out := cleanEndpointList(endpoints)
+	if len(out) <= 1 {
+		return out
+	}
+	healthByEndpoint := make(map[string]RPCHealthRecord, len(health))
+	for _, record := range health {
+		endpoint := strings.TrimSpace(record.Endpoint)
+		if endpoint != "" {
+			healthByEndpoint[endpoint] = record
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left, leftKnown := healthByEndpoint[out[i]]
+		right, rightKnown := healthByEndpoint[out[j]]
+		leftRank := rpcHealthRank(left, leftKnown)
+		rightRank := rpcHealthRank(right, rightKnown)
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		if leftKnown && rightKnown {
+			if left.ConsecutiveFailures != right.ConsecutiveFailures {
+				return left.ConsecutiveFailures < right.ConsecutiveFailures
+			}
+			if left.Failures != right.Failures {
+				return left.Failures < right.Failures
+			}
+			if left.LastLatencyMS != right.LastLatencyMS {
+				if left.LastLatencyMS == 0 {
+					return false
+				}
+				if right.LastLatencyMS == 0 {
+					return true
+				}
+				return left.LastLatencyMS < right.LastLatencyMS
+			}
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
+func rpcHealthRank(record RPCHealthRecord, known bool) int {
+	if !known {
+		return 1
+	}
+	if record.Ready {
+		return 0
+	}
+	return 2
+}
+
+func cleanEndpointList(endpoints []string) []string {
+	out := make([]string, 0, len(endpoints))
+	seen := map[string]bool{}
+	for _, endpoint := range endpoints {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint == "" || seen[endpoint] {
+			continue
+		}
+		seen[endpoint] = true
+		out = append(out, endpoint)
+	}
+	return out
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
@@ -1492,11 +1562,12 @@ func (s *Server) modelDistributedRPCReadiness(model models.Model, nodeID string)
 func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model, nodeID string, checkHealth bool, healthTimeout time.Duration) ModelDistributedRPCPlan {
 	nodes := s.state.Nodes()
 	summary, workers, endpoints := runtimeRPCPoolReport(nodes)
+	health := s.state.RPCHealth()
 	plan := ModelDistributedRPCPlan{
 		ModelID:      model.ID,
 		Mode:         "llama.cpp-rpc",
 		RPCPool:      summary,
-		RPCEndpoints: append([]string(nil), endpoints...),
+		RPCEndpoints: rankRPCEndpoints(endpoints, health),
 	}
 	healthByEndpoint := map[string]RuntimeRPCSmokeResult{}
 	if checkHealth && len(endpoints) > 0 {
@@ -1504,7 +1575,7 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 			healthTimeout = time.Second
 		}
 		plan.HealthChecked = true
-		report := smokeRuntimeRPCEndpoints(ctx, endpoints, healthTimeout)
+		report := smokeRuntimeRPCEndpoints(ctx, rankRPCEndpoints(endpoints, health), healthTimeout)
 		s.recordRPCHealthReport(workers, report)
 		readyEndpoints := make([]string, 0, len(endpoints))
 		for _, result := range report.Results {
@@ -1513,8 +1584,7 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 				readyEndpoints = append(readyEndpoints, result.Endpoint)
 			}
 		}
-		sort.Strings(readyEndpoints)
-		plan.RPCEndpoints = readyEndpoints
+		plan.RPCEndpoints = rankRPCEndpoints(readyEndpoints, s.state.RPCHealth())
 		if report.Ready == 0 {
 			plan.Blockers = append(plan.Blockers, "no reachable llama.cpp rpc endpoints passed health check")
 		}

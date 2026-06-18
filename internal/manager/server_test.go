@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -2294,6 +2295,29 @@ func TestModelDistributedRPCPlanHealthCheckExcludesFailedEndpoints(t *testing.T)
 	}
 	if !sawReadyRecord || !sawFailedRecord {
 		t.Fatalf("expected ready and failed persisted health records, got %#v", health)
+	}
+}
+
+func TestRankRPCEndpointsUsesHealthScore(t *testing.T) {
+	ranked := rankRPCEndpoints([]string{
+		"10.0.0.30:50052",
+		"10.0.0.10:50052",
+		"10.0.0.20:50052",
+		"10.0.0.40:50052",
+	}, []RPCHealthRecord{
+		{Endpoint: "10.0.0.30:50052", Ready: false, Failures: 1, ConsecutiveFailures: 1, LastLatencyMS: 1},
+		{Endpoint: "10.0.0.10:50052", Ready: true, Successes: 4, LastLatencyMS: 50},
+		{Endpoint: "10.0.0.20:50052", Ready: true, Successes: 4, LastLatencyMS: 10},
+	})
+
+	want := []string{
+		"10.0.0.20:50052",
+		"10.0.0.10:50052",
+		"10.0.0.40:50052",
+		"10.0.0.30:50052",
+	}
+	if !reflect.DeepEqual(ranked, want) {
+		t.Fatalf("unexpected ranked endpoints: got %#v want %#v", ranked, want)
 	}
 }
 
