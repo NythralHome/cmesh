@@ -70,6 +70,59 @@ type CDIPMockRunResult struct {
 	Output    string     `json:"output"`
 }
 
+type CDIPPrepareResult struct {
+	ParentJob jobs.Job            `json:"parent_job"`
+	StageJobs []jobs.Job          `json:"stage_jobs"`
+	Messages  []cdip.StagePrepare `json:"messages"`
+}
+
+func prepareCDIPDistributedJob(store Store, parentJobID string) (CDIPPrepareResult, error) {
+	parent, ok := store.Job(parentJobID)
+	if !ok || parent.Type != models.JobGenerateDistributed {
+		return CDIPPrepareResult{}, fmt.Errorf("distributed parent job not found")
+	}
+	if parent.Status == jobs.StatusSucceeded || parent.Status == jobs.StatusFailed || parent.Status == jobs.StatusCanceled {
+		return CDIPPrepareResult{}, fmt.Errorf("distributed parent job is already terminal")
+	}
+	stages := cdipStageJobsForParent(store.Jobs(), parent.ID)
+	if len(stages) < 2 {
+		return CDIPPrepareResult{}, fmt.Errorf("distributed parent job has no stage graph")
+	}
+	messages := make([]cdip.StagePrepare, 0, len(stages))
+	for _, stageJob := range stages {
+		var input models.DistributedStageJobInput
+		if err := json.Unmarshal([]byte(stageJob.Input), &input); err != nil {
+			return CDIPPrepareResult{}, fmt.Errorf("invalid stage job input for %s: %w", stageJob.ID, err)
+		}
+		if input.ParentJobID != parent.ID {
+			return CDIPPrepareResult{}, fmt.Errorf("stage job %s belongs to %s, expected %s", stageJob.ID, input.ParentJobID, parent.ID)
+		}
+		msg := cdip.StagePrepare{
+			Envelope:         cdip.NewEnvelope(cdip.MessageStagePrepare),
+			ParentJobID:      parent.ID,
+			StageJobID:       stageJob.ID,
+			ModelID:          input.ModelID,
+			Stage:            input.Shard.Stage,
+			UpstreamNodeID:   input.UpstreamNodeID,
+			DownstreamNodeID: input.DownstreamNodeID,
+		}
+		if err := msg.Validate(); err != nil {
+			return CDIPPrepareResult{}, fmt.Errorf("invalid stage.prepare for %s: %w", stageJob.ID, err)
+		}
+		messages = append(messages, msg)
+	}
+	for _, stageJob := range stages {
+		if _, ok := store.UpdateCDIPStageState(stageJob.ID, cdip.StagePreparing, "coordinator sent stage.prepare"); !ok {
+			return CDIPPrepareResult{}, fmt.Errorf("failed to prepare stage %s", stageJob.ID)
+		}
+	}
+	return CDIPPrepareResult{
+		ParentJob: parent,
+		StageJobs: cdipStageJobsForParent(store.Jobs(), parent.ID),
+		Messages:  messages,
+	}, nil
+}
+
 func runCDIPMockCoordinator(store Store, parentJobID string) (CDIPMockRunResult, error) {
 	parent, ok := store.Job(parentJobID)
 	if !ok || parent.Type != models.JobGenerateDistributed {

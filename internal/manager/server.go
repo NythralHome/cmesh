@@ -1456,16 +1456,28 @@ func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/cdip/jobs/"), "/")
 	parts := strings.Split(path, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] != "mock-run" {
+	if len(parts) != 2 || parts[0] == "" {
 		http.NotFound(w, r)
 		return
 	}
-	result, err := runCDIPMockCoordinator(s.state, parts[0])
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
+	switch parts[1] {
+	case "prepare":
+		result, err := prepareCDIPDistributedJob(s.state, parts[0])
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
+	case "mock-run":
+		result, err := runCDIPMockCoordinator(s.state, parts[0])
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
+	default:
+		http.NotFound(w, r)
 	}
-	writeJSON(w, http.StatusAccepted, result)
 }
 
 func cdipStageAction(action string) (cdip.StageState, bool) {

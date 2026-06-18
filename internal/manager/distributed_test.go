@@ -388,6 +388,67 @@ func TestCDIPMockCoordinatorCompletesPlannedGraph(t *testing.T) {
 	}
 }
 
+func TestCDIPPrepareEndpointBuildsStagePrepareMessages(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	for _, name := range []string{"worker-a", "worker-b"} {
+		joinWorkerWithResourcesForTest(t, srv, name, cluster.ResourceSnapshot{
+			CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+			Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+			Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 8 * gb, FreeBytes: 64 * gb},
+			Runtimes: []cluster.RuntimeResource{{
+				Name:       string(models.RuntimeLlamaCPP),
+				Ready:      true,
+				Version:    "test",
+				BinaryPath: "/tmp/llama-cli",
+			}},
+			Models: []cluster.ModelResource{{
+				ID:      "qwen2.5-7b-instruct-q4-k-m",
+				Name:    "Qwen2.5 7B Instruct",
+				Runtime: string(models.RuntimeLlamaCPP),
+				Bytes:   5 * gb,
+				Ready:   true,
+			}},
+		})
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-7b-instruct-q4-k-m/distributed-generate", strings.NewReader(`{"prompt":"hello from distributed cluster"}`))
+	createRec := httptest.NewRecorder()
+	srv.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created distributedGenerateResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	prepareReq := httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+created.Job.ID+"/prepare", nil)
+	prepareRec := httptest.NewRecorder()
+	srv.ServeHTTP(prepareRec, prepareReq)
+	if prepareRec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d: %s", prepareRec.Code, prepareRec.Body.String())
+	}
+	var prepared CDIPPrepareResult
+	if err := json.Unmarshal(prepareRec.Body.Bytes(), &prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.ParentJob.ID != created.Job.ID || len(prepared.Messages) != len(created.StageJobs) {
+		t.Fatalf("unexpected prepare result: %#v", prepared)
+	}
+	for i, msg := range prepared.Messages {
+		if err := msg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if msg.Type != cdip.MessageStagePrepare || msg.ParentJobID != created.Job.ID || msg.Stage.Index != i {
+			t.Fatalf("unexpected stage.prepare %d: %#v", i, msg)
+		}
+		if prepared.StageJobs[i].CDIPState != cdip.StagePreparing {
+			t.Fatalf("expected stage %d preparing, got %#v", i, prepared.StageJobs[i])
+		}
+	}
+}
+
 func TestDistributedStageJobRequestsBuildPipelineTopology(t *testing.T) {
 	parent := jobs.Job{ID: "job-parent", Type: models.JobGenerateDistributed}
 	input := models.DistributedGenerateInput{
