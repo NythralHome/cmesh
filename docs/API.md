@@ -189,6 +189,7 @@ Push an activation frame:
 ```http
 POST /v1/cdip/activations/{parent_job_id}/{stage_job_id}/frames
 Content-Type: application/json
+X-CMesh-Node-ID: node-a
 ```
 
 Example body:
@@ -216,9 +217,12 @@ Read the next activation frame:
 
 ```http
 GET /v1/cdip/activations/{parent_job_id}/{stage_job_id}/frames?timeout_ms=250
+X-CMesh-Node-ID: node-b
 ```
 
 Returns `200` with the frame when one is available, or `204 No Content` when the relay queue is empty before the timeout expires.
+
+Operators may use `X-CMesh-Operator-Token`. Stage workers should use `X-CMesh-Node-ID`; the manager only allows the upstream stage worker and configured downstream worker to access a stream.
 
 ## Cluster Benchmarks
 

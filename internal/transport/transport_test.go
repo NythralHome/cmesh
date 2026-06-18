@@ -113,6 +113,10 @@ func TestHTTPActivationTransportSendsAndReceivesFrames(t *testing.T) {
 			http.Error(w, "missing token", http.StatusUnauthorized)
 			return
 		}
+		if r.Header.Get("X-CMesh-Node-ID") != "node-a" {
+			http.Error(w, "missing node id", http.StatusForbidden)
+			return
+		}
 		if r.URL.Path != "/v1/cdip/activations/"+stream.ParentJobID+"/"+stream.StageJobID+"/frames" {
 			http.NotFound(w, r)
 			return
@@ -140,7 +144,7 @@ func TestHTTPActivationTransportSendsAndReceivesFrames(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewHTTPActivationTransport(server.URL, "operator-token").WithClient(server.Client()).WithPollTimeout(time.Millisecond)
+	client := NewHTTPActivationTransport(server.URL, "operator-token").WithClient(server.Client()).WithNodeID("node-a").WithPollTimeout(time.Millisecond)
 	writer, err := client.OpenWriter(context.Background(), stream, "node-b")
 	if err != nil {
 		t.Fatal(err)

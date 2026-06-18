@@ -55,6 +55,7 @@ type ActivationTransport interface {
 type HTTPActivationTransport struct {
 	managerURL    string
 	operatorToken string
+	nodeID        string
 	client        *http.Client
 	pollTimeout   time.Duration
 }
@@ -79,6 +80,11 @@ func (t *HTTPActivationTransport) WithPollTimeout(timeout time.Duration) *HTTPAc
 	if timeout > 0 {
 		t.pollTimeout = timeout
 	}
+	return t
+}
+
+func (t *HTTPActivationTransport) WithNodeID(nodeID string) *HTTPActivationTransport {
+	t.nodeID = strings.TrimSpace(nodeID)
 	return t
 }
 
@@ -129,6 +135,9 @@ func (t *HTTPActivationTransport) streamURL(stream StreamID) string {
 func (t *HTTPActivationTransport) authorize(req *http.Request) {
 	if strings.TrimSpace(t.operatorToken) != "" {
 		req.Header.Set("X-CMesh-Operator-Token", t.operatorToken)
+	}
+	if strings.TrimSpace(t.nodeID) != "" {
+		req.Header.Set("X-CMesh-Node-ID", t.nodeID)
 	}
 }
 

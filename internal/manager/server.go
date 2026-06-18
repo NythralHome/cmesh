@@ -1600,9 +1600,6 @@ func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCDIPActivation(w http.ResponseWriter, r *http.Request) {
-	if !s.requireOperatorAuth(w, r, false) {
-		return
-	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/cdip/activations/"), "/")
 	parts := strings.Split(path, "/")
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] != "frames" {
@@ -1614,6 +1611,9 @@ func (s *Server) handleCDIPActivation(w http.ResponseWriter, r *http.Request) {
 	stageJob, ok := s.validateCDIPActivationStream(parentJobID, stageJobID)
 	if !ok {
 		http.Error(w, "CDIP activation stream not found", http.StatusNotFound)
+		return
+	}
+	if !s.requireCDIPActivationAuth(w, r, stageJob) {
 		return
 	}
 	stream := transport.StreamID{ParentJobID: parentJobID, StageJobID: stageJobID}
@@ -1687,6 +1687,44 @@ func (s *Server) validateCDIPActivationStream(parentJobID string, stageJobID str
 		return jobs.Job{}, false
 	}
 	return stageJob, true
+}
+
+func (s *Server) requireCDIPActivationAuth(w http.ResponseWriter, r *http.Request, stageJob jobs.Job) bool {
+	if s.hasOperatorAuth(r) {
+		return true
+	}
+	nodeID := strings.TrimSpace(r.Header.Get("X-CMesh-Node-ID"))
+	if nodeID == "" {
+		nodeID = strings.TrimSpace(r.URL.Query().Get("node_id"))
+	}
+	if nodeID == "" {
+		http.Error(w, "operator token or worker node id required", http.StatusUnauthorized)
+		return false
+	}
+	for _, allowed := range cdipActivationAllowedNodes(stageJob) {
+		if nodeID == allowed {
+			return true
+		}
+	}
+	http.Error(w, "worker is not allowed to access this activation stream", http.StatusForbidden)
+	return false
+}
+
+func cdipActivationAllowedNodes(stageJob jobs.Job) []string {
+	allowed := []string{}
+	if strings.TrimSpace(stageJob.AssignedTo) != "" {
+		allowed = append(allowed, stageJob.AssignedTo)
+	}
+	var input models.DistributedStageJobInput
+	if err := json.Unmarshal([]byte(stageJob.Input), &input); err == nil {
+		if strings.TrimSpace(input.DownstreamNodeID) != "" {
+			allowed = append(allowed, input.DownstreamNodeID)
+		}
+		if strings.TrimSpace(input.UpstreamNodeID) != "" {
+			allowed = append(allowed, input.UpstreamNodeID)
+		}
+	}
+	return allowed
 }
 
 func cdipStageAction(action string) (cdip.StageState, bool) {

@@ -329,6 +329,8 @@ GET /v1/cdip/activations/{parent_job_id}/{stage_job_id}/frames?timeout_ms=250
 
 This endpoint is a relay, not the final high-performance transport. It exists so workers can exchange validated activation frame envelopes through the manager while the runtime adapter is being developed. A future direct worker transport can keep the same CDIP frame contract.
 
+Workers authenticate to the relay with `X-CMesh-Node-ID`. The manager authorizes only the stage owner and the downstream stage worker for that stream. Operators can still inspect through normal operator auth.
+
 Frame envelope:
 
 ```json

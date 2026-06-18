@@ -1063,6 +1063,93 @@ func TestCDIPActivationFrameRelayEndpoint(t *testing.T) {
 	}
 }
 
+func TestCDIPActivationFrameRelayAllowsAssignedWorkersWithoutOperatorToken(t *testing.T) {
+	state := NewState()
+	srv := NewServerWithOptions(ServerOptions{OperatorToken: "operator-token"}, state)
+	parent, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerateDistributed,
+		Input:       `{"model_id":"qwen2.5-0.5b-instruct-q4-k-m","prompt":"hello"}`,
+		RequestedBy: "test",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageInput, err := json.Marshal(models.DistributedStageJobInput{
+		ParentJobID:      parent.ID,
+		ModelID:          "qwen2.5-0.5b-instruct-q4-k-m",
+		Stage:            models.DistributedStageInput{Index: 0, NodeID: "node-a", LayerStart: 0, LayerEnd: 11},
+		DownstreamNodeID: "node-b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := state.CreateJob(jobs.CreateRequest{
+		Type:            models.JobGenerateStage,
+		Input:           string(stageInput),
+		RequestedBy:     "test",
+		AssignedTo:      "node-a",
+		NoAutoAssign:    true,
+		MaxAttempts:     1,
+		CDIPState:       cdip.StageDecode,
+		CDIPParentJobID: parent.ID,
+		CDIPStageIndex:  0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := transport.ActivationFrame{
+		Header: cdip.ActivationChunk{
+			Envelope:     cdip.NewEnvelope(cdip.MessageActivationChunk),
+			ParentJobID:  parent.ID,
+			StageJobID:   stage.ID,
+			Sequence:     1,
+			ContentType:  "application/vnd.cmesh.activation+binary",
+			Encoding:     "raw",
+			Shape:        []int{1, 1, 2},
+			DType:        "u8",
+			PayloadBytes: 2,
+		},
+		Payload: []byte{1, 2},
+	}
+	body, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/cdip/activations/" + parent.ID + "/" + stage.ID + "/frames"
+
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without operator token or node id, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set("X-CMesh-Node-ID", "node-x")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for unrelated worker, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set("X-CMesh-Node-ID", "node-a")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected upstream worker POST access, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, path+"?timeout_ms=100", nil)
+	req.Header.Set("X-CMesh-Node-ID", "node-b")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected downstream worker GET access, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCDIPCompleteEndpointRequiresDecodeStages(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
