@@ -35,6 +35,14 @@ Source: [llama.cpp multi-GPU guide](https://github.com/ggml-org/llama.cpp/blob/m
 
 This maps well to CDIP's `pipeline_layers` plan shape, because CDIP also assigns contiguous layer ranges to stages.
 
+llama.cpp also ships an RPC backend. In CMesh terms, that gives us a near-term distributed runtime path:
+
+- workers can advertise `llama.cpp-rpc` when `rpc-server` is available;
+- CMesh can manage discovery, invites, resource policy, and job lifecycle;
+- llama.cpp can execute the actual RPC-backed inference path.
+
+This does not replace CDIP layer-stage execution. It is a runtime adapter strategy that can deliver real distributed llama.cpp execution sooner while the protocol-native activation-stage runtime remains under development.
+
 ## What CMesh Needs
 
 CMesh workers are separate machines or independent processes. A normal `llama-cli` invocation runs the whole model inside one runtime process and does not expose a stable external API for:

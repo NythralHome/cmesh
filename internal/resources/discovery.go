@@ -164,6 +164,7 @@ func DiscoverRuntimes(cacheDir string) []cluster.RuntimeResource {
 		BinaryPath:    status.BinaryPath,
 		Source:        status.Source,
 		Capabilities:  runtimeCapabilities(status),
+		RPCRuntimes:   runtimeRPCRuntimes(status),
 		StageRuntimes: runtimeStageRuntimes(status),
 		Error:         status.Error,
 	}}
@@ -174,9 +175,28 @@ func runtimeCapabilities(status runtimes.RuntimeStatus) []string {
 		return nil
 	}
 	if status.Name == runtimes.LlamaCPPName {
-		return runtimes.LogicalStageCapabilities()
+		capabilities := runtimes.LogicalStageCapabilities()
+		if runtimes.NewLlamaCPPRPCRuntime(status.BinaryPath, "").Probe(context.Background()).Ready {
+			capabilities = append(capabilities, runtimes.CapabilityLlamaCPPRPCClient, runtimes.CapabilityLlamaCPPRPCBackend)
+		}
+		return capabilities
 	}
 	return nil
+}
+
+func runtimeRPCRuntimes(status runtimes.RuntimeStatus) []cluster.RPCRuntimeResource {
+	if status.Name != runtimes.LlamaCPPName {
+		return nil
+	}
+	probe := runtimes.NewLlamaCPPRPCRuntime(status.BinaryPath, "").Probe(context.Background())
+	return []cluster.RPCRuntimeResource{{
+		Name:       probe.Name,
+		Ready:      probe.Ready,
+		ServerPath: probe.ServerPath,
+		Endpoint:   probe.Endpoint,
+		Protocol:   probe.Protocol,
+		Blockers:   append([]string(nil), probe.Blockers...),
+	}}
 }
 
 func runtimeStageRuntimes(status runtimes.RuntimeStatus) []cluster.StageRuntimeResource {

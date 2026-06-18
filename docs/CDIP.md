@@ -112,11 +112,15 @@ Future runtime features:
 - `activation-stream-v1`
 - `logical-stage-runtime`
 - `llama.cpp-stage-runtime`
+- `llama.cpp-rpc-client`
+- `llama.cpp-rpc-backend`
 - `physical-shard-materialization`
 
 The manager currently treats normal runtime readiness and distributed stage runtime readiness as separate checks. A worker can be `llama.cpp` ready for full-model generation while still lacking stage capability. `logical-stage-runtime` means the worker can validate stage contracts and exchange mock activation frames through CDIP. `llama.cpp-stage-runtime` is reserved for the first real layer-stage prototype.
 
 Worker heartbeats may also include `stage_runtimes` diagnostics. These diagnostics are not scheduling capability by themselves. For example, `llama.cpp-stage-experimental` can report that `llama-cli` exists while still returning `ready: false` because the public CLI does not expose CDIP layer-stage activation hooks yet.
+
+Worker heartbeats may also include `rpc_runtimes` diagnostics. `llama.cpp-rpc` is the first practical path for real multi-machine llama.cpp execution: CMesh can orchestrate workers and resource policy while llama.cpp performs the backend RPC execution. This is separate from CDIP layer-stage execution, which remains the protocol-native long-term path.
 
 ## Planning Modes
 

@@ -113,6 +113,12 @@ Heartbeat resources may include:
 - `models`: model files actually present in the worker cache. The manager treats this as the source of truth for installed model inventory.
 - `runtimes`: local AI runtime state such as `llama.cpp` readiness, version, platform, source, binary path, and error.
 
+Runtime entries may include:
+
+- `capabilities`: scheduler-visible runtime features.
+- `rpc_runtimes`: runtime-specific RPC backend probes, such as `llama.cpp-rpc`.
+- `stage_runtimes`: experimental stage runtime probes for CDIP layer-stage execution.
+
 ## Jobs
 
 ```http

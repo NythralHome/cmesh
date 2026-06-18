@@ -59,8 +59,18 @@ type RuntimeResource struct {
 	BinaryPath    string                 `json:"binary_path,omitempty"`
 	Source        string                 `json:"source,omitempty"`
 	Capabilities  []string               `json:"capabilities,omitempty"`
+	RPCRuntimes   []RPCRuntimeResource   `json:"rpc_runtimes,omitempty"`
 	StageRuntimes []StageRuntimeResource `json:"stage_runtimes,omitempty"`
 	Error         string                 `json:"error,omitempty"`
+}
+
+type RPCRuntimeResource struct {
+	Name       string   `json:"name"`
+	Ready      bool     `json:"ready"`
+	ServerPath string   `json:"server_path,omitempty"`
+	Endpoint   string   `json:"endpoint,omitempty"`
+	Protocol   string   `json:"protocol,omitempty"`
+	Blockers   []string `json:"blockers,omitempty"`
 }
 
 type StageRuntimeResource struct {

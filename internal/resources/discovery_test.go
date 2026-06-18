@@ -174,6 +174,12 @@ func TestDiscoverRuntimesIncludesLlamaCPPStageProbe(t *testing.T) {
 	if len(items[0].StageRuntimes) != 1 {
 		t.Fatalf("expected stage runtime probe, got %#v", items[0])
 	}
+	if len(items[0].RPCRuntimes) != 1 {
+		t.Fatalf("expected rpc runtime probe, got %#v", items[0])
+	}
+	if items[0].RPCRuntimes[0].Name != runtimes.LlamaCPPRPCRuntimeName {
+		t.Fatalf("expected llama.cpp rpc probe, got %#v", items[0].RPCRuntimes[0])
+	}
 	probe := items[0].StageRuntimes[0]
 	if probe.Name != runtimes.LlamaCPPStageRuntimeName {
 		t.Fatalf("expected llama.cpp stage probe, got %#v", probe)
