@@ -351,6 +351,25 @@ Generation uses model-family prompt adapters, model-scoped memory, and conversat
 
 The selected worker must be listed in `generatable_on` for that model. If the model is installed but the runtime is not ready, the API returns `409 Conflict` before creating a generate job.
 
+```http
+POST /v1/models/{model_id}/distributed-rpc-generate
+Content-Type: application/json
+```
+
+Creates a `model.generate.distributed_rpc` job. The manager selects active `llama.cpp-rpc` endpoints from `/v1/runtime/rpc-pool` and passes them to the selected worker. The worker then runs `llama-cli --rpc <endpoints>`.
+
+Example:
+
+```json
+{
+  "node_id": "node-abc123",
+  "prompt": "Run this through the RPC pool",
+  "max_tokens": 512
+}
+```
+
+If `node_id` is omitted, the manager selects the first worker where the model is installed and generatable. If no RPC endpoints are active, the API returns `409 Conflict`.
+
 ## Conversations
 
 ```http

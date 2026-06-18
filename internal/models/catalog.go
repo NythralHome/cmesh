@@ -8,13 +8,14 @@ import (
 )
 
 const (
-	JobInstall             = "model.install"
-	JobDelete              = "model.delete"
-	JobGenerate            = "model.generate"
-	JobGenerateDistributed = "model.generate.distributed"
-	JobGenerateStage       = "model.generate.distributed.stage"
-	JobRepair              = "model.repair"
-	JobCleanup             = "model.cleanup"
+	JobInstall                = "model.install"
+	JobDelete                 = "model.delete"
+	JobGenerate               = "model.generate"
+	JobGenerateDistributedRPC = "model.generate.distributed_rpc"
+	JobGenerateDistributed    = "model.generate.distributed"
+	JobGenerateStage          = "model.generate.distributed.stage"
+	JobRepair                 = "model.repair"
+	JobCleanup                = "model.cleanup"
 )
 
 type Runtime string
@@ -86,6 +87,17 @@ type DistributedGenerateInput struct {
 	Mode           string                  `json:"mode"`
 	Stages         []DistributedStageInput `json:"stages"`
 	Shards         []cdip.ModelShard       `json:"shards,omitempty"`
+}
+
+type DistributedRPCGenerateInput struct {
+	ModelID        string        `json:"model_id"`
+	Prompt         string        `json:"prompt"`
+	Messages       []ChatMessage `json:"messages,omitempty"`
+	SystemPrompt   string        `json:"system_prompt,omitempty"`
+	ConversationID string        `json:"conversation_id,omitempty"`
+	MaxTokens      int           `json:"max_tokens,omitempty"`
+	Temperature    string        `json:"temperature,omitempty"`
+	RPCEndpoints   []string      `json:"rpc_endpoints"`
 }
 
 type DistributedStageInput struct {

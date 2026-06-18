@@ -887,6 +887,8 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "distributed-plan":
 		s.handleModelDistributedPlan(w, r, model)
+	case "distributed-rpc-generate":
+		s.handleModelDistributedRPCGenerate(w, r, model)
 	case "distributed-generate":
 		s.handleModelDistributedGenerate(w, r, model)
 	case "placement":
@@ -1288,6 +1290,114 @@ func (s *Server) handleModelGenerate(w http.ResponseWriter, r *http.Request, mod
 		Input:       string(input),
 		RequestedBy: "dashboard-chat",
 		AssignedTo:  req.NodeID,
+		Requirements: jobs.Requirements{
+			CPUCores:    1,
+			MemoryBytes: model.MemoryBytes,
+			DiskBytes:   model.DiskBytes,
+			VRAMBytes:   model.VRAMBytes,
+		},
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, job)
+}
+
+func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		NodeID         string `json:"node_id"`
+		Prompt         string `json:"prompt"`
+		ConversationID string `json:"conversation_id"`
+		SystemPrompt   string `json:"system_prompt"`
+		MaxTokens      int    `json:"max_tokens"`
+		Temperature    string `json:"temperature"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		http.Error(w, "prompt is required", http.StatusBadRequest)
+		return
+	}
+	_, _, rpcEndpoints := runtimeRPCPoolReport(s.state.Nodes())
+	if len(rpcEndpoints) == 0 {
+		http.Error(w, "no active llama.cpp rpc endpoints are available", http.StatusConflict)
+		return
+	}
+	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
+	if len(summaries) == 0 {
+		http.Error(w, "model is not available", http.StatusConflict)
+		return
+	}
+	nodeID := strings.TrimSpace(req.NodeID)
+	if nodeID == "" {
+		for _, install := range summaries[0].Installed {
+			if install.GenerateReady {
+				nodeID = install.NodeID
+				break
+			}
+		}
+	}
+	if nodeID == "" || !modelInstalledOn(summaries[0], nodeID) {
+		http.Error(w, "model is not installed on a selected worker", http.StatusConflict)
+		return
+	}
+	if !modelGeneratableOn(summaries[0], nodeID) {
+		http.Error(w, modelGenerateBlockedReason(summaries[0], nodeID), http.StatusConflict)
+		return
+	}
+	conversationID := strings.TrimSpace(req.ConversationID)
+	if conversationID == "" {
+		conversationID = newConversationID()
+	}
+	if activeJobID := activeGenerateJobForConversation(s.state.Jobs(), conversationID); activeJobID != "" {
+		http.Error(w, "conversation already has an active generate job: "+activeJobID, http.StatusConflict)
+		return
+	}
+	systemPrompt := strings.TrimSpace(req.SystemPrompt)
+	if systemPrompt == "" {
+		systemPrompt = modelDefaultSystemPrompt(model)
+	}
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = models.QualityPresetFor(model).MaxTokens
+	}
+	temperature := strings.TrimSpace(req.Temperature)
+	if temperature == "" {
+		temperature = models.QualityPresetFor(model).Temperature
+	}
+	conversation := appendConversationMessage(s.state, conversationID, model.ID, nodeID, systemPrompt, models.ChatMessage{
+		Role:    "user",
+		Content: req.Prompt,
+	})
+	effectiveSystemPrompt := systemPromptWithMemory(systemPrompt, model.ID, s.state)
+	budgetedMessages := budgetConversationMessages(model, effectiveSystemPrompt, conversation.Messages, maxTokens)
+	input, err := json.Marshal(models.DistributedRPCGenerateInput{
+		ModelID:        model.ID,
+		Prompt:         req.Prompt,
+		Messages:       budgetedMessages,
+		SystemPrompt:   effectiveSystemPrompt,
+		ConversationID: conversation.ID,
+		MaxTokens:      maxTokens,
+		Temperature:    temperature,
+		RPCEndpoints:   rpcEndpoints,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	job, err := s.state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerateDistributedRPC,
+		Input:       string(input),
+		RequestedBy: "dashboard-chat-rpc",
+		AssignedTo:  nodeID,
 		Requirements: jobs.Requirements{
 			CPUCores:    1,
 			MemoryBytes: model.MemoryBytes,
@@ -2129,10 +2239,10 @@ func recentJobs(in []jobs.Job, limit int) []jobs.Job {
 func recentChatJobs(in []jobs.Job, limit int) []jobs.Job {
 	out := make([]jobs.Job, 0, len(in))
 	for _, job := range in {
-		if job.Type != models.JobGenerate {
+		if job.Type != models.JobGenerate && job.Type != models.JobGenerateDistributedRPC {
 			continue
 		}
-		if job.RequestedBy != "dashboard-chat" {
+		if job.RequestedBy != "dashboard-chat" && job.RequestedBy != "dashboard-chat-rpc" {
 			continue
 		}
 		if job.Status != jobs.StatusSucceeded || strings.TrimSpace(job.Result) == "" {
@@ -2149,7 +2259,7 @@ func activeGenerateJobForConversation(in []jobs.Job, conversationID string) stri
 		return ""
 	}
 	for _, job := range in {
-		if job.Type != models.JobGenerate && job.Type != models.JobGenerateDistributed {
+		if job.Type != models.JobGenerate && job.Type != models.JobGenerateDistributedRPC && job.Type != models.JobGenerateDistributed {
 			continue
 		}
 		if job.Status != jobs.StatusQueued && job.Status != jobs.StatusScheduled && job.Status != jobs.StatusRunning {
@@ -2166,6 +2276,12 @@ func jobConversationID(job jobs.Job) string {
 	switch job.Type {
 	case models.JobGenerate:
 		var input models.GenerateInput
+		if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
+			return ""
+		}
+		return input.ConversationID
+	case models.JobGenerateDistributedRPC:
+		var input models.DistributedRPCGenerateInput
 		if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
 			return ""
 		}
@@ -2818,7 +2934,7 @@ func schedulerJobs(in []jobs.Job) []jobs.Job {
 }
 
 func isModelJob(job jobs.Job) bool {
-	return job.Type == models.JobInstall || job.Type == models.JobDelete || job.Type == models.JobGenerate || job.Type == models.JobGenerateDistributed || job.Type == models.JobGenerateStage || job.Type == models.JobRepair || job.Type == models.JobCleanup
+	return job.Type == models.JobInstall || job.Type == models.JobDelete || job.Type == models.JobGenerate || job.Type == models.JobGenerateDistributedRPC || job.Type == models.JobGenerateDistributed || job.Type == models.JobGenerateStage || job.Type == models.JobRepair || job.Type == models.JobCleanup
 }
 
 func modelJobCount(in []jobs.Job) int {
@@ -3311,6 +3427,12 @@ func jobWorkload(job jobs.Job) string {
 				return "generate " + modelID + ": " + input.Prompt
 			}
 			return "generate " + modelID
+		case models.JobGenerateDistributedRPC:
+			var input models.DistributedRPCGenerateInput
+			if err := json.Unmarshal([]byte(job.Input), &input); err == nil && strings.TrimSpace(input.Prompt) != "" {
+				return "distributed rpc generate " + modelID + ": " + input.Prompt
+			}
+			return "distributed rpc generate " + modelID
 		case models.JobGenerateDistributed:
 			return "distributed generate " + modelID
 		case models.JobGenerateStage:

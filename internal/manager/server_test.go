@@ -2089,6 +2089,54 @@ func TestRuntimeRPCPoolEndpointReportsReadyEndpoints(t *testing.T) {
 	}
 }
 
+func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "rpc-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Models: []cluster.ModelResource{{
+			ID:      "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:    "Qwen2.5 0.5B Instruct",
+			Runtime: "llama.cpp",
+			Path:    "/tmp/qwen.gguf",
+			Ready:   true,
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: "10.0.0.10:50052",
+			}},
+		}},
+	})
+
+	body := bytes.NewBufferString(`{"prompt":"hello","max_tokens":8}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/distributed-rpc-generate", body)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var job jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if job.Type != models.JobGenerateDistributedRPC || job.AssignedTo == "" {
+		t.Fatalf("unexpected job: %#v", job)
+	}
+	var input models.DistributedRPCGenerateInput
+	if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.ModelID != "qwen2.5-0.5b-instruct-q4-k-m" || input.Prompt != "hello" || len(input.RPCEndpoints) != 1 || input.RPCEndpoints[0] != "10.0.0.10:50052" {
+		t.Fatalf("unexpected distributed rpc input: %#v", input)
+	}
+}
+
 func TestClusterReadinessReadyWhenRuntimeAndModelAreReady(t *testing.T) {
 	node := cluster.Node{
 		ID:     "node-ready",

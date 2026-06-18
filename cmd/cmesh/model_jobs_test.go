@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,67 @@ func TestDistributedGenerateJobTypeIsKnownButNotExecutableYet(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "coordinator-owned") {
 		t.Fatalf("expected coordinator-owned parent job error, got %v", err)
+	}
+}
+
+func TestExecuteDistributedRPCGenerateAddsRPCArgument(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake llama-cli test is unix-only")
+	}
+	dir := t.TempDir()
+	cli := filepath.Join(dir, "llama-cli")
+	argsPath := filepath.Join(dir, "args.txt")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CMESH_FAKE_LLAMA_ARGS\"\nprintf 'hello from rpc\\n'\n"
+	if err := os.WriteFile(cli, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("CMESH_FAKE_LLAMA_ARGS", argsPath)
+	t.Setenv("CMESH_MODEL_GENERATE_TIMEOUT", "5s")
+
+	cacheDir := filepath.Join(dir, "cache")
+	model, err := models.MustFind("qwen2.5-0.5b-instruct-q4-k-m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := modelPath(cacheDir, model)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("model"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(models.DistributedRPCGenerateInput{
+		ModelID:      model.ID,
+		Prompt:       "hello",
+		MaxTokens:    8,
+		Temperature:  "0.1",
+		RPCEndpoints: []string{"10.0.0.10:50052", "10.0.0.11:50052"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultBody, err := executeWorkerJob(jobs.Job{
+		Type:  models.JobGenerateDistributedRPC,
+		Input: string(input),
+	}, cluster.ResourceSnapshot{}, cacheDir, "node-a", time.Now().UTC(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result modelGenerateResult
+	if err := json.Unmarshal([]byte(resultBody), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Kind != models.JobGenerateDistributedRPC || result.Output != "hello from rpc" {
+		t.Fatalf("unexpected distributed rpc result: %#v", result)
+	}
+	argsBytes, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
+	if !containsAdjacentArgs(args, "--rpc", "10.0.0.10:50052,10.0.0.11:50052") {
+		t.Fatalf("expected --rpc argument, got %#v", args)
 	}
 }
 
@@ -470,4 +532,13 @@ func TestModelContextSizeKeepsSmallCatalogContext(t *testing.T) {
 	if got := modelContextSize(model); got != 2048 {
 		t.Fatalf("expected tiny model context 2048, got %d", got)
 	}
+}
+
+func containsAdjacentArgs(args []string, key string, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == key && args[i+1] == value {
+			return true
+		}
+	}
+	return false
 }

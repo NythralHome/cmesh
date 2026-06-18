@@ -832,7 +832,7 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapsh
 }
 
 func isModelJobType(jobType string) bool {
-	return jobType == models.JobInstall || jobType == models.JobDelete || jobType == models.JobGenerate || jobType == models.JobGenerateDistributed || jobType == models.JobGenerateStage || jobType == models.JobRepair || jobType == models.JobCleanup
+	return jobType == models.JobInstall || jobType == models.JobDelete || jobType == models.JobGenerate || jobType == models.JobGenerateDistributedRPC || jobType == models.JobGenerateDistributed || jobType == models.JobGenerateStage || jobType == models.JobRepair || jobType == models.JobCleanup
 }
 
 func executeJob(job jobs.Job) (string, error) {
@@ -866,6 +866,8 @@ func executeWorkerJob(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir 
 		return executeModelDeleteJob(job.Input, cacheDir)
 	case models.JobGenerate:
 		return executeModelGenerateJob(job.Input, cacheDir)
+	case models.JobGenerateDistributedRPC:
+		return executeModelDistributedRPCGenerateJob(job.Input, cacheDir)
 	case models.JobGenerateDistributed:
 		return "", fmt.Errorf("distributed model generate parent jobs are coordinator-owned; workers execute distributed stage jobs")
 	case models.JobGenerateStage:
@@ -1482,9 +1484,34 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	if err := json.Unmarshal([]byte(input), &req); err != nil {
 		return "", fmt.Errorf("invalid model generate input: %w", err)
 	}
+	return executeModelGenerate(req, cacheDir, nil, string(models.JobGenerate))
+}
+
+func executeModelDistributedRPCGenerateJob(input string, cacheDir string) (string, error) {
+	var req models.DistributedRPCGenerateInput
+	if err := json.Unmarshal([]byte(input), &req); err != nil {
+		return "", fmt.Errorf("invalid distributed rpc model generate input: %w", err)
+	}
+	if len(req.RPCEndpoints) == 0 {
+		return "", fmt.Errorf("rpc_endpoints is required")
+	}
+	generateReq := models.GenerateInput{
+		ModelID:        req.ModelID,
+		Prompt:         req.Prompt,
+		Messages:       req.Messages,
+		SystemPrompt:   req.SystemPrompt,
+		ConversationID: req.ConversationID,
+		MaxTokens:      req.MaxTokens,
+		Temperature:    req.Temperature,
+	}
+	return executeModelGenerate(generateReq, cacheDir, req.RPCEndpoints, string(models.JobGenerateDistributedRPC))
+}
+
+func executeModelGenerate(req models.GenerateInput, cacheDir string, rpcEndpoints []string, resultKind string) (string, error) {
 	if strings.TrimSpace(req.Prompt) == "" {
 		return "", fmt.Errorf("prompt is required")
 	}
+	rpcArg := strings.Join(cleanStringList(rpcEndpoints), ",")
 	model, err := models.MustFind(req.ModelID)
 	if err != nil {
 		return "", err
@@ -1527,6 +1554,9 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 		"--simple-io",
 		"--single-turn",
 	}
+	if rpcArg != "" {
+		args = append(args, "--rpc", rpcArg)
+	}
 	for _, stop := range modelStopSequences(model) {
 		args = append(args, "-r", stop)
 	}
@@ -1554,7 +1584,7 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 		return "", fmt.Errorf("%s returned an empty response", model.Runtime)
 	}
 	result := modelGenerateResult{
-		Kind:           string(models.JobGenerate),
+		Kind:           resultKind,
 		ModelID:        model.ID,
 		Output:         text,
 		WorkerRuntime:  runtime.GOOS + "/" + runtime.GOARCH,
@@ -1563,6 +1593,20 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	}
 	body, err := json.Marshal(result)
 	return string(body), err
+}
+
+func cleanStringList(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 type limitedBuffer struct {

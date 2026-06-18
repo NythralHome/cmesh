@@ -712,11 +712,11 @@ func withDeleteCleanupResult(result string, deletedMemories int, deletedConversa
 }
 
 func (s *State) appendAssistantMessageForJobLocked(job jobs.Job, now time.Time) {
-	if job.Type != models.JobGenerate || job.Result == "" {
+	if (job.Type != models.JobGenerate && job.Type != models.JobGenerateDistributedRPC) || job.Result == "" {
 		return
 	}
-	var input models.GenerateInput
-	if err := json.Unmarshal([]byte(job.Input), &input); err != nil || input.ConversationID == "" {
+	conversationID, modelID, systemPrompt := generateJobConversationModelAndPrompt(job)
+	if conversationID == "" {
 		return
 	}
 	var result struct {
@@ -725,17 +725,17 @@ func (s *State) appendAssistantMessageForJobLocked(job jobs.Job, now time.Time) 
 	if err := json.Unmarshal([]byte(job.Result), &result); err != nil || result.Output == "" {
 		return
 	}
-	conversation, ok := s.conversations[input.ConversationID]
+	conversation, ok := s.conversations[conversationID]
 	if !ok {
 		conversation = Conversation{
-			ID:        input.ConversationID,
-			ModelID:   input.ModelID,
+			ID:        conversationID,
+			ModelID:   modelID,
 			CreatedAt: now,
 		}
 	}
-	conversation.ModelID = input.ModelID
-	if input.SystemPrompt != "" && conversation.SystemPrompt == "" {
-		conversation.SystemPrompt = input.SystemPrompt
+	conversation.ModelID = modelID
+	if systemPrompt != "" && conversation.SystemPrompt == "" {
+		conversation.SystemPrompt = systemPrompt
 	}
 	conversation.Messages = append(conversation.Messages, models.ChatMessage{
 		Role:    "assistant",
@@ -743,7 +743,26 @@ func (s *State) appendAssistantMessageForJobLocked(job jobs.Job, now time.Time) 
 	})
 	conversation.Messages = trimConversationMessages(conversation.Messages)
 	conversation.UpdatedAt = now
-	s.conversations[input.ConversationID] = conversation
+	s.conversations[conversationID] = conversation
+}
+
+func generateJobConversationModelAndPrompt(job jobs.Job) (string, string, string) {
+	switch job.Type {
+	case models.JobGenerate:
+		var input models.GenerateInput
+		if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
+			return "", "", ""
+		}
+		return input.ConversationID, input.ModelID, input.SystemPrompt
+	case models.JobGenerateDistributedRPC:
+		var input models.DistributedRPCGenerateInput
+		if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
+			return "", "", ""
+		}
+		return input.ConversationID, input.ModelID, input.SystemPrompt
+	default:
+		return "", "", ""
+	}
 }
 
 func (s *State) CancelJob(jobID string) (jobs.Job, bool) {
