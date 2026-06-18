@@ -1491,6 +1491,20 @@ func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch parts[1] {
+	case "advance":
+		var req struct {
+			Step   uint64 `json:"step"`
+			Output string `json:"output"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&req)
+		}
+		result, err := advanceCDIPDistributedJob(s.state, transport.NewMemoryActivationTransport(8), parts[0], req.Step, req.Output)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
 	case "prepare":
 		result, err := prepareCDIPDistributedJob(s.state, parts[0])
 		if err != nil {

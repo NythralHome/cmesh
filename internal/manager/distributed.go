@@ -85,6 +85,17 @@ type CDIPCommandResult struct {
 	ActivationFrames []cdip.ActivationChunk `json:"activation_frames,omitempty"`
 }
 
+type CDIPAdvanceResult struct {
+	ParentJob        jobs.Job               `json:"parent_job"`
+	StageJobs        []jobs.Job             `json:"stage_jobs"`
+	Action           string                 `json:"action"`
+	Waiting          bool                   `json:"waiting"`
+	Reason           string                 `json:"reason,omitempty"`
+	PrepareMessages  []cdip.StagePrepare    `json:"prepare_messages,omitempty"`
+	Messages         []cdip.StageCommand    `json:"messages,omitempty"`
+	ActivationFrames []cdip.ActivationChunk `json:"activation_frames,omitempty"`
+}
+
 func prepareCDIPDistributedJob(store Store, parentJobID string) (CDIPPrepareResult, error) {
 	parent, ok := store.Job(parentJobID)
 	if !ok || parent.Type != models.JobGenerateDistributed {
@@ -130,6 +141,92 @@ func prepareCDIPDistributedJob(store Store, parentJobID string) (CDIPPrepareResu
 		StageJobs: cdipStageJobsForParent(store.Jobs(), parent.ID),
 		Messages:  messages,
 	}, nil
+}
+
+func advanceCDIPDistributedJob(store Store, bus transport.ActivationTransport, parentJobID string, step uint64, output string) (CDIPAdvanceResult, error) {
+	parent, ok := store.Job(parentJobID)
+	if !ok || parent.Type != models.JobGenerateDistributed {
+		return CDIPAdvanceResult{}, fmt.Errorf("distributed parent job not found")
+	}
+	if parent.Status == jobs.StatusSucceeded || parent.Status == jobs.StatusFailed || parent.Status == jobs.StatusCanceled {
+		return CDIPAdvanceResult{}, fmt.Errorf("distributed parent job is already terminal")
+	}
+	stages := cdipStageJobsForParent(store.Jobs(), parent.ID)
+	if len(stages) < 2 {
+		return CDIPAdvanceResult{}, fmt.Errorf("distributed parent job has no stage graph")
+	}
+	if allCDIPStagesIn(stages, cdip.StagePlanned) {
+		result, err := prepareCDIPDistributedJob(store, parent.ID)
+		if err != nil {
+			return CDIPAdvanceResult{}, err
+		}
+		return CDIPAdvanceResult{
+			ParentJob:       result.ParentJob,
+			StageJobs:       result.StageJobs,
+			Action:          "prepare",
+			PrepareMessages: result.Messages,
+		}, nil
+	}
+	if allCDIPStagesIn(stages, cdip.StageReady) {
+		result, err := startCDIPPrefill(store, parent.ID)
+		if err != nil {
+			return CDIPAdvanceResult{}, err
+		}
+		return CDIPAdvanceResult{
+			ParentJob: result.ParentJob,
+			StageJobs: result.StageJobs,
+			Action:    "prefill",
+			Messages:  result.Messages,
+		}, nil
+	}
+	if allCDIPStagesIn(stages, cdip.StagePrefill) {
+		result, err := startCDIPDecode(store, bus, parent.ID, step)
+		if err != nil {
+			return CDIPAdvanceResult{}, err
+		}
+		return CDIPAdvanceResult{
+			ParentJob:        result.ParentJob,
+			StageJobs:        result.StageJobs,
+			Action:           "decode",
+			Messages:         result.Messages,
+			ActivationFrames: result.ActivationFrames,
+		}, nil
+	}
+	if allCDIPStagesIn(stages, cdip.StageDecode) {
+		result, err := completeCDIPDistributedJob(store, parent.ID, output)
+		if err != nil {
+			return CDIPAdvanceResult{}, err
+		}
+		return CDIPAdvanceResult{
+			ParentJob: result.ParentJob,
+			StageJobs: result.StageJobs,
+			Action:    "complete",
+			Messages:  result.Messages,
+		}, nil
+	}
+	return CDIPAdvanceResult{
+		ParentJob: parent,
+		StageJobs: stages,
+		Action:    "wait",
+		Waiting:   true,
+		Reason:    "waiting for stages to reach the same coordinator boundary",
+	}, nil
+}
+
+func allCDIPStagesIn(stages []jobs.Job, state cdip.StageState) bool {
+	if len(stages) == 0 {
+		return false
+	}
+	for _, stage := range stages {
+		current := stage.CDIPState
+		if current == "" {
+			current = cdip.StagePlanned
+		}
+		if current != state {
+			return false
+		}
+	}
+	return true
 }
 
 func startCDIPPrefill(store Store, parentJobID string) (CDIPCommandResult, error) {

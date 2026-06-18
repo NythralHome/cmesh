@@ -396,6 +396,109 @@ func TestCDIPDistributedGenerateEndToEndControlPlane(t *testing.T) {
 	}
 }
 
+func TestCDIPAdvanceEndpointDrivesCoordinatorBoundaries(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	for _, name := range []string{"worker-a", "worker-b"} {
+		joinWorkerWithResourcesForTest(t, srv, name, cluster.ResourceSnapshot{
+			CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+			Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+			Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 8 * gb, FreeBytes: 64 * gb},
+			Runtimes: []cluster.RuntimeResource{{
+				Name:       string(models.RuntimeLlamaCPP),
+				Ready:      true,
+				Version:    "test",
+				BinaryPath: "/tmp/llama-cli",
+			}},
+			Models: []cluster.ModelResource{{
+				ID:      "qwen2.5-7b-instruct-q4-k-m",
+				Name:    "Qwen2.5 7B Instruct",
+				Runtime: string(models.RuntimeLlamaCPP),
+				Bytes:   5 * gb,
+				Ready:   true,
+			}},
+		})
+	}
+
+	createRec := httptest.NewRecorder()
+	srv.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-7b-instruct-q4-k-m/distributed-generate", strings.NewReader(`{"prompt":"hello distributed cluster"}`)))
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("expected distributed generate 202, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created distributedGenerateResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	advanceRec := httptest.NewRecorder()
+	srv.ServeHTTP(advanceRec, httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+created.Job.ID+"/advance", nil))
+	if advanceRec.Code != http.StatusAccepted {
+		t.Fatalf("expected advance prepare 202, got %d: %s", advanceRec.Code, advanceRec.Body.String())
+	}
+	var advanced CDIPAdvanceResult
+	if err := json.Unmarshal(advanceRec.Body.Bytes(), &advanced); err != nil {
+		t.Fatal(err)
+	}
+	if advanced.Action != "prepare" || len(advanced.PrepareMessages) != len(created.StageJobs) {
+		t.Fatalf("expected prepare advance, got %#v", advanced)
+	}
+
+	waitRec := httptest.NewRecorder()
+	srv.ServeHTTP(waitRec, httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+created.Job.ID+"/advance", nil))
+	if waitRec.Code != http.StatusAccepted {
+		t.Fatalf("expected waiting advance 202, got %d: %s", waitRec.Code, waitRec.Body.String())
+	}
+	var waiting CDIPAdvanceResult
+	if err := json.Unmarshal(waitRec.Body.Bytes(), &waiting); err != nil {
+		t.Fatal(err)
+	}
+	if !waiting.Waiting || waiting.Action != "wait" {
+		t.Fatalf("expected waiting advance, got %#v", waiting)
+	}
+
+	for _, stageJob := range advanced.StageJobs {
+		nextRec := httptest.NewRecorder()
+		srv.ServeHTTP(nextRec, httptest.NewRequest(http.MethodGet, "/v1/workers/"+stageJob.AssignedTo+"/jobs/next", nil))
+		if nextRec.Code != http.StatusOK {
+			t.Fatalf("expected worker next job 200, got %d: %s", nextRec.Code, nextRec.Body.String())
+		}
+		var nextPayload struct {
+			Job *jobs.Job `json:"job"`
+		}
+		if err := json.Unmarshal(nextRec.Body.Bytes(), &nextPayload); err != nil {
+			t.Fatal(err)
+		}
+		if nextPayload.Job == nil {
+			t.Fatal("expected worker stage job")
+		}
+		readyBody := strings.NewReader(`{"node_id":"` + nextPayload.Job.AssignedTo + `","result":"{\"kind\":\"cdip.stage_ready\"}"}`)
+		readyRec := httptest.NewRecorder()
+		srv.ServeHTTP(readyRec, httptest.NewRequest(http.MethodPost, "/v1/jobs/"+nextPayload.Job.ID+"/complete", readyBody))
+		if readyRec.Code != http.StatusOK {
+			t.Fatalf("expected stage ready 200, got %d: %s", readyRec.Code, readyRec.Body.String())
+		}
+	}
+
+	for _, expected := range []string{"prefill", "decode", "complete"} {
+		body := strings.NewReader(`{"step":2,"output":"advanced distributed answer"}`)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+created.Job.ID+"/advance", body))
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("expected advance %s 202, got %d: %s", expected, rec.Code, rec.Body.String())
+		}
+		var result CDIPAdvanceResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Action != expected {
+			t.Fatalf("expected advance action %s, got %#v", expected, result)
+		}
+		if expected == "complete" && (result.ParentJob.Status != jobs.StatusSucceeded || !strings.Contains(result.ParentJob.Result, "advanced distributed answer")) {
+			t.Fatalf("expected completed parent job, got %#v", result.ParentJob)
+		}
+	}
+}
+
 func TestCDIPStageLifecycleEndpoint(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
