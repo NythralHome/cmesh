@@ -2131,6 +2131,10 @@ func TestRuntimeRPCPoolSmokeEndpoint(t *testing.T) {
 	if len(payload.Results) != 1 || !payload.Results[0].Ready || payload.Results[0].Endpoint != listener.Addr().String() {
 		t.Fatalf("unexpected smoke results: %#v", payload.Results)
 	}
+	health := state.RPCHealth()
+	if len(health) != 1 || health[0].Endpoint != listener.Addr().String() || !health[0].Ready || health[0].Successes != 1 {
+		t.Fatalf("expected smoke test to record rpc health, got %#v", health)
+	}
 }
 
 func TestRuntimeRPCPoolSmokeEndpointRequiresActiveEndpoints(t *testing.T) {
@@ -2274,6 +2278,22 @@ func TestModelDistributedRPCPlanHealthCheckExcludesFailedEndpoints(t *testing.T)
 	}
 	if !ready || !failed {
 		t.Fatalf("expected ready and failed backend health, got %#v", plan.Backends)
+	}
+	health := state.RPCHealth()
+	if len(health) != 2 {
+		t.Fatalf("expected two persisted health records, got %#v", health)
+	}
+	var sawReadyRecord, sawFailedRecord bool
+	for _, record := range health {
+		switch record.Endpoint {
+		case listener.Addr().String():
+			sawReadyRecord = record.Ready && record.Successes == 1 && record.Failures == 0
+		case "127.0.0.1:1":
+			sawFailedRecord = !record.Ready && record.Failures == 1 && record.ConsecutiveFailures == 1 && record.LastError != ""
+		}
+	}
+	if !sawReadyRecord || !sawFailedRecord {
+		t.Fatalf("expected ready and failed persisted health records, got %#v", health)
 	}
 }
 

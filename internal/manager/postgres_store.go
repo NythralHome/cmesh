@@ -68,6 +68,19 @@ CREATE TABLE IF NOT EXISTS benchmarks (
   PRIMARY KEY (node_id, kind)
 );
 
+CREATE TABLE IF NOT EXISTS rpc_health (
+  endpoint TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL DEFAULT '',
+  node_name TEXT NOT NULL DEFAULT '',
+  ready BOOLEAN NOT NULL DEFAULT FALSE,
+  successes INTEGER NOT NULL DEFAULT 0,
+  failures INTEGER NOT NULL DEFAULT 0,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_latency_ms BIGINT NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   type TEXT NOT NULL,
@@ -268,6 +281,59 @@ ORDER BY created_at DESC
 		results = append(results, result)
 	}
 	return results
+}
+
+func (s *PostgresStore) PutRPCHealth(update RPCHealthUpdate) RPCHealthRecord {
+	endpoint := strings.TrimSpace(update.Endpoint)
+	if endpoint == "" {
+		return RPCHealthRecord{}
+	}
+	if update.CheckedAt.IsZero() {
+		update.CheckedAt = time.Now().UTC()
+	}
+	row := s.pool.QueryRow(context.Background(), `
+INSERT INTO rpc_health (
+  endpoint, node_id, node_name, ready, successes, failures, consecutive_failures,
+  last_latency_ms, last_error, updated_at
+)
+VALUES ($1, $2, $3, $4, CASE WHEN $4 THEN 1 ELSE 0 END, CASE WHEN $4 THEN 0 ELSE 1 END,
+  CASE WHEN $4 THEN 0 ELSE 1 END, $5, $6, $7)
+ON CONFLICT (endpoint) DO UPDATE SET
+  node_id = CASE WHEN EXCLUDED.node_id = '' THEN rpc_health.node_id ELSE EXCLUDED.node_id END,
+  node_name = CASE WHEN EXCLUDED.node_name = '' THEN rpc_health.node_name ELSE EXCLUDED.node_name END,
+  ready = EXCLUDED.ready,
+  successes = rpc_health.successes + CASE WHEN EXCLUDED.ready THEN 1 ELSE 0 END,
+  failures = rpc_health.failures + CASE WHEN EXCLUDED.ready THEN 0 ELSE 1 END,
+  consecutive_failures = CASE WHEN EXCLUDED.ready THEN 0 ELSE rpc_health.consecutive_failures + 1 END,
+  last_latency_ms = EXCLUDED.last_latency_ms,
+  last_error = EXCLUDED.last_error,
+  updated_at = EXCLUDED.updated_at
+RETURNING endpoint, node_id, node_name, ready, successes, failures, consecutive_failures, last_latency_ms, last_error, updated_at
+`, endpoint, strings.TrimSpace(update.NodeID), strings.TrimSpace(update.NodeName), update.Ready, update.LatencyMS, strings.TrimSpace(update.Error), update.CheckedAt)
+	record, ok := scanRPCHealth(row)
+	if !ok {
+		return RPCHealthRecord{}
+	}
+	return record
+}
+
+func (s *PostgresStore) RPCHealth() []RPCHealthRecord {
+	rows, err := s.pool.Query(context.Background(), `
+SELECT endpoint, node_id, node_name, ready, successes, failures, consecutive_failures, last_latency_ms, last_error, updated_at
+FROM rpc_health
+ORDER BY ready DESC, updated_at DESC, endpoint ASC
+`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	records := make([]RPCHealthRecord, 0)
+	for rows.Next() {
+		if record, ok := scanRPCHealth(rows); ok {
+			records = append(records, record)
+		}
+	}
+	return records
 }
 
 func (s *PostgresStore) BenchmarkSummaryByNode() map[string]NodeBenchmarkSummary {
@@ -846,6 +912,25 @@ func scanJob(row jobScanner) (jobs.Job, bool) {
 	}
 	job.MaxAttempts = normalizeMaxAttempts(job.MaxAttempts)
 	return job, true
+}
+
+func scanRPCHealth(row jobScanner) (RPCHealthRecord, bool) {
+	var record RPCHealthRecord
+	if err := row.Scan(
+		&record.Endpoint,
+		&record.NodeID,
+		&record.NodeName,
+		&record.Ready,
+		&record.Successes,
+		&record.Failures,
+		&record.ConsecutiveFailures,
+		&record.LastLatencyMS,
+		&record.LastError,
+		&record.UpdatedAt,
+	); err != nil {
+		return RPCHealthRecord{}, false
+	}
+	return record, true
 }
 
 func nullableTime(value time.Time) *time.Time {

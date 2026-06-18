@@ -189,6 +189,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		RPCPool            RuntimeRPCPoolSummary
 		RPCWorkers         []RuntimeRPCPoolWorker
 		RPCEndpoints       []string
+		RPCHealth          []RPCHealthRecord
 		Readiness          ReadinessSummary
 		Capacity           CapacitySummary
 		NodesByID          map[string]cluster.Node
@@ -209,6 +210,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		RPCPool:            rpcPoolSummary,
 		RPCWorkers:         rpcPoolWorkers,
 		RPCEndpoints:       rpcPoolEndpoints,
+		RPCHealth:          s.state.RPCHealth(),
 		Readiness:          clusterReadiness(onlineWorkerNodes(nodes), modelsView, allJobs),
 		Capacity:           clusterCapacity(s.state.ClusterSummary(), modelsView, onlineWorkerNodes(nodes)),
 		NodesByID:          nodesByID(nodes),
@@ -660,6 +662,7 @@ func (s *Server) handleRuntimeRPCPool(w http.ResponseWriter, r *http.Request) {
 		"summary":           summary,
 		"workers":           workers,
 		"endpoints":         endpoints,
+		"health":            s.state.RPCHealth(),
 		"llama_cli_rpc_arg": strings.Join(endpoints, ","),
 	})
 }
@@ -679,14 +682,32 @@ func (s *Server) handleRuntimeRPCPoolSmoke(w http.ResponseWriter, r *http.Reques
 	if timeoutMS > 5000 {
 		timeoutMS = 5000
 	}
-	_, _, endpoints := runtimeRPCPoolReport(s.state.Nodes())
+	_, workers, endpoints := runtimeRPCPoolReport(s.state.Nodes())
 	report := smokeRuntimeRPCEndpoints(r.Context(), endpoints, time.Duration(timeoutMS)*time.Millisecond)
+	s.recordRPCHealthReport(workers, report)
 	report.TimeoutMS = timeoutMS
 	status := http.StatusOK
 	if report.Checked == 0 {
 		status = http.StatusConflict
 	}
 	writeJSON(w, status, report)
+}
+
+func (s *Server) recordRPCHealthReport(workers []RuntimeRPCPoolWorker, report RuntimeRPCSmokeReport) {
+	workersByEndpoint := rpcWorkersByEndpoint(workers)
+	now := time.Now().UTC()
+	for _, result := range report.Results {
+		worker := workersByEndpoint[result.Endpoint]
+		_ = s.state.PutRPCHealth(RPCHealthUpdate{
+			Endpoint:  result.Endpoint,
+			NodeID:    worker.NodeID,
+			NodeName:  worker.NodeName,
+			Ready:     result.Ready,
+			LatencyMS: result.LatencyMS,
+			Error:     result.Error,
+			CheckedAt: now,
+		})
+	}
 }
 
 func smokeRuntimeRPCEndpoints(ctx context.Context, endpoints []string, timeout time.Duration) RuntimeRPCSmokeReport {
@@ -1484,6 +1505,7 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 		}
 		plan.HealthChecked = true
 		report := smokeRuntimeRPCEndpoints(ctx, endpoints, healthTimeout)
+		s.recordRPCHealthReport(workers, report)
 		readyEndpoints := make([]string, 0, len(endpoints))
 		for _, result := range report.Results {
 			healthByEndpoint[result.Endpoint] = result
@@ -1565,6 +1587,20 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 	}
 	plan.ExecutableNow = len(plan.Blockers) == 0
 	return plan
+}
+
+func rpcWorkersByEndpoint(workers []RuntimeRPCPoolWorker) map[string]RuntimeRPCPoolWorker {
+	out := make(map[string]RuntimeRPCPoolWorker, len(workers))
+	for _, worker := range workers {
+		endpoint := strings.TrimSpace(worker.RPC.Endpoint)
+		if endpoint == "" {
+			continue
+		}
+		if _, exists := out[endpoint]; !exists {
+			out[endpoint] = worker
+		}
+	}
+	return out
 }
 
 func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *http.Request, model models.Model) {
@@ -5815,6 +5851,42 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
       {{else}}
       <div class="empty">No online runtime-ready workers report llama.cpp RPC support yet.</div>
+      {{end}}
+      {{if .RPCHealth}}
+      <div class="section-head">
+        <h3>RPC Health History</h3>
+        <code>{{len .RPCHealth}} endpoint record{{if ne (len .RPCHealth) 1}}s{{end}}</code>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Endpoint</th>
+              <th>Status</th>
+              <th>Worker</th>
+              <th>Score</th>
+              <th>Latency</th>
+              <th>Last error</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+          {{range .RPCHealth}}
+            <tr>
+              <td><code>{{.Endpoint}}</code></td>
+              <td><span class="{{if .Ready}}pill{{else}}pill pill-failed{{end}}">{{if .Ready}}ready{{else}}failed{{end}}</span></td>
+              <td>{{if .NodeName}}<code>{{.NodeName}}</code>{{else}}<span class="sub">unknown</span>{{end}}{{if .NodeID}}<br><span class="sub">{{shortID .NodeID}}</span>{{end}}</td>
+              <td>{{.Successes}} ok / {{.Failures}} failed{{if .ConsecutiveFailures}}<br><span class="sub">{{.ConsecutiveFailures}} consecutive failure{{if ne .ConsecutiveFailures 1}}s{{end}}</span>{{end}}</td>
+              <td>{{if .LastLatencyMS}}{{.LastLatencyMS}} ms{{else}}-{{end}}</td>
+              <td>{{if .LastError}}<span class="sub">{{clip .LastError 120}}</span>{{else}}<span class="sub">-</span>{{end}}</td>
+              <td>{{formatClock .UpdatedAt}}</td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="empty">No RPC health history yet. Run a plan check, smoke test, or distributed prompt.</div>
       {{end}}
     </section>
     </div>

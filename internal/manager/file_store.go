@@ -24,6 +24,7 @@ type fileStoreSnapshot struct {
 	StartedAt     time.Time                                                        `json:"started_at"`
 	Nodes         map[string]cluster.Node                                          `json:"nodes"`
 	Benchmarks    map[string]map[resources.BenchmarkKind]resources.BenchmarkResult `json:"benchmarks"`
+	RPCHealth     map[string]RPCHealthRecord                                       `json:"rpc_health,omitempty"`
 	Jobs          map[string]jobs.Job                                              `json:"jobs"`
 	Conversations map[string]Conversation                                          `json:"conversations,omitempty"`
 	Memories      map[string]Memory                                                `json:"memories,omitempty"`
@@ -68,6 +69,14 @@ func (s *FileStore) PutBenchmark(result resources.BenchmarkResult) bool {
 		_ = s.save()
 	}
 	return ok
+}
+
+func (s *FileStore) PutRPCHealth(update RPCHealthUpdate) RPCHealthRecord {
+	record := s.State.PutRPCHealth(update)
+	if record.Endpoint != "" {
+		_ = s.save()
+	}
+	return record
 }
 
 func (s *FileStore) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
@@ -193,6 +202,9 @@ func (s *FileStore) load() error {
 	if snapshot.Benchmarks != nil {
 		s.benchmarks = snapshot.Benchmarks
 	}
+	if snapshot.RPCHealth != nil {
+		s.rpcHealth = snapshot.RPCHealth
+	}
 	if snapshot.Jobs != nil {
 		s.jobs = snapshot.Jobs
 	}
@@ -211,6 +223,7 @@ func (s *FileStore) save() error {
 		StartedAt:     s.startedAt,
 		Nodes:         cloneNodes(s.nodes),
 		Benchmarks:    cloneBenchmarks(s.benchmarks),
+		RPCHealth:     cloneRPCHealth(s.rpcHealth),
 		Jobs:          cloneJobs(s.jobs),
 		Conversations: cloneConversations(s.conversations),
 		Memories:      cloneMemories(s.memories),
@@ -247,6 +260,14 @@ func cloneBenchmarks(in map[string]map[resources.BenchmarkKind]resources.Benchma
 		for kind, result := range byKind {
 			out[nodeID][kind] = result
 		}
+	}
+	return out
+}
+
+func cloneRPCHealth(in map[string]RPCHealthRecord) map[string]RPCHealthRecord {
+	out := make(map[string]RPCHealthRecord, len(in))
+	for key, value := range in {
+		out[key] = value
 	}
 	return out
 }

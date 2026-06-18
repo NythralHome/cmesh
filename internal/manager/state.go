@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ type State struct {
 	heartbeatTimeout time.Duration
 	nodes            map[string]cluster.Node
 	benchmarks       map[string]map[resources.BenchmarkKind]resources.BenchmarkResult
+	rpcHealth        map[string]RPCHealthRecord
 	jobs             map[string]jobs.Job
 	conversations    map[string]Conversation
 	memories         map[string]Memory
@@ -36,6 +38,7 @@ func NewState() *State {
 		heartbeatTimeout: 30 * time.Second,
 		nodes:            make(map[string]cluster.Node),
 		benchmarks:       make(map[string]map[resources.BenchmarkKind]resources.BenchmarkResult),
+		rpcHealth:        make(map[string]RPCHealthRecord),
 		jobs:             make(map[string]jobs.Job),
 		conversations:    make(map[string]Conversation),
 		memories:         make(map[string]Memory),
@@ -206,6 +209,60 @@ func (s *State) BenchmarkSummaryByNode() map[string]NodeBenchmarkSummary {
 	}
 
 	return summaries
+}
+
+func (s *State) PutRPCHealth(update RPCHealthUpdate) RPCHealthRecord {
+	endpoint := strings.TrimSpace(update.Endpoint)
+	if endpoint == "" {
+		return RPCHealthRecord{}
+	}
+	if update.CheckedAt.IsZero() {
+		update.CheckedAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record := s.rpcHealth[endpoint]
+	record.Endpoint = endpoint
+	if strings.TrimSpace(update.NodeID) != "" {
+		record.NodeID = strings.TrimSpace(update.NodeID)
+	}
+	if strings.TrimSpace(update.NodeName) != "" {
+		record.NodeName = strings.TrimSpace(update.NodeName)
+	}
+	record.Ready = update.Ready
+	record.LastLatencyMS = update.LatencyMS
+	record.LastError = strings.TrimSpace(update.Error)
+	record.UpdatedAt = update.CheckedAt
+	if update.Ready {
+		record.Successes++
+		record.ConsecutiveFailures = 0
+	} else {
+		record.Failures++
+		record.ConsecutiveFailures++
+	}
+	s.rpcHealth[endpoint] = record
+	return record
+}
+
+func (s *State) RPCHealth() []RPCHealthRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]RPCHealthRecord, 0, len(s.rpcHealth))
+	for _, record := range s.rpcHealth {
+		out = append(out, record)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Ready != out[j].Ready {
+			return out[i].Ready
+		}
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].Endpoint < out[j].Endpoint
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out
 }
 
 func (s *State) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {

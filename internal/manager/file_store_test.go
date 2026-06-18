@@ -3,6 +3,7 @@ package manager
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/membership"
@@ -34,6 +35,14 @@ func TestFileStorePersistsState(t *testing.T) {
 	}); !ok {
 		t.Fatalf("expected benchmark to be stored")
 	}
+	store.PutRPCHealth(RPCHealthUpdate{
+		Endpoint:  "10.0.0.10:50052",
+		NodeID:    joinResp.NodeID,
+		NodeName:  "persisted-worker",
+		Ready:     true,
+		LatencyMS: 12,
+		CheckedAt: time.Now().UTC(),
+	})
 
 	restored, err := NewFileStore(path)
 	if err != nil {
@@ -53,5 +62,9 @@ func TestFileStorePersistsState(t *testing.T) {
 	summary := restored.BenchmarkSummaryByNode()[joinResp.NodeID]
 	if summary.TotalScore != 12.5 {
 		t.Fatalf("expected restored benchmark score, got %f", summary.TotalScore)
+	}
+	health := restored.RPCHealth()
+	if len(health) != 1 || health[0].Endpoint != "10.0.0.10:50052" || !health[0].Ready || health[0].Successes != 1 {
+		t.Fatalf("expected restored rpc health, got %#v", health)
 	}
 }
