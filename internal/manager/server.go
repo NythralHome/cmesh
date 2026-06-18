@@ -1903,6 +1903,10 @@ func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *htt
 	effectiveSystemPrompt := systemPromptWithMemory(systemPrompt, model.ID, s.state)
 	budgetedMessages := budgetConversationMessages(model, effectiveSystemPrompt, conversation.Messages, maxTokens)
 	executionPlan := distributedRPCExecutionPlanForJob(plan)
+	if err := protocol.ValidateDistributedRPCExecutionPlan(executionPlan, model.ID, plan.CoordinatorNodeID); err != nil {
+		http.Error(w, "invalid distributed rpc execution plan: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	input, err := json.Marshal(models.DistributedRPCGenerateInput{
 		ModelID:        model.ID,
 		Prompt:         req.Prompt,

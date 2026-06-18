@@ -15,6 +15,7 @@ import (
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/protocol"
 	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/cmesh/cmesh/internal/workerstatus"
 )
@@ -68,6 +69,22 @@ func TestExecuteDistributedRPCGenerateAddsRPCArgument(t *testing.T) {
 		MaxTokens:    8,
 		Temperature:  "0.1",
 		RPCEndpoints: []string{"10.0.0.10:50052", "10.0.0.11:50052"},
+		ExecutionPlan: protocol.DistributedRPCExecutionPlan{
+			Protocol:          protocol.DistributedRPCProtocol,
+			ProtocolVersion:   protocol.DistributedRPCProtocolVersion,
+			PlanSchemaVersion: protocol.DistributedRPCPlanSchemaVersion,
+			Mode:              "llama.cpp-rpc",
+			ModelID:           model.ID,
+			CoordinatorNodeID: "node-a",
+			RPCEndpoints:      []string{"10.0.0.10:50052", "10.0.0.11:50052"},
+			Backends: []protocol.DistributedRPCBackend{{
+				NodeID:   "node-b",
+				Endpoint: "10.0.0.10:50052",
+			}, {
+				NodeID:   "node-c",
+				Endpoint: "10.0.0.11:50052",
+			}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +113,37 @@ func TestExecuteDistributedRPCGenerateAddsRPCArgument(t *testing.T) {
 	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
 	if !containsAdjacentArgs(args, "--rpc", "10.0.0.10:50052,10.0.0.11:50052") {
 		t.Fatalf("expected --rpc argument, got %#v", args)
+	}
+}
+
+func TestExecuteDistributedRPCGenerateRejectsUnsupportedProtocolVersion(t *testing.T) {
+	input, err := json.Marshal(models.DistributedRPCGenerateInput{
+		ModelID:      "qwen2.5-0.5b-instruct-q4-k-m",
+		Prompt:       "hello",
+		RPCEndpoints: []string{"10.0.0.10:50052"},
+		ExecutionPlan: protocol.DistributedRPCExecutionPlan{
+			Protocol:          protocol.DistributedRPCProtocol,
+			ProtocolVersion:   protocol.DistributedRPCProtocolVersion + 1,
+			PlanSchemaVersion: protocol.DistributedRPCPlanSchemaVersion,
+			Mode:              "llama.cpp-rpc",
+			ModelID:           "qwen2.5-0.5b-instruct-q4-k-m",
+			CoordinatorNodeID: "node-a",
+			RPCEndpoints:      []string{"10.0.0.10:50052"},
+			Backends: []protocol.DistributedRPCBackend{{
+				NodeID:   "node-b",
+				Endpoint: "10.0.0.10:50052",
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = executeWorkerJob(jobs.Job{
+		Type:  models.JobGenerateDistributedRPC,
+		Input: string(input),
+	}, cluster.ResourceSnapshot{}, t.TempDir(), "node-a", time.Now().UTC(), "")
+	if err == nil || !strings.Contains(err.Error(), "unsupported distributed rpc protocol_version") {
+		t.Fatalf("expected unsupported protocol version error, got %v", err)
 	}
 }
 

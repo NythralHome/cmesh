@@ -27,6 +27,7 @@ import (
 	"github.com/cmesh/cmesh/internal/manager"
 	"github.com/cmesh/cmesh/internal/membership"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/protocol"
 	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/cmesh/cmesh/internal/runtimes"
 	"github.com/cmesh/cmesh/internal/version"
@@ -868,7 +869,7 @@ func executeWorkerJob(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir 
 	case models.JobGenerate:
 		return executeModelGenerateJob(job.Input, cacheDir)
 	case models.JobGenerateDistributedRPC:
-		return executeModelDistributedRPCGenerateJob(job.Input, cacheDir)
+		return executeModelDistributedRPCGenerateJob(job.Input, cacheDir, nodeID)
 	case models.JobGenerateDistributed:
 		return "", fmt.Errorf("distributed model generate parent jobs are coordinator-owned; workers execute distributed stage jobs")
 	case models.JobGenerateStage:
@@ -1490,13 +1491,13 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	return executeModelGenerate(req, cacheDir, nil, string(models.JobGenerate))
 }
 
-func executeModelDistributedRPCGenerateJob(input string, cacheDir string) (string, error) {
+func executeModelDistributedRPCGenerateJob(input string, cacheDir string, nodeID string) (string, error) {
 	var req models.DistributedRPCGenerateInput
 	if err := json.Unmarshal([]byte(input), &req); err != nil {
 		return "", fmt.Errorf("invalid distributed rpc model generate input: %w", err)
 	}
-	if len(req.RPCEndpoints) == 0 {
-		return "", fmt.Errorf("rpc_endpoints is required")
+	if err := protocol.ValidateDistributedRPCExecutionPlan(req.ExecutionPlan, req.ModelID, nodeID); err != nil {
+		return "", fmt.Errorf("invalid distributed rpc execution plan: %w", err)
 	}
 	generateReq := models.GenerateInput{
 		ModelID:        req.ModelID,
@@ -1507,7 +1508,7 @@ func executeModelDistributedRPCGenerateJob(input string, cacheDir string) (strin
 		MaxTokens:      req.MaxTokens,
 		Temperature:    req.Temperature,
 	}
-	return executeModelGenerate(generateReq, cacheDir, req.RPCEndpoints, string(models.JobGenerateDistributedRPC))
+	return executeModelGenerate(generateReq, cacheDir, req.ExecutionPlan.RPCEndpoints, string(models.JobGenerateDistributedRPC))
 }
 
 func executeModelGenerate(req models.GenerateInput, cacheDir string, rpcEndpoints []string, resultKind string) (string, error) {
