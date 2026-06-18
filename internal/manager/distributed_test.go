@@ -261,6 +261,124 @@ func TestDistributedGenerateEndpointCreatesPlannedJobGraph(t *testing.T) {
 	}
 }
 
+func TestCDIPDistributedGenerateEndToEndControlPlane(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	for _, name := range []string{"worker-a", "worker-b"} {
+		joinWorkerWithResourcesForTest(t, srv, name, cluster.ResourceSnapshot{
+			CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+			Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+			Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 8 * gb, FreeBytes: 64 * gb},
+			Runtimes: []cluster.RuntimeResource{{
+				Name:       string(models.RuntimeLlamaCPP),
+				Ready:      true,
+				Version:    "test",
+				BinaryPath: "/tmp/llama-cli",
+			}},
+			Models: []cluster.ModelResource{{
+				ID:      "qwen2.5-7b-instruct-q4-k-m",
+				Name:    "Qwen2.5 7B Instruct",
+				Runtime: string(models.RuntimeLlamaCPP),
+				Bytes:   5 * gb,
+				Ready:   true,
+			}},
+		})
+	}
+
+	createRec := httptest.NewRecorder()
+	srv.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-7b-instruct-q4-k-m/distributed-generate", strings.NewReader(`{"prompt":"hello distributed cluster"}`)))
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("expected distributed generate 202, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created distributedGenerateResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if len(created.StageJobs) != 2 {
+		t.Fatalf("expected two stage jobs, got %#v", created.StageJobs)
+	}
+
+	prepareRec := httptest.NewRecorder()
+	srv.ServeHTTP(prepareRec, httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+created.Job.ID+"/prepare", nil))
+	if prepareRec.Code != http.StatusAccepted {
+		t.Fatalf("expected prepare 202, got %d: %s", prepareRec.Code, prepareRec.Body.String())
+	}
+	var prepared CDIPPrepareResult
+	if err := json.Unmarshal(prepareRec.Body.Bytes(), &prepared); err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Messages) != len(created.StageJobs) {
+		t.Fatalf("expected prepare messages for each stage, got %#v", prepared)
+	}
+
+	for _, stageJob := range prepared.StageJobs {
+		readyBody := strings.NewReader(`{"node_id":"` + stageJob.AssignedTo + `","result":"{\"kind\":\"cdip.stage_ready\"}"}`)
+		readyRec := httptest.NewRecorder()
+		srv.ServeHTTP(readyRec, httptest.NewRequest(http.MethodPost, "/v1/jobs/"+stageJob.ID+"/complete", readyBody))
+		if readyRec.Code != http.StatusOK {
+			t.Fatalf("expected stage ready 200, got %d: %s", readyRec.Code, readyRec.Body.String())
+		}
+		var readyJob jobs.Job
+		if err := json.Unmarshal(readyRec.Body.Bytes(), &readyJob); err != nil {
+			t.Fatal(err)
+		}
+		if readyJob.CDIPState != cdip.StageReady {
+			t.Fatalf("expected stage ready, got %#v", readyJob)
+		}
+	}
+
+	prefillRec := httptest.NewRecorder()
+	srv.ServeHTTP(prefillRec, httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+created.Job.ID+"/prefill", nil))
+	if prefillRec.Code != http.StatusAccepted {
+		t.Fatalf("expected prefill 202, got %d: %s", prefillRec.Code, prefillRec.Body.String())
+	}
+	var prefilled CDIPCommandResult
+	if err := json.Unmarshal(prefillRec.Body.Bytes(), &prefilled); err != nil {
+		t.Fatal(err)
+	}
+	for _, stageJob := range prefilled.StageJobs {
+		if stageJob.CDIPState != cdip.StagePrefill {
+			t.Fatalf("expected prefill state, got %#v", stageJob)
+		}
+	}
+
+	decodeRec := httptest.NewRecorder()
+	srv.ServeHTTP(decodeRec, httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+created.Job.ID+"/decode", strings.NewReader(`{"step":1}`)))
+	if decodeRec.Code != http.StatusAccepted {
+		t.Fatalf("expected decode 202, got %d: %s", decodeRec.Code, decodeRec.Body.String())
+	}
+	var decoded CDIPCommandResult
+	if err := json.Unmarshal(decodeRec.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.ActivationFrames) != len(decoded.StageJobs)-1 {
+		t.Fatalf("expected activation frames between stages, got %#v", decoded)
+	}
+	for _, stageJob := range decoded.StageJobs {
+		if stageJob.CDIPState != cdip.StageDecode {
+			t.Fatalf("expected decode state, got %#v", stageJob)
+		}
+	}
+
+	completeRec := httptest.NewRecorder()
+	srv.ServeHTTP(completeRec, httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+created.Job.ID+"/complete", strings.NewReader(`{"output":"e2e distributed answer"}`)))
+	if completeRec.Code != http.StatusAccepted {
+		t.Fatalf("expected complete 202, got %d: %s", completeRec.Code, completeRec.Body.String())
+	}
+	var completed CDIPCommandResult
+	if err := json.Unmarshal(completeRec.Body.Bytes(), &completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.ParentJob.Status != jobs.StatusSucceeded || !strings.Contains(completed.ParentJob.Result, "e2e distributed answer") {
+		t.Fatalf("expected completed parent result, got %#v", completed.ParentJob)
+	}
+	for _, stageJob := range completed.StageJobs {
+		if stageJob.CDIPState != cdip.StageCompleted || stageJob.Status != jobs.StatusSucceeded {
+			t.Fatalf("expected completed stage, got %#v", stageJob)
+		}
+	}
+}
+
 func TestCDIPStageLifecycleEndpoint(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
