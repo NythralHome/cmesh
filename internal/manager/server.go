@@ -3837,6 +3837,9 @@ func jobDetail(job jobs.Job) string {
 	if err := json.Unmarshal([]byte(job.Result), &result); err != nil {
 		return job.Result
 	}
+	if trace, ok := distributedRPCExecutionResult(job); ok {
+		return distributedRPCExecutionResultText(trace)
+	}
 	if output, ok := result["output"].(string); ok && strings.TrimSpace(output) != "" {
 		return output
 	}
@@ -3892,6 +3895,48 @@ func jobDetail(job jobs.Job) string {
 		return "Completed on " + runtimeValue
 	}
 	return "Completed."
+}
+
+func distributedRPCExecutionResult(job jobs.Job) (protocol.DistributedRPCExecutionResult, bool) {
+	if job.Type != models.JobGenerateDistributedRPC || strings.TrimSpace(job.Result) == "" {
+		return protocol.DistributedRPCExecutionResult{}, false
+	}
+	var payload struct {
+		ExecutionResult protocol.DistributedRPCExecutionResult `json:"execution_result"`
+	}
+	if err := json.Unmarshal([]byte(job.Result), &payload); err != nil {
+		return protocol.DistributedRPCExecutionResult{}, false
+	}
+	if strings.TrimSpace(payload.ExecutionResult.Protocol) == "" {
+		return protocol.DistributedRPCExecutionResult{}, false
+	}
+	return payload.ExecutionResult, true
+}
+
+func distributedRPCExecutionResultText(result protocol.DistributedRPCExecutionResult) string {
+	parts := []string{"Distributed RPC"}
+	if result.DurationMS > 0 {
+		parts = append(parts, fmt.Sprintf("%d ms", result.DurationMS))
+	}
+	if result.RPCEndpointCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d endpoint(s)", result.RPCEndpointCount))
+	} else if len(result.RPCEndpoints) > 0 {
+		parts = append(parts, fmt.Sprintf("%d endpoint(s)", len(result.RPCEndpoints)))
+	}
+	if strings.TrimSpace(result.Runtime) != "" {
+		parts = append(parts, result.Runtime)
+	}
+	if strings.TrimSpace(result.PlanID) != "" {
+		parts = append(parts, "plan "+shortValueID(result.PlanID))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func shortValueID(value string) string {
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
 }
 
 func jobProgress(job jobs.Job) string {
@@ -4047,10 +4092,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		return float64(bytes) / 1024 / 1024
 	},
 	"shortID": func(value string) string {
-		if len(value) <= 12 {
-			return value
-		}
-		return value[:12]
+		return shortValueID(value)
 	},
 	"jobOutput": func(job jobs.Job) string {
 		if job.Error != "" {
@@ -4211,6 +4253,20 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		default:
 			return fmt.Sprintf("%v", typed)
 		}
+	},
+	"distributedRPCTrace": func(job jobs.Job) string {
+		result, ok := distributedRPCExecutionResult(job)
+		if !ok {
+			return ""
+		}
+		return distributedRPCExecutionResultText(result)
+	},
+	"distributedRPCEndpoints": func(job jobs.Job) string {
+		result, ok := distributedRPCExecutionResult(job)
+		if !ok || len(result.RPCEndpoints) == 0 {
+			return ""
+		}
+		return strings.Join(result.RPCEndpoints, ", ")
 	},
 }).Parse(`<!doctype html>
 <html lang="en">
@@ -6613,7 +6669,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <td><code>{{jobRequirements .}}</code></td>
               <td><code>{{jobWorkerLabel $.NodesByID .}}</code></td>
               <td><div class="timeline">{{jobTimeline .}}<br>attempt {{.Attempts}} / {{.MaxAttempts}}{{if .LastFailure}}<br>{{.LastFailure}}{{end}}</div></td>
-              <td class="mono-output"><code>{{clip (jobDetail .) 160}}</code></td>
+              <td class="mono-output"><code>{{clip (jobDetail .) 160}}</code>{{if distributedRPCTrace .}}<br><span class="sub">{{distributedRPCTrace .}}</span>{{end}}{{if distributedRPCEndpoints .}}<br><span class="sub">{{clip (distributedRPCEndpoints .) 120}}</span>{{end}}</td>
             </tr>
           {{end}}{{end}}
           </tbody>

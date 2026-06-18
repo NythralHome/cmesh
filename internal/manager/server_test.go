@@ -2242,6 +2242,37 @@ func TestRuntimeRPCPoolSmokeEndpointRequiresActiveEndpoints(t *testing.T) {
 	}
 }
 
+func TestJobDetailShowsDistributedRPCExecutionTrace(t *testing.T) {
+	result, err := json.Marshal(map[string]any{
+		"output": "hello from rpc",
+		"execution_result": protocol.DistributedRPCExecutionResult{
+			Protocol:          protocol.DistributedRPCProtocol,
+			ProtocolVersion:   protocol.DistributedRPCProtocolVersion,
+			PlanSchemaVersion: protocol.DistributedRPCPlanSchemaVersion,
+			PlanID:            "job-plan-123456",
+			Kind:              models.JobGenerateDistributedRPC,
+			ModelID:           "qwen2.5-0.5b-instruct-q4-k-m",
+			Output:            "hello from rpc",
+			Runtime:           "llama.cpp",
+			WorkerRuntime:     "darwin/arm64",
+			RPCEndpoints:      []string{"10.0.0.10:50052", "10.0.0.11:50052"},
+			RPCEndpointCount:  2,
+			DurationMS:        123,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := jobs.Job{
+		Type:   models.JobGenerateDistributedRPC,
+		Result: string(result),
+	}
+	detail := jobDetail(job)
+	if !strings.Contains(detail, "Distributed RPC") || !strings.Contains(detail, "123 ms") || !strings.Contains(detail, "2 endpoint") || !strings.Contains(detail, "llama.cpp") || !strings.Contains(detail, "plan") {
+		t.Fatalf("expected distributed rpc trace, got %q", detail)
+	}
+}
+
 func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
