@@ -176,7 +176,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	clusterBenchmarks := clusterBenchmarkSummaries(allJobs, 5)
 	modelCatalog := models.Catalog()
 	modelsView := modelSummaries(modelCatalog, allJobs, nodes)
-	rpcPoolSummary, _, rpcPoolEndpoints := runtimeRPCPoolReport(nodes)
+	rpcPoolSummary, rpcPoolWorkers, rpcPoolEndpoints := runtimeRPCPoolReport(nodes)
 	data := struct {
 		Summary            ClusterSummary
 		OnlineNodes        []cluster.Node
@@ -185,6 +185,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		ClusterBenchmarks  []ClusterBenchmarkSummary
 		Models             []ModelSummary
 		RPCPool            RuntimeRPCPoolSummary
+		RPCWorkers         []RuntimeRPCPoolWorker
 		RPCEndpoints       []string
 		Readiness          ReadinessSummary
 		Capacity           CapacitySummary
@@ -204,6 +205,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		ClusterBenchmarks:  clusterBenchmarks,
 		Models:             modelsView,
 		RPCPool:            rpcPoolSummary,
+		RPCWorkers:         rpcPoolWorkers,
 		RPCEndpoints:       rpcPoolEndpoints,
 		Readiness:          clusterReadiness(onlineWorkerNodes(nodes), modelsView, allJobs),
 		Capacity:           clusterCapacity(s.state.ClusterSummary(), modelsView, onlineWorkerNodes(nodes)),
@@ -662,13 +664,12 @@ func runtimeRPCPoolReport(nodes []cluster.Node) (RuntimeRPCPoolSummary, []Runtim
 			}
 			for _, rpc := range runtimeStatus.RPCRuntimes {
 				endpoint := strings.TrimSpace(rpc.Endpoint)
-				if !rpc.Ready || endpoint == "" {
-					continue
-				}
-				summary.RPCReadyWorkers++
-				if !seenEndpoint[endpoint] {
-					seenEndpoint[endpoint] = true
-					endpoints = append(endpoints, endpoint)
+				if rpc.Ready && endpoint != "" {
+					summary.RPCReadyWorkers++
+					if !seenEndpoint[endpoint] {
+						seenEndpoint[endpoint] = true
+						endpoints = append(endpoints, endpoint)
+					}
 				}
 				workers = append(workers, RuntimeRPCPoolWorker{
 					NodeID:       node.ID,
@@ -5182,6 +5183,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <button class="tab-button active" type="button" data-tab-target="overview"><svg class="icon"><use href="#icon-workers"></use></svg><span>Overview</span></button>
               <button class="tab-button" type="button" data-tab-target="readiness"><svg class="icon"><use href="#icon-chart"></use></svg><span>Readiness</span><strong class="nav-badge {{.Readiness.Status}}" data-nav-badge="readiness">{{.Readiness.Status}}</strong></button>
               <button class="tab-button" type="button" data-tab-target="workers"><svg class="icon"><use href="#icon-workers"></use></svg><span>Workers</span><strong class="nav-badge" data-nav-badge="workers">{{.Summary.WorkersOnline}}/{{.Summary.WorkersTotal}}</strong></button>
+              <button class="tab-button" type="button" data-tab-target="rpc-pool"><svg class="icon"><use href="#icon-chart"></use></svg><span>RPC Pool</span><strong class="nav-badge {{if gt .RPCPool.Endpoints 0}}ready{{else}}blocked{{end}}">{{.RPCPool.Endpoints}}</strong></button>
               <button class="tab-button" type="button" data-tab-target="benchmarks"><svg class="icon"><use href="#icon-chart"></use></svg><span>Benchmarks</span></button>
             </div>
             <div class="nav-group" aria-label="AI workspace">
@@ -5473,6 +5475,70 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
       {{else}}
       <div class="empty">No workers are online right now.</div>
+      {{end}}
+    </section>
+    </div>
+    <div class="tab-panel" id="tab-rpc-pool" hidden>
+    <section>
+      <div class="section-head">
+        <h2>Distributed RPC Pool</h2>
+        <code>{{.RPCPool.Endpoints}} active endpoint{{if ne .RPCPool.Endpoints 1}}s{{end}}</code>
+      </div>
+      <div class="stat-grid">
+        <div class="stat"><span>Online workers</span><strong>{{.RPCPool.Workers}}</strong></div>
+        <div class="stat"><span>Runtime ready</span><strong>{{.RPCPool.RuntimeReadyWorkers}}</strong></div>
+        <div class="stat"><span>RPC ready</span><strong>{{.RPCPool.RPCReadyWorkers}}</strong></div>
+        <div class="stat"><span>Endpoints</span><strong>{{.RPCPool.Endpoints}}</strong></div>
+      </div>
+      {{if .RPCEndpoints}}
+      <div class="runner-status">
+        <strong>llama-cli RPC argument</strong><br>
+        <code>--rpc {{range $index, $endpoint := .RPCEndpoints}}{{if $index}},{{end}}{{$endpoint}}{{end}}</code>
+      </div>
+      {{else}}
+      <div class="empty">No RPC backend is active yet. Open Worker Desktop on a runtime-ready machine and start RPC backend from the AI runtime tab.</div>
+      {{end}}
+      {{if .RPCWorkers}}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Worker</th>
+              <th>RPC status</th>
+              <th>Endpoint</th>
+              <th>Runtime</th>
+              <th>Protocol</th>
+              <th>Blockers</th>
+              <th>Capabilities</th>
+            </tr>
+          </thead>
+          <tbody>
+          {{range .RPCWorkers}}
+            <tr>
+              <td><code>{{.NodeName}}</code><br><span class="sub">{{.NodeID}}</span></td>
+              <td><span class="{{if .RPC.Ready}}pill{{else}}pill pill-failed{{end}}">{{if .RPC.Ready}}ready{{else}}blocked{{end}}</span></td>
+              <td><code>{{if .RPC.Endpoint}}{{.RPC.Endpoint}}{{else}}-{{end}}</code></td>
+              <td>{{.Runtime}}<br><span class="sub">{{if .RuntimeReady}}runtime ready{{else}}runtime missing{{end}}</span></td>
+              <td>{{if .RPC.Protocol}}{{.RPC.Protocol}}{{else}}-{{end}}</td>
+              <td>
+                {{if .RPC.Blockers}}
+                  {{range .RPC.Blockers}}<div class="sub">{{.}}</div>{{end}}
+                {{else if .RPC.Ready}}
+                  <span class="sub">Ready for distributed RPC inference.</span>
+                {{else}}
+                  <span class="sub">RPC backend is not ready.</span>
+                {{end}}
+              </td>
+              <td>
+                {{range .Capabilities}}<span class="pill pill-muted">{{.}}</span> {{else}}<span class="sub">-</span>{{end}}
+              </td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="empty">No online runtime-ready workers report llama.cpp RPC support yet.</div>
       {{end}}
     </section>
     </div>

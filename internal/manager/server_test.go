@@ -2081,7 +2081,7 @@ func TestRuntimeRPCPoolEndpointReportsReadyEndpoints(t *testing.T) {
 	if payload.Summary.Workers != 2 || payload.Summary.RuntimeReadyWorkers != 2 || payload.Summary.RPCReadyWorkers != 1 || payload.Summary.Endpoints != 1 {
 		t.Fatalf("unexpected rpc pool summary: %#v", payload.Summary)
 	}
-	if len(payload.Workers) != 1 || payload.Workers[0].RPC.Endpoint != "10.0.0.10:50052" {
+	if len(payload.Workers) != 2 || payload.Workers[0].RPC.Endpoint != "10.0.0.10:50052" || payload.Workers[1].RPC.Endpoint != "10.0.0.11:50052" || payload.Workers[1].RPC.Ready {
 		t.Fatalf("unexpected rpc pool workers: %#v", payload.Workers)
 	}
 	if len(payload.Endpoints) != 1 || payload.Endpoints[0] != "10.0.0.10:50052" || payload.LlamaCLIRPCArg != "10.0.0.10:50052" {
