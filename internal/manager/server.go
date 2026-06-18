@@ -176,6 +176,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	clusterBenchmarks := clusterBenchmarkSummaries(allJobs, 5)
 	modelCatalog := models.Catalog()
 	modelsView := modelSummaries(modelCatalog, allJobs, nodes)
+	rpcPoolSummary, _, rpcPoolEndpoints := runtimeRPCPoolReport(nodes)
 	data := struct {
 		Summary            ClusterSummary
 		OnlineNodes        []cluster.Node
@@ -183,6 +184,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Benchmarks         map[string]NodeBenchmarkSummary
 		ClusterBenchmarks  []ClusterBenchmarkSummary
 		Models             []ModelSummary
+		RPCPool            RuntimeRPCPoolSummary
+		RPCEndpoints       []string
 		Readiness          ReadinessSummary
 		Capacity           CapacitySummary
 		NodesByID          map[string]cluster.Node
@@ -200,6 +203,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Benchmarks:         s.state.BenchmarkSummaryByNode(),
 		ClusterBenchmarks:  clusterBenchmarks,
 		Models:             modelsView,
+		RPCPool:            rpcPoolSummary,
+		RPCEndpoints:       rpcPoolEndpoints,
 		Readiness:          clusterReadiness(onlineWorkerNodes(nodes), modelsView, allJobs),
 		Capacity:           clusterCapacity(s.state.ClusterSummary(), modelsView, onlineWorkerNodes(nodes)),
 		NodesByID:          nodesByID(nodes),
@@ -4549,9 +4554,29 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     }
     .chat-selectors {
       display: grid;
-      grid-template-columns: minmax(220px, 1fr) minmax(180px, .7fr);
+      grid-template-columns: minmax(220px, 1fr) minmax(180px, .7fr) minmax(140px, .45fr);
       gap: 10px;
       min-width: 0;
+    }
+    .inline-toggle {
+      align-self: end;
+      min-height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      text-transform: none;
+      font-size: 13px;
+    }
+    .inline-toggle input {
+      width: auto;
+      min-height: 0;
+      margin: 0;
     }
     .chat-settings {
       display: grid;
@@ -5555,6 +5580,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                   {{range .Models}}{{$chatModelID := .Model.ID}}{{range modelReadyNodeOptions $.NodesByID .}}<option value="{{.ID}}" data-model-id="{{$chatModelID}}">{{.Name}}</option>{{end}}{{end}}
                 </select>
               </div>
+              <label class="inline-toggle" title="Use active llama.cpp RPC endpoints from this cluster for distributed inference.">
+                <input id="chat-use-rpc" name="use_rpc" type="checkbox" {{if eq .RPCPool.Endpoints 0}}disabled{{end}}>
+                <span>RPC pool</span>
+                <code>{{.RPCPool.Endpoints}} endpoint{{if ne .RPCPool.Endpoints 1}}s{{end}}</code>
+              </label>
               <div class="chat-settings">
                 <div class="field">
                   <label for="chat-system-prompt">System prompt</label>
@@ -7309,6 +7339,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var chatTemperature = document.getElementById("chat-temperature");
     var chatMaxTokens = document.getElementById("chat-max-tokens");
     var chatPrompt = document.getElementById("chat-prompt");
+    var chatUseRPC = document.getElementById("chat-use-rpc");
     var chatSubmitButton = chatForm ? chatForm.querySelector('button[type="submit"]') : null;
     var chatConversationKey = "cmesh.chat.conversation";
     var chatConversationID = "";
@@ -7321,7 +7352,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       chatSubmitting = isSubmitting;
       if (chatSubmitButton) {
         chatSubmitButton.disabled = isSubmitting || !chatModel || !chatNode || !chatModel.value || !chatNode.value;
-        setButtonText(chatSubmitButton, isSubmitting ? "Generating..." : "Generate");
+        setButtonText(chatSubmitButton, isSubmitting ? "Generating..." : (chatUseRPC && chatUseRPC.checked ? "Generate RPC" : "Generate"));
       }
       if (chatPrompt) chatPrompt.disabled = isSubmitting;
       if (chatModel) chatModel.disabled = isSubmitting;
@@ -7790,6 +7821,14 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       chatMaxTokens.addEventListener("change", updateMemoryPreview);
       chatMaxTokens.addEventListener("input", updateMemoryPreview);
     }
+    if (chatUseRPC) {
+      chatUseRPC.addEventListener("change", function() {
+        if (chatSubmitButton && !chatSubmitting) setButtonText(chatSubmitButton, chatUseRPC.checked ? "Generate RPC" : "Generate");
+        if (modelStatus) {
+          modelStatus.innerText = chatUseRPC.checked ? "Ready. RPC pool will be used for the next prompt." : "Ready.";
+        }
+      });
+    }
     if (memoryList) {
       memoryList.addEventListener("click", function(event) {
         var editButton = event.target.closest ? event.target.closest(".memory-edit") : null;
@@ -7929,11 +7968,13 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         appendChatMessage("user", prompt);
         chatForm.elements.prompt.value = "";
         setChatSubmitting(true);
-        modelStatus.innerText = "Submitting model job...";
+        var useRPC = Boolean(chatUseRPC && chatUseRPC.checked && !chatUseRPC.disabled);
+        modelStatus.innerText = useRPC ? "Submitting distributed RPC model job..." : "Submitting model job...";
         var maxTokens = parseInt(chatMaxTokens && chatMaxTokens.value ? chatMaxTokens.value : "512", 10);
         if (!Number.isFinite(maxTokens) || maxTokens < 16) maxTokens = 512;
         if (maxTokens > 2048) maxTokens = 2048;
-        fetch("/v1/models/" + encodeURIComponent(modelID) + "/generate", {
+        var generatePath = useRPC ? "/distributed-rpc-generate" : "/generate";
+        fetch("/v1/models/" + encodeURIComponent(modelID) + generatePath, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -7957,7 +7998,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             }
           } catch (error) {}
           loadModelMemory();
-          modelStatus.innerText = "Generate job " + job.id + " submitted.";
+          modelStatus.innerText = (useRPC ? "Distributed RPC job " : "Generate job ") + job.id + " submitted.";
           pollModelJob(job.id, 0);
         }).catch(function(error) {
           setChatSubmitting(false);
