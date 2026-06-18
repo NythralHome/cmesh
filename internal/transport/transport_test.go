@@ -2,9 +2,14 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cmesh/cmesh/internal/cdip"
 )
@@ -97,5 +102,101 @@ func TestMemoryActivationTransportRejectsInvalidFrame(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected invalid frame error")
+	}
+}
+
+func TestHTTPActivationTransportSendsAndReceivesFrames(t *testing.T) {
+	stream := StreamID{ParentJobID: "job-parent", StageJobID: "job-stage"}
+	sent := make(chan ActivationFrame, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-CMesh-Operator-Token") != "operator-token" {
+			http.Error(w, "missing token", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path != "/v1/cdip/activations/"+stream.ParentJobID+"/"+stream.StageJobID+"/frames" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodPost:
+			var frame ActivationFrame
+			if err := json.NewDecoder(r.Body).Decode(&frame); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			sent <- frame
+			w.WriteHeader(http.StatusAccepted)
+		case http.MethodGet:
+			select {
+			case frame := <-sent:
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(frame)
+			default:
+				w.WriteHeader(http.StatusNoContent)
+			}
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	client := NewHTTPActivationTransport(server.URL, "operator-token").WithClient(server.Client()).WithPollTimeout(time.Millisecond)
+	writer, err := client.OpenWriter(context.Background(), stream, "node-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := client.OpenReader(context.Background(), stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := ActivationFrame{
+		Header: cdip.ActivationChunk{
+			Envelope:     cdip.NewEnvelope(cdip.MessageActivationChunk),
+			ParentJobID:  stream.ParentJobID,
+			StageJobID:   stream.StageJobID,
+			Sequence:     11,
+			ContentType:  "application/vnd.cmesh.activation+binary",
+			Encoding:     "raw",
+			Shape:        []int{1, 1, 4},
+			DType:        "f16",
+			PayloadBytes: 4,
+		},
+		Payload: []byte{1, 3, 5, 7},
+	}
+	if err := writer.Send(context.Background(), frame); err != nil {
+		t.Fatal(err)
+	}
+	got, err := reader.Receive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Header.Sequence != frame.Header.Sequence || string(got.Payload) != string(frame.Payload) {
+		t.Fatalf("unexpected relayed frame: %#v", got)
+	}
+	if _, err := reader.Receive(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF when relay has no frame, got %v", err)
+	}
+}
+
+func TestHTTPActivationTransportRejectsMismatchedFrame(t *testing.T) {
+	stream := StreamID{ParentJobID: "job-parent", StageJobID: "job-stage"}
+	client := NewHTTPActivationTransport("http://127.0.0.1", "")
+	writer, err := client.OpenWriter(context.Background(), stream, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = writer.Send(context.Background(), ActivationFrame{
+		Header: cdip.ActivationChunk{
+			Envelope:     cdip.NewEnvelope(cdip.MessageActivationChunk),
+			ParentJobID:  "other-parent",
+			StageJobID:   stream.StageJobID,
+			Sequence:     1,
+			ContentType:  "application/vnd.cmesh.activation+binary",
+			PayloadBytes: 1,
+		},
+		Payload: []byte{1},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("expected mismatched stream error, got %v", err)
 	}
 }

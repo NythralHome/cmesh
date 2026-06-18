@@ -11,10 +11,11 @@ The distributed direction is valid, but the next milestone is a runtime adapter 
 CMesh should keep CDIP as the protocol contract and implement real distributed inference behind it in stages:
 
 1. Manager-relayed activation frame transport.
-2. Runtime adapter interface for stage execution. The initial code contract is `runtimes.DistributedStageRuntime`.
-3. llama.cpp stage feasibility prototype.
-4. Logical-to-physical model shard materialization.
-5. LAN-only latency and correctness benchmark.
+2. Worker-side HTTP activation client for sending and receiving frames through the manager relay. The initial code contract is `transport.HTTPActivationTransport`.
+3. Runtime adapter interface for stage execution. The initial code contract is `runtimes.DistributedStageRuntime`.
+4. llama.cpp stage feasibility prototype.
+5. Logical-to-physical model shard materialization.
+6. LAN-only latency and correctness benchmark.
 
 Until these exist, distributed plans must remain `executable_now: false`.
 
