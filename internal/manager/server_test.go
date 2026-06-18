@@ -2,6 +2,7 @@ package manager
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -2185,6 +2186,49 @@ func TestRuntimeRPCPoolRefreshEndpointRecordsHealthAndReturnsPool(t *testing.T) 
 	if len(payload.Health) != 1 || payload.Health[0].Endpoint != listener.Addr().String() || !payload.Health[0].Ready || payload.Health[0].Successes != 1 {
 		t.Fatalf("expected refresh to return recorded rpc health, got %#v", payload.Health)
 	}
+}
+
+func TestBackgroundRPCHealthRefreshRecordsEndpointHealth(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go acceptAndCloseConnections(listener)
+
+	state := NewState()
+	srv := NewServerWithOptions(ServerOptions{
+		RPCHealthEvery:   10 * time.Millisecond,
+		RPCHealthTimeout: 500 * time.Millisecond,
+	}, state)
+	joinWorkerWithResourcesForTest(t, srv, "rpc-background-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: listener.Addr().String(),
+			}},
+		}},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.runRPCHealthRefreshLoop(ctx)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		health := state.RPCHealth()
+		if len(health) == 1 && health[0].Endpoint == listener.Addr().String() && health[0].Ready && health[0].Successes > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected background rpc health refresh, got %#v", state.RPCHealth())
 }
 
 func TestRuntimeRPCPoolSmokeEndpointRequiresActiveEndpoints(t *testing.T) {

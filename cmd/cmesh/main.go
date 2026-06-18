@@ -115,6 +115,7 @@ func runManager(args []string) error {
 			OperatorToken:         *operatorToken,
 			PublicURL:             *publicURL,
 			BackgroundCDIPAdvance: true,
+			BackgroundRPCHealth:   true,
 		}, state)
 		fmt.Println("starting CMesh manager in single-node bootstrap mode")
 		fmt.Printf("manager API: %s\n", localHTTPURL(*addr))

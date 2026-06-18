@@ -36,6 +36,9 @@ type Server struct {
 	publicURL               string
 	backgroundCDIPAdvance   bool
 	cdipAdvanceEvery        time.Duration
+	backgroundRPCHealth     bool
+	rpcHealthRefreshEvery   time.Duration
+	rpcHealthTimeout        time.Duration
 	cdipActivationTransport transport.ActivationTransport
 	mux                     *http.ServeMux
 	server                  *http.Server
@@ -52,6 +55,9 @@ type ServerOptions struct {
 	PublicURL             string
 	BackgroundCDIPAdvance bool
 	CDIPAdvanceEvery      time.Duration
+	BackgroundRPCHealth   bool
+	RPCHealthEvery        time.Duration
+	RPCHealthTimeout      time.Duration
 }
 
 func NewServer(addr string, state Store) *Server {
@@ -64,6 +70,14 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	if advanceEvery <= 0 {
 		advanceEvery = time.Second
 	}
+	rpcHealthEvery := options.RPCHealthEvery
+	if rpcHealthEvery <= 0 {
+		rpcHealthEvery = 10 * time.Second
+	}
+	rpcHealthTimeout := options.RPCHealthTimeout
+	if rpcHealthTimeout <= 0 {
+		rpcHealthTimeout = time.Second
+	}
 	s := &Server{
 		addr:                    options.Addr,
 		state:                   state,
@@ -72,6 +86,9 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 		publicURL:               strings.TrimRight(options.PublicURL, "/"),
 		backgroundCDIPAdvance:   options.BackgroundCDIPAdvance,
 		cdipAdvanceEvery:        advanceEvery,
+		backgroundRPCHealth:     options.BackgroundRPCHealth,
+		rpcHealthRefreshEvery:   rpcHealthEvery,
+		rpcHealthTimeout:        rpcHealthTimeout,
 		cdipActivationTransport: transport.NewMemoryActivationTransport(8),
 		mux:                     mux,
 		snapshots:               make(map[string]CapacitySnapshot),
@@ -125,6 +142,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.backgroundCDIPAdvance {
 		go s.runCDIPAdvanceLoop(ctx)
 	}
+	if s.backgroundRPCHealth {
+		go s.runRPCHealthRefreshLoop(ctx)
+	}
 	go func() {
 		errCh <- s.server.ListenAndServe()
 	}()
@@ -151,6 +171,20 @@ func (s *Server) runCDIPAdvanceLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.advanceActiveCDIPJobs()
+		}
+	}
+}
+
+func (s *Server) runRPCHealthRefreshLoop(ctx context.Context) {
+	ticker := time.NewTicker(s.rpcHealthRefreshEvery)
+	defer ticker.Stop()
+	s.refreshRuntimeRPCHealth(ctx, int(s.rpcHealthTimeout.Milliseconds()))
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.refreshRuntimeRPCHealth(ctx, int(s.rpcHealthTimeout.Milliseconds()))
 		}
 	}
 }
