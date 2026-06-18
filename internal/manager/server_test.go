@@ -1979,6 +1979,54 @@ func TestDashboardShowsWorkerHealthAndRuntimeInventory(t *testing.T) {
 	}
 }
 
+func TestRuntimeStageProbesEndpointReportsWorkerDiagnostics(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "stage-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:       "llama.cpp",
+			Ready:      true,
+			Version:    "b9672",
+			BinaryPath: "/tmp/llama-cli",
+			StageRuntimes: []cluster.StageRuntimeResource{{
+				Name:          "llama.cpp-stage-experimental",
+				Ready:         false,
+				CLIReady:      true,
+				BinaryPath:    "/tmp/llama-cli",
+				RequiredHooks: []string{"load logical layer range"},
+				Blockers:      []string{"public llama-cli does not expose CDIP layer-stage activation hooks"},
+			}},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/runtime/stage-probes", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Summary RuntimeStageProbeSummary  `json:"summary"`
+		Workers []RuntimeStageProbeWorker `json:"workers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Summary.Workers != 1 || payload.Summary.StageProbeWorkers != 1 || payload.Summary.BlockedStageRuntimeWorkers != 1 {
+		t.Fatalf("unexpected probe summary: %#v", payload.Summary)
+	}
+	if len(payload.Workers) != 1 || payload.Workers[0].Runtime != "llama.cpp" || len(payload.Workers[0].Probes) != 1 {
+		t.Fatalf("unexpected probe workers: %#v", payload.Workers)
+	}
+	probe := payload.Workers[0].Probes[0]
+	if probe.Ready || !probe.CLIReady || !strings.Contains(strings.Join(probe.Blockers, " "), "does not expose CDIP") {
+		t.Fatalf("unexpected stage probe: %#v", probe)
+	}
+}
+
 func TestClusterReadinessReadyWhenRuntimeAndModelAreReady(t *testing.T) {
 	node := cluster.Node{
 		ID:     "node-ready",

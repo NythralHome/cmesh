@@ -81,6 +81,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/capacity/snapshots", s.handleCapacitySnapshots)
 	mux.HandleFunc("/v1/capacity", s.handleCapacity)
 	mux.HandleFunc("/v1/dashboard/status", s.handleDashboardStatus)
+	mux.HandleFunc("/v1/runtime/stage-probes", s.handleRuntimeStageProbes)
 	mux.HandleFunc("/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/v1/cluster-benchmarks", s.handleClusterBenchmarks)
@@ -521,6 +522,85 @@ func (s *Server) handleDashboardStatus(w http.ResponseWriter, r *http.Request) {
 		"benchmark_score":    summary.BenchmarkScore,
 		"updated_at_unix_ms": time.Now().UTC().UnixMilli(),
 	})
+}
+
+type RuntimeStageProbeSummary struct {
+	Workers                    int `json:"workers"`
+	RuntimeReadyWorkers        int `json:"runtime_ready_workers"`
+	StageProbeWorkers          int `json:"stage_probe_workers"`
+	ReadyStageRuntimeWorkers   int `json:"ready_stage_runtime_workers"`
+	BlockedStageRuntimeWorkers int `json:"blocked_stage_runtime_workers"`
+}
+
+type RuntimeStageProbeWorker struct {
+	NodeID       string                         `json:"node_id"`
+	NodeName     string                         `json:"node_name"`
+	Status       cluster.NodeStatus             `json:"status"`
+	Runtime      string                         `json:"runtime"`
+	RuntimeReady bool                           `json:"runtime_ready"`
+	Probes       []cluster.StageRuntimeResource `json:"probes"`
+}
+
+func (s *Server) handleRuntimeStageProbes(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	summary, workers := runtimeStageProbeReport(s.state.Nodes())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"summary": summary,
+		"workers": workers,
+	})
+}
+
+func runtimeStageProbeReport(nodes []cluster.Node) (RuntimeStageProbeSummary, []RuntimeStageProbeWorker) {
+	summary := RuntimeStageProbeSummary{}
+	workers := make([]RuntimeStageProbeWorker, 0)
+	for _, node := range nodes {
+		if node.Role != cluster.NodeRoleWorker {
+			continue
+		}
+		summary.Workers++
+		for _, runtimeStatus := range node.Resources.Runtimes {
+			if runtimeStatus.Ready {
+				summary.RuntimeReadyWorkers++
+			}
+			if len(runtimeStatus.StageRuntimes) == 0 {
+				continue
+			}
+			stageReady := false
+			for _, probe := range runtimeStatus.StageRuntimes {
+				if probe.Ready {
+					stageReady = true
+					break
+				}
+			}
+			summary.StageProbeWorkers++
+			if stageReady {
+				summary.ReadyStageRuntimeWorkers++
+			} else {
+				summary.BlockedStageRuntimeWorkers++
+			}
+			workers = append(workers, RuntimeStageProbeWorker{
+				NodeID:       node.ID,
+				NodeName:     nodeDisplayName(node),
+				Status:       node.Status,
+				Runtime:      runtimeStatus.Name,
+				RuntimeReady: runtimeStatus.Ready,
+				Probes:       append([]cluster.StageRuntimeResource(nil), runtimeStatus.StageRuntimes...),
+			})
+		}
+	}
+	sort.Slice(workers, func(i, j int) bool {
+		if workers[i].NodeName != workers[j].NodeName {
+			return workers[i].NodeName < workers[j].NodeName
+		}
+		return workers[i].Runtime < workers[j].Runtime
+	})
+	return summary, workers
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {

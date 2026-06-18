@@ -224,6 +224,14 @@ Returns `200` with the frame when one is available, or `204 No Content` when the
 
 Operators may use `X-CMesh-Operator-Token`. Stage workers should use `X-CMesh-Node-ID`; the manager only allows the upstream stage worker and configured downstream worker to access a stream.
 
+## Runtime Stage Probes
+
+```http
+GET /v1/runtime/stage-probes
+```
+
+Returns worker-reported stage runtime diagnostics. These probes explain whether a worker has an experimental distributed stage runtime and why it is or is not ready. `llama.cpp-stage-experimental` currently reports `ready: false` when only public `llama-cli` is available because layer-stage activation hooks are not exposed yet.
+
 ## Cluster Benchmarks
 
 ```http
