@@ -22,6 +22,7 @@ import (
 	"github.com/cmesh/cmesh/internal/membership"
 	"github.com/cmesh/cmesh/internal/models"
 	"github.com/cmesh/cmesh/internal/resources"
+	"github.com/cmesh/cmesh/internal/transport"
 	"github.com/cmesh/cmesh/internal/version"
 )
 
@@ -1499,6 +1500,19 @@ func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, result)
 	case "prefill":
 		result, err := startCDIPPrefill(s.state, parts[0])
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
+	case "decode":
+		var req struct {
+			Step uint64 `json:"step"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&req)
+		}
+		result, err := startCDIPDecode(s.state, transport.NewMemoryActivationTransport(8), parts[0], req.Step)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return

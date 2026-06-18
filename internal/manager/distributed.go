@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -12,6 +13,7 @@ import (
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/transport"
 )
 
 const distributedStageOverheadBytes = 512 * 1024 * 1024
@@ -77,9 +79,10 @@ type CDIPPrepareResult struct {
 }
 
 type CDIPCommandResult struct {
-	ParentJob jobs.Job            `json:"parent_job"`
-	StageJobs []jobs.Job          `json:"stage_jobs"`
-	Messages  []cdip.StageCommand `json:"messages"`
+	ParentJob        jobs.Job               `json:"parent_job"`
+	StageJobs        []jobs.Job             `json:"stage_jobs"`
+	Messages         []cdip.StageCommand    `json:"messages"`
+	ActivationFrames []cdip.ActivationChunk `json:"activation_frames,omitempty"`
 }
 
 func prepareCDIPDistributedJob(store Store, parentJobID string) (CDIPPrepareResult, error) {
@@ -168,6 +171,95 @@ func startCDIPPrefill(store Store, parentJobID string) (CDIPCommandResult, error
 		ParentJob: parent,
 		StageJobs: cdipStageJobsForParent(store.Jobs(), parent.ID),
 		Messages:  messages,
+	}, nil
+}
+
+func startCDIPDecode(store Store, bus transport.ActivationTransport, parentJobID string, step uint64) (CDIPCommandResult, error) {
+	if step == 0 {
+		step = 1
+	}
+	parent, ok := store.Job(parentJobID)
+	if !ok || parent.Type != models.JobGenerateDistributed {
+		return CDIPCommandResult{}, fmt.Errorf("distributed parent job not found")
+	}
+	if parent.Status == jobs.StatusSucceeded || parent.Status == jobs.StatusFailed || parent.Status == jobs.StatusCanceled {
+		return CDIPCommandResult{}, fmt.Errorf("distributed parent job is already terminal")
+	}
+	stages := cdipStageJobsForParent(store.Jobs(), parent.ID)
+	if len(stages) < 2 {
+		return CDIPCommandResult{}, fmt.Errorf("distributed parent job has no stage graph")
+	}
+	for _, stageJob := range stages {
+		if stageJob.CDIPState != cdip.StagePrefill {
+			return CDIPCommandResult{}, fmt.Errorf("stage %s is %s, expected %s", stageJob.ID, stageJob.CDIPState, cdip.StagePrefill)
+		}
+	}
+	messages := make([]cdip.StageCommand, 0, len(stages))
+	for _, stageJob := range stages {
+		msg := cdip.StageCommand{
+			Envelope:    cdip.NewEnvelope(cdip.MessageStageDecode),
+			ParentJobID: parent.ID,
+			StageJobID:  stageJob.ID,
+			StageIndex:  stageJob.CDIPStageIndex,
+			Step:        step,
+		}
+		if err := msg.Validate(cdip.MessageStageDecode); err != nil {
+			return CDIPCommandResult{}, fmt.Errorf("invalid stage.decode for %s: %w", stageJob.ID, err)
+		}
+		messages = append(messages, msg)
+	}
+	ctx := context.Background()
+	frames := make([]cdip.ActivationChunk, 0, len(stages)-1)
+	for i := 0; i < len(stages)-1; i++ {
+		upstream := stages[i]
+		downstream := stages[i+1]
+		stream := transport.StreamID{ParentJobID: parent.ID, StageJobID: upstream.ID}
+		reader, err := bus.OpenReader(ctx, stream)
+		if err != nil {
+			return CDIPCommandResult{}, err
+		}
+		writer, err := bus.OpenWriter(ctx, stream, downstream.AssignedTo)
+		if err != nil {
+			return CDIPCommandResult{}, err
+		}
+		payload := []byte{byte(i), byte(step)}
+		frame := transport.ActivationFrame{
+			Header: cdip.ActivationChunk{
+				Envelope:     cdip.NewEnvelope(cdip.MessageActivationChunk),
+				ParentJobID:  parent.ID,
+				StageJobID:   upstream.ID,
+				Sequence:     step,
+				ContentType:  "application/vnd.cmesh.activation+binary",
+				Encoding:     "mock",
+				Shape:        []int{1, 1, len(payload)},
+				DType:        "u8",
+				PayloadBytes: uint64(len(payload)),
+				Checksum:     fmt.Sprintf("mock:%d:%d:%s:%s", step, i, upstream.ID, downstream.ID),
+			},
+			Payload: payload,
+		}
+		if err := writer.Send(ctx, frame); err != nil {
+			return CDIPCommandResult{}, err
+		}
+		received, err := reader.Receive(ctx)
+		if err != nil {
+			return CDIPCommandResult{}, err
+		}
+		if err := received.Validate(); err != nil {
+			return CDIPCommandResult{}, err
+		}
+		frames = append(frames, received.Header)
+	}
+	for _, stageJob := range stages {
+		if _, ok := store.UpdateCDIPStageState(stageJob.ID, cdip.StageDecode, "coordinator sent stage.decode"); !ok {
+			return CDIPCommandResult{}, fmt.Errorf("failed to decode stage %s", stageJob.ID)
+		}
+	}
+	return CDIPCommandResult{
+		ParentJob:        parent,
+		StageJobs:        cdipStageJobsForParent(store.Jobs(), parent.ID),
+		Messages:         messages,
+		ActivationFrames: frames,
 	}, nil
 }
 
