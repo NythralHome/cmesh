@@ -110,10 +110,11 @@ func runManager(args []string) error {
 			fmt.Printf("manager storage: file (%s)\n", *statePath)
 		}
 		server := manager.NewServerWithOptions(manager.ServerOptions{
-			Addr:          *addr,
-			JoinToken:     *joinToken,
-			OperatorToken: *operatorToken,
-			PublicURL:     *publicURL,
+			Addr:                  *addr,
+			JoinToken:             *joinToken,
+			OperatorToken:         *operatorToken,
+			PublicURL:             *publicURL,
+			BackgroundCDIPAdvance: true,
 		}, state)
 		fmt.Println("starting CMesh manager in single-node bootstrap mode")
 		fmt.Printf("manager API: %s\n", localHTTPURL(*addr))

@@ -499,6 +499,91 @@ func TestCDIPAdvanceEndpointDrivesCoordinatorBoundaries(t *testing.T) {
 	}
 }
 
+func TestBackgroundCDIPAdvanceDispatchesAndCompletes(t *testing.T) {
+	state := NewState()
+	srv := NewServerWithOptions(ServerOptions{BackgroundCDIPAdvance: true}, state)
+	for _, name := range []string{"worker-a", "worker-b"} {
+		joinWorkerWithResourcesForTest(t, srv, name, cluster.ResourceSnapshot{
+			CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+			Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+			Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 8 * gb, FreeBytes: 64 * gb},
+			Runtimes: []cluster.RuntimeResource{{
+				Name:       string(models.RuntimeLlamaCPP),
+				Ready:      true,
+				Version:    "test",
+				BinaryPath: "/tmp/llama-cli",
+			}},
+			Models: []cluster.ModelResource{{
+				ID:      "qwen2.5-7b-instruct-q4-k-m",
+				Name:    "Qwen2.5 7B Instruct",
+				Runtime: string(models.RuntimeLlamaCPP),
+				Bytes:   5 * gb,
+				Ready:   true,
+			}},
+		})
+	}
+
+	createRec := httptest.NewRecorder()
+	srv.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-7b-instruct-q4-k-m/distributed-generate", strings.NewReader(`{"prompt":"hello distributed cluster"}`)))
+	if createRec.Code != http.StatusAccepted {
+		t.Fatalf("expected distributed generate 202, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created distributedGenerateResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	srv.advanceActiveCDIPJobs()
+	stageJobs := cdipStageJobsForParent(state.Jobs(), created.Job.ID)
+	for _, stageJob := range stageJobs {
+		if stageJob.Status != jobs.StatusScheduled || stageJob.CDIPState != cdip.StagePreparing {
+			t.Fatalf("expected background prepare to schedule stage job, got %#v", stageJob)
+		}
+	}
+
+	srv.advanceActiveCDIPJobs()
+	waitingStages := cdipStageJobsForParent(state.Jobs(), created.Job.ID)
+	for _, stageJob := range waitingStages {
+		if stageJob.CDIPState != cdip.StagePreparing {
+			t.Fatalf("background loop should wait for worker readiness, got %#v", stageJob)
+		}
+	}
+
+	for _, stageJob := range waitingStages {
+		nextRec := httptest.NewRecorder()
+		srv.ServeHTTP(nextRec, httptest.NewRequest(http.MethodGet, "/v1/workers/"+stageJob.AssignedTo+"/jobs/next", nil))
+		if nextRec.Code != http.StatusOK {
+			t.Fatalf("expected worker next job 200, got %d: %s", nextRec.Code, nextRec.Body.String())
+		}
+		var nextPayload struct {
+			Job *jobs.Job `json:"job"`
+		}
+		if err := json.Unmarshal(nextRec.Body.Bytes(), &nextPayload); err != nil {
+			t.Fatal(err)
+		}
+		if nextPayload.Job == nil {
+			t.Fatal("expected worker stage job")
+		}
+		readyBody := strings.NewReader(`{"node_id":"` + nextPayload.Job.AssignedTo + `","result":"{\"kind\":\"cdip.stage_ready\"}"}`)
+		readyRec := httptest.NewRecorder()
+		srv.ServeHTTP(readyRec, httptest.NewRequest(http.MethodPost, "/v1/jobs/"+nextPayload.Job.ID+"/complete", readyBody))
+		if readyRec.Code != http.StatusOK {
+			t.Fatalf("expected stage ready 200, got %d: %s", readyRec.Code, readyRec.Body.String())
+		}
+	}
+
+	srv.advanceActiveCDIPJobs()
+	srv.advanceActiveCDIPJobs()
+	srv.advanceActiveCDIPJobs()
+	parent, ok := state.Job(created.Job.ID)
+	if !ok {
+		t.Fatal("parent job not found")
+	}
+	if parent.Status != jobs.StatusSucceeded || !strings.Contains(parent.Result, "CDIP distributed inference completed") {
+		t.Fatalf("expected background loop to complete parent, got %#v", parent)
+	}
+}
+
 func TestCDIPStageLifecycleEndpoint(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)

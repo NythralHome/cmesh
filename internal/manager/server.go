@@ -27,22 +27,27 @@ import (
 )
 
 type Server struct {
-	addr          string
-	state         Store
-	joinToken     string
-	operatorToken string
-	publicURL     string
-	mux           *http.ServeMux
-	server        *http.Server
-	snapshotMu    sync.RWMutex
-	snapshots     map[string]CapacitySnapshot
+	addr                    string
+	state                   Store
+	joinToken               string
+	operatorToken           string
+	publicURL               string
+	backgroundCDIPAdvance   bool
+	cdipAdvanceEvery        time.Duration
+	cdipActivationTransport transport.ActivationTransport
+	mux                     *http.ServeMux
+	server                  *http.Server
+	snapshotMu              sync.RWMutex
+	snapshots               map[string]CapacitySnapshot
 }
 
 type ServerOptions struct {
-	Addr          string
-	JoinToken     string
-	OperatorToken string
-	PublicURL     string
+	Addr                  string
+	JoinToken             string
+	OperatorToken         string
+	PublicURL             string
+	BackgroundCDIPAdvance bool
+	CDIPAdvanceEvery      time.Duration
 }
 
 func NewServer(addr string, state Store) *Server {
@@ -51,14 +56,21 @@ func NewServer(addr string, state Store) *Server {
 
 func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux := http.NewServeMux()
+	advanceEvery := options.CDIPAdvanceEvery
+	if advanceEvery <= 0 {
+		advanceEvery = time.Second
+	}
 	s := &Server{
-		addr:          options.Addr,
-		state:         state,
-		joinToken:     options.JoinToken,
-		operatorToken: options.OperatorToken,
-		publicURL:     strings.TrimRight(options.PublicURL, "/"),
-		mux:           mux,
-		snapshots:     make(map[string]CapacitySnapshot),
+		addr:                    options.Addr,
+		state:                   state,
+		joinToken:               options.JoinToken,
+		operatorToken:           options.OperatorToken,
+		publicURL:               strings.TrimRight(options.PublicURL, "/"),
+		backgroundCDIPAdvance:   options.BackgroundCDIPAdvance,
+		cdipAdvanceEvery:        advanceEvery,
+		cdipActivationTransport: transport.NewMemoryActivationTransport(8),
+		mux:                     mux,
+		snapshots:               make(map[string]CapacitySnapshot),
 	}
 
 	mux.HandleFunc("/", s.handleDashboard)
@@ -101,6 +113,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) Start(ctx context.Context) error {
 	errCh := make(chan error, 1)
+	if s.backgroundCDIPAdvance {
+		go s.runCDIPAdvanceLoop(ctx)
+	}
 	go func() {
 		errCh <- s.server.ListenAndServe()
 	}()
@@ -115,6 +130,31 @@ func (s *Server) Start(ctx context.Context) error {
 			return nil
 		}
 		return err
+	}
+}
+
+func (s *Server) runCDIPAdvanceLoop(ctx context.Context) {
+	ticker := time.NewTicker(s.cdipAdvanceEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.advanceActiveCDIPJobs()
+		}
+	}
+}
+
+func (s *Server) advanceActiveCDIPJobs() {
+	for _, job := range s.state.Jobs() {
+		if job.Type != models.JobGenerateDistributed {
+			continue
+		}
+		if job.Status == jobs.StatusSucceeded || job.Status == jobs.StatusFailed || job.Status == jobs.StatusCanceled {
+			continue
+		}
+		_, _ = advanceCDIPDistributedJob(s.state, s.cdipActivationTransport, job.ID, 0, "")
 	}
 }
 
@@ -1499,7 +1539,7 @@ func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&req)
 		}
-		result, err := advanceCDIPDistributedJob(s.state, transport.NewMemoryActivationTransport(8), parts[0], req.Step, req.Output)
+		result, err := advanceCDIPDistributedJob(s.state, s.cdipActivationTransport, parts[0], req.Step, req.Output)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
@@ -1526,7 +1566,7 @@ func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&req)
 		}
-		result, err := startCDIPDecode(s.state, transport.NewMemoryActivationTransport(8), parts[0], req.Step)
+		result, err := startCDIPDecode(s.state, s.cdipActivationTransport, parts[0], req.Step)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
