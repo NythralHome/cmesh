@@ -1411,10 +1411,13 @@ type ModelDistributedRPCReadiness struct {
 }
 
 type ModelDistributedRPCBackend struct {
-	NodeID   string `json:"node_id"`
-	NodeName string `json:"node_name"`
-	Runtime  string `json:"runtime"`
-	Endpoint string `json:"endpoint"`
+	NodeID       string `json:"node_id"`
+	NodeName     string `json:"node_name"`
+	Runtime      string `json:"runtime"`
+	Endpoint     string `json:"endpoint"`
+	HealthStatus string `json:"health_status,omitempty"`
+	LatencyMS    int64  `json:"latency_ms,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 type ModelDistributedRPCPlan struct {
@@ -1424,9 +1427,11 @@ type ModelDistributedRPCPlan struct {
 	CoordinatorNodeName string                       `json:"coordinator_node_name,omitempty"`
 	ExecutableNow       bool                         `json:"executable_now"`
 	Blockers            []string                     `json:"blockers,omitempty"`
+	Warnings            []string                     `json:"warnings,omitempty"`
 	RPCEndpoints        []string                     `json:"rpc_endpoints,omitempty"`
 	Backends            []ModelDistributedRPCBackend `json:"backends,omitempty"`
 	RPCPool             RuntimeRPCPoolSummary        `json:"rpc_pool"`
+	HealthChecked       bool                         `json:"health_checked"`
 }
 
 func (s *Server) handleModelDistributedRPCPlan(w http.ResponseWriter, r *http.Request, model models.Model) {
@@ -1435,7 +1440,8 @@ func (s *Server) handleModelDistributedRPCPlan(w http.ResponseWriter, r *http.Re
 		return
 	}
 	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
-	writeJSON(w, http.StatusOK, s.modelDistributedRPCPlan(model, nodeID))
+	checkHealth := boolQuery(firstNonEmptyString(r.URL.Query().Get("check"), r.URL.Query().Get("health")))
+	writeJSON(w, http.StatusOK, s.modelDistributedRPCPlan(r.Context(), model, nodeID, checkHealth, time.Second))
 }
 
 func (s *Server) handleModelDistributedRPCReadiness(w http.ResponseWriter, r *http.Request, model models.Model) {
@@ -1449,7 +1455,7 @@ func (s *Server) handleModelDistributedRPCReadiness(w http.ResponseWriter, r *ht
 }
 
 func (s *Server) modelDistributedRPCReadiness(model models.Model, nodeID string) ModelDistributedRPCReadiness {
-	plan := s.modelDistributedRPCPlan(model, nodeID)
+	plan := s.modelDistributedRPCPlan(context.Background(), model, nodeID, false, 0)
 	readiness := ModelDistributedRPCReadiness{
 		Ready:        plan.ExecutableNow,
 		ModelID:      plan.ModelID,
@@ -1462,7 +1468,7 @@ func (s *Server) modelDistributedRPCReadiness(model models.Model, nodeID string)
 	return readiness
 }
 
-func (s *Server) modelDistributedRPCPlan(model models.Model, nodeID string) ModelDistributedRPCPlan {
+func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model, nodeID string, checkHealth bool, healthTimeout time.Duration) ModelDistributedRPCPlan {
 	nodes := s.state.Nodes()
 	summary, workers, endpoints := runtimeRPCPoolReport(nodes)
 	plan := ModelDistributedRPCPlan{
@@ -1471,19 +1477,56 @@ func (s *Server) modelDistributedRPCPlan(model models.Model, nodeID string) Mode
 		RPCPool:      summary,
 		RPCEndpoints: append([]string(nil), endpoints...),
 	}
+	healthByEndpoint := map[string]RuntimeRPCSmokeResult{}
+	if checkHealth && len(endpoints) > 0 {
+		if healthTimeout <= 0 {
+			healthTimeout = time.Second
+		}
+		plan.HealthChecked = true
+		report := smokeRuntimeRPCEndpoints(ctx, endpoints, healthTimeout)
+		readyEndpoints := make([]string, 0, len(endpoints))
+		for _, result := range report.Results {
+			healthByEndpoint[result.Endpoint] = result
+			if result.Ready {
+				readyEndpoints = append(readyEndpoints, result.Endpoint)
+			}
+		}
+		sort.Strings(readyEndpoints)
+		plan.RPCEndpoints = readyEndpoints
+		if report.Ready == 0 {
+			plan.Blockers = append(plan.Blockers, "no reachable llama.cpp rpc endpoints passed health check")
+		}
+		if report.Failed > 0 {
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("%d llama.cpp rpc endpoint(s) failed health check and will be excluded", report.Failed))
+		}
+	}
 	for _, worker := range workers {
 		endpoint := strings.TrimSpace(worker.RPC.Endpoint)
 		if !worker.RuntimeReady || !worker.RPC.Ready || endpoint == "" {
 			continue
 		}
-		plan.Backends = append(plan.Backends, ModelDistributedRPCBackend{
-			NodeID:   worker.NodeID,
-			NodeName: worker.NodeName,
-			Runtime:  worker.Runtime,
-			Endpoint: endpoint,
-		})
+		backend := ModelDistributedRPCBackend{
+			NodeID:       worker.NodeID,
+			NodeName:     worker.NodeName,
+			Runtime:      worker.Runtime,
+			Endpoint:     endpoint,
+			HealthStatus: "unchecked",
+		}
+		if plan.HealthChecked {
+			backend.HealthStatus = "failed"
+			if result, ok := healthByEndpoint[endpoint]; ok {
+				backend.LatencyMS = result.LatencyMS
+				backend.Error = result.Error
+				if result.Ready {
+					backend.HealthStatus = "ready"
+				}
+			} else {
+				backend.Error = "endpoint was not checked"
+			}
+		}
+		plan.Backends = append(plan.Backends, backend)
 	}
-	if len(plan.RPCEndpoints) == 0 {
+	if len(plan.RPCEndpoints) == 0 && !plan.HealthChecked {
 		plan.Blockers = append(plan.Blockers, "no active llama.cpp rpc endpoints are available")
 	}
 	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
@@ -1545,7 +1588,7 @@ func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *htt
 		http.Error(w, "prompt is required", http.StatusBadRequest)
 		return
 	}
-	plan := s.modelDistributedRPCPlan(model, req.NodeID)
+	plan := s.modelDistributedRPCPlan(r.Context(), model, req.NodeID, true, time.Second)
 	if !plan.ExecutableNow {
 		reason := "distributed RPC model generate is not executable"
 		if len(plan.Blockers) > 0 {
@@ -6641,6 +6684,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         blockers.textContent = "Blockers: " + plan.blockers.join("; ");
         rpcExecutionPlan.appendChild(blockers);
       }
+      if ((plan.warnings || []).length > 0) {
+        var warnings = document.createElement("div");
+        warnings.className = "sub";
+        warnings.textContent = "Warnings: " + plan.warnings.join("; ");
+        rpcExecutionPlan.appendChild(warnings);
+      }
     }
     function refreshRPCExecutionPlan() {
       if (!rpcExecutionPlan || !rpcPromptSmokeModel || !rpcPromptSmokeNode) return;
@@ -6652,6 +6701,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       }
       var params = new URLSearchParams();
       if (nodeID) params.set("node_id", nodeID);
+      params.set("check", "1");
       rpcExecutionPlan.textContent = "Loading distributed RPC execution plan...";
       fetch("/v1/models/" + encodeURIComponent(modelID) + "/distributed-rpc-plan?" + params.toString()).then(function(response) {
         if (!response.ok) {

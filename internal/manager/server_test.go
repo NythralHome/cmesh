@@ -2096,15 +2096,7 @@ func TestRuntimeRPCPoolSmokeEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			_ = conn.Close()
-		}
-	}()
+	go acceptAndCloseConnections(listener)
 
 	state := NewState()
 	srv := NewServer(":0", state)
@@ -2152,6 +2144,13 @@ func TestRuntimeRPCPoolSmokeEndpointRequiresActiveEndpoints(t *testing.T) {
 }
 
 func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go acceptAndCloseConnections(listener)
+
 	state := NewState()
 	srv := NewServer(":0", state)
 	joinWorkerWithResourcesForTest(t, srv, "rpc-worker", cluster.ResourceSnapshot{
@@ -2171,7 +2170,7 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 			RPCRuntimes: []cluster.RPCRuntimeResource{{
 				Name:     "llama.cpp-rpc",
 				Ready:    true,
-				Endpoint: "10.0.0.10:50052",
+				Endpoint: listener.Addr().String(),
 			}},
 		}},
 	})
@@ -2194,8 +2193,87 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 	if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
 		t.Fatal(err)
 	}
-	if input.ModelID != "qwen2.5-0.5b-instruct-q4-k-m" || input.Prompt != "hello" || len(input.RPCEndpoints) != 1 || input.RPCEndpoints[0] != "10.0.0.10:50052" {
+	if input.ModelID != "qwen2.5-0.5b-instruct-q4-k-m" || input.Prompt != "hello" || len(input.RPCEndpoints) != 1 || input.RPCEndpoints[0] != listener.Addr().String() {
 		t.Fatalf("unexpected distributed rpc input: %#v", input)
+	}
+}
+
+func TestModelDistributedRPCPlanHealthCheckExcludesFailedEndpoints(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go acceptAndCloseConnections(listener)
+
+	state := NewState()
+	srv := NewServer(":0", state)
+	join := joinWorkerWithResourcesForTest(t, srv, "rpc-health-worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Models: []cluster.ModelResource{{
+			ID:      "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:    "Qwen2.5 0.5B Instruct",
+			Runtime: "llama.cpp",
+			Path:    "/tmp/qwen.gguf",
+			Ready:   true,
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: listener.Addr().String(),
+			}},
+		}},
+	})
+	joinWorkerWithResourcesForTest(t, srv, "rpc-health-worker-b", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: "127.0.0.1:1",
+			}},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/distributed-rpc-plan?check=1&node_id="+join.NodeID, nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var plan ModelDistributedRPCPlan
+	if err := json.Unmarshal(rec.Body.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !plan.ExecutableNow || !plan.HealthChecked {
+		t.Fatalf("expected executable health checked plan, got %#v", plan)
+	}
+	if len(plan.RPCEndpoints) != 1 || plan.RPCEndpoints[0] != listener.Addr().String() {
+		t.Fatalf("expected only healthy endpoint, got %#v", plan.RPCEndpoints)
+	}
+	if len(plan.Warnings) == 0 {
+		t.Fatalf("expected failed endpoint warning, got %#v", plan)
+	}
+	var ready, failed bool
+	for _, backend := range plan.Backends {
+		switch backend.Endpoint {
+		case listener.Addr().String():
+			ready = backend.HealthStatus == "ready"
+		case "127.0.0.1:1":
+			failed = backend.HealthStatus == "failed" && backend.Error != ""
+		}
+	}
+	if !ready || !failed {
+		t.Fatalf("expected ready and failed backend health, got %#v", plan.Backends)
 	}
 }
 
@@ -3049,6 +3127,16 @@ func joinWorkerWithResourcesForTest(t *testing.T, srv *Server, name string, reso
 		t.Fatal(err)
 	}
 	return resp
+}
+
+func acceptAndCloseConnections(listener net.Listener) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+	}
 }
 
 const gb = 1024 * 1024 * 1024
