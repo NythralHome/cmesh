@@ -72,6 +72,18 @@ void main() {
         'version': 'b9672',
         'platform': 'darwin/arm64',
       },
+      'rpc_status': {
+        'running': true,
+        'pid': 5001,
+        'started_at': '2026-06-15T05:32:00Z',
+        'endpoint': '127.0.0.1:50052',
+        'runtime': {
+          'name': 'llama.cpp-rpc',
+          'ready': true,
+          'version': 'b9672',
+          'platform': 'darwin/arm64',
+        },
+      },
       'models': [
         {
           'id': 'qwen2.5-0.5b-instruct-q4-k-m',
@@ -95,6 +107,9 @@ void main() {
     expect(status.jobStatus?.label, 'Running job');
     expect(status.jobStatus?.jobId, 'job-123');
     expect(status.modelRuntime?.label, 'llama.cpp b9672 ready');
+    expect(status.rpcRuntime?.label, 'RPC backend running');
+    expect(status.rpcRuntime?.endpoint, '127.0.0.1:50052');
+    expect(status.rpcRuntime?.runtime?.label, 'llama.cpp-rpc b9672 ready');
     expect(status.models, hasLength(1));
     expect(status.models.first.name, 'Qwen2.5 0.5B Instruct');
     expect(status.models.first.sizeLabel, '1.0 GB');

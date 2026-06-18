@@ -572,6 +572,7 @@ class WorkerRuntimeStatus {
     this.logTail = '',
     this.jobStatus,
     this.modelRuntime,
+    this.rpcRuntime,
     this.models = const [],
   });
 
@@ -587,6 +588,7 @@ class WorkerRuntimeStatus {
   final String logTail;
   final WorkerJobStatus? jobStatus;
   final WorkerModelRuntimeStatus? modelRuntime;
+  final WorkerRPCRuntimeStatus? rpcRuntime;
   final List<WorkerInstalledModel> models;
 
   factory WorkerRuntimeStatus.fromJson(Map<String, dynamic> json) {
@@ -602,6 +604,11 @@ class WorkerRuntimeStatus {
     final parsedModelRuntime = json['runtime_status'] is Map<String, dynamic>
         ? WorkerModelRuntimeStatus.fromJson(
             json['runtime_status'] as Map<String, dynamic>,
+          )
+        : null;
+    final parsedRPC = json['rpc_status'] is Map<String, dynamic>
+        ? WorkerRPCRuntimeStatus.fromJson(
+            json['rpc_status'] as Map<String, dynamic>,
           )
         : null;
     final rawModels = json['models'];
@@ -628,6 +635,7 @@ class WorkerRuntimeStatus {
       logTail: logTail,
       jobStatus: parsedJobStatus ?? WorkerJobStatus.fromLogTail(logTail),
       modelRuntime: parsedModelRuntime,
+      rpcRuntime: parsedRPC,
       models: parsedModels,
     );
   }
@@ -637,6 +645,50 @@ class WorkerRuntimeStatus {
     if (lastError != null && lastError!.isNotEmpty) return 'Error';
     if (exitCode != null) return 'Stopped';
     return 'Not running';
+  }
+}
+
+class WorkerRPCRuntimeStatus {
+  const WorkerRPCRuntimeStatus({
+    required this.running,
+    this.pid,
+    this.startedAt,
+    this.exitCode,
+    this.lastError = '',
+    this.endpoint = '',
+    this.runtime,
+  });
+
+  final bool running;
+  final int? pid;
+  final DateTime? startedAt;
+  final int? exitCode;
+  final String lastError;
+  final String endpoint;
+  final WorkerModelRuntimeStatus? runtime;
+
+  factory WorkerRPCRuntimeStatus.fromJson(Map<String, dynamic> json) {
+    final startedAtRaw = json['started_at'] as String?;
+    return WorkerRPCRuntimeStatus(
+      running: json['running'] as bool? ?? false,
+      pid: json['pid'] as int?,
+      startedAt: startedAtRaw == null ? null : DateTime.tryParse(startedAtRaw),
+      exitCode: json['exit_code'] as int?,
+      lastError: json['last_error'] as String? ?? '',
+      endpoint: json['endpoint'] as String? ?? '',
+      runtime: json['runtime'] is Map<String, dynamic>
+          ? WorkerModelRuntimeStatus.fromJson(
+              json['runtime'] as Map<String, dynamic>,
+            )
+          : null,
+    );
+  }
+
+  String get label {
+    if (running) return 'RPC backend running';
+    if (lastError.isNotEmpty) return 'RPC backend stopped with error';
+    if (runtime?.ready == true) return 'RPC backend ready to start';
+    return 'RPC backend unavailable';
   }
 }
 
@@ -924,6 +976,13 @@ class WorkerController {
     );
   }
 
+  Future<WorkerCommandResult> rpcAction(String action) {
+    if (action == 'status') {
+      return _request('GET', '/v1/runtime/llama.cpp/rpc/status');
+    }
+    return _request('POST', '/v1/runtime/llama.cpp/rpc/$action');
+  }
+
   Future<WorkerCommandResult> openCacheFolder(String path) async {
     final trimmed = path.trim();
     if (trimmed.isEmpty) {
@@ -1077,10 +1136,7 @@ class WorkerController {
   }
 
   Future<WorkerCommandResult> _stopUnixControlPortOwner() async {
-    final lookup = await Process.run('lsof', [
-      '-tiTCP:9781',
-      '-sTCP:LISTEN',
-    ]);
+    final lookup = await Process.run('lsof', ['-tiTCP:9781', '-sTCP:LISTEN']);
     if (lookup.exitCode != 0 || lookup.stdout.toString().trim().isEmpty) {
       return const WorkerCommandResult(exitCode: 0, output: 'No stale process');
     }
@@ -1687,6 +1743,10 @@ class _WorkerHomePageState extends State<WorkerHomePage>
     return _run('Repairing runtime', () => _controller.ensureRuntime());
   }
 
+  Future<void> _rpcAction(String action) {
+    return _run('RPC $action', () => _controller.rpcAction(action));
+  }
+
   Future<void> _openCacheFolder() {
     return _run(
       'Opening cache folder',
@@ -2000,6 +2060,9 @@ class _WorkerHomePageState extends State<WorkerHomePage>
                                 status: _runtimeStatus,
                                 onRefresh: _refreshStatus,
                                 onRepairRuntime: _repairRuntime,
+                                onStartRPC: () => _rpcAction('start'),
+                                onStopRPC: () => _rpcAction('stop'),
+                                onRestartRPC: () => _rpcAction('restart'),
                                 onOpenCacheFolder: _openCacheFolder,
                               ),
                             ),
@@ -2857,12 +2920,18 @@ class _RuntimePanel extends StatelessWidget {
     required this.status,
     required this.onRefresh,
     required this.onRepairRuntime,
+    required this.onStartRPC,
+    required this.onStopRPC,
+    required this.onRestartRPC,
     required this.onOpenCacheFolder,
   });
 
   final WorkerRuntimeStatus? status;
   final VoidCallback onRefresh;
   final VoidCallback onRepairRuntime;
+  final VoidCallback onStartRPC;
+  final VoidCallback onStopRPC;
+  final VoidCallback onRestartRPC;
   final VoidCallback onOpenCacheFolder;
 
   @override
@@ -2901,6 +2970,13 @@ class _RuntimePanel extends StatelessWidget {
           _RuntimeDetailCard(
             runtime: runtime,
             cacheDir: status?.cacheDir ?? '',
+          ),
+          const SizedBox(height: 12),
+          _RPCBackendCard(
+            rpc: status?.rpcRuntime,
+            onStart: onStartRPC,
+            onStop: onStopRPC,
+            onRestart: onRestartRPC,
           ),
           const SizedBox(height: 12),
           _WorkerJobStatusCard(status: status?.jobStatus),
@@ -3052,6 +3128,101 @@ class _RuntimeDetailCard extends StatelessWidget {
           _StatusLine(label: 'Cache', value: cacheDir.isEmpty ? '-' : cacheDir),
           if (runtime?.error.isNotEmpty == true)
             _StatusLine(label: 'Error', value: runtime!.error),
+        ],
+      ),
+    );
+  }
+}
+
+class _RPCBackendCard extends StatelessWidget {
+  const _RPCBackendCard({
+    required this.rpc,
+    required this.onStart,
+    required this.onStop,
+    required this.onRestart,
+  });
+
+  final WorkerRPCRuntimeStatus? rpc;
+  final VoidCallback onStart;
+  final VoidCallback onStop;
+  final VoidCallback onRestart;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final running = rpc?.running ?? false;
+    final ready = rpc?.runtime?.ready ?? false;
+    final hasError = rpc?.lastError.isNotEmpty == true;
+    final endpoint = rpc?.endpoint.isNotEmpty == true ? rpc!.endpoint : '-';
+    final statusColor = running
+        ? const Color(0xFF1B7F4B)
+        : hasError
+        ? colors.error
+        : colors.onSurfaceVariant;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                running ? Icons.hub : Icons.hub_outlined,
+                color: statusColor,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  rpc?.label ?? 'RPC backend not reported',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Starts llama.cpp rpc-server so this machine can contribute compute to distributed RPC inference.',
+            style: TextStyle(color: colors.onSurfaceVariant),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              FilledButton.icon(
+                onPressed: ready && !running ? onStart : null,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Start RPC backend'),
+              ),
+              OutlinedButton.icon(
+                onPressed: running ? onStop : null,
+                icon: const Icon(Icons.stop),
+                label: const Text('Stop'),
+              ),
+              OutlinedButton.icon(
+                onPressed: ready ? onRestart : null,
+                icon: const Icon(Icons.restart_alt),
+                label: const Text('Restart'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _StatusLine(label: 'Endpoint', value: endpoint),
+          _StatusLine(label: 'Runtime', value: rpc?.runtime?.label ?? '-'),
+          if (rpc?.pid != null) _StatusLine(label: 'PID', value: '${rpc!.pid}'),
+          if (rpc?.startedAt != null)
+            _StatusLine(
+              label: 'Started',
+              value: rpc!.startedAt!.toLocal().toString().split('.').first,
+            ),
+          if (rpc?.lastError.isNotEmpty == true)
+            _StatusLine(label: 'Error', value: rpc!.lastError),
         ],
       ),
     );
