@@ -27,10 +27,10 @@ func TestDistributedGenerateJobTypeIsKnownButNotExecutableYet(t *testing.T) {
 		Input: `{"model_id":"qwen2.5-7b-instruct-q4-k-m","prompt":"hello"}`,
 	}, cluster.ResourceSnapshot{}, t.TempDir(), "node-a", time.Now().UTC(), "")
 	if err == nil {
-		t.Fatal("expected distributed generate to be blocked until protocol exists")
+		t.Fatal("expected distributed parent job to be blocked on workers")
 	}
-	if !strings.Contains(err.Error(), "distributed runtime protocol") {
-		t.Fatalf("expected distributed protocol error, got %v", err)
+	if !strings.Contains(err.Error(), "coordinator-owned") {
+		t.Fatalf("expected coordinator-owned parent job error, got %v", err)
 	}
 }
 

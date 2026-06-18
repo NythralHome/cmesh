@@ -867,7 +867,7 @@ func executeWorkerJob(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir 
 	case models.JobGenerate:
 		return executeModelGenerateJob(job.Input, cacheDir)
 	case models.JobGenerateDistributed:
-		return "", fmt.Errorf("distributed model generate requires the manager distributed runtime protocol")
+		return "", fmt.Errorf("distributed model generate parent jobs are coordinator-owned; workers execute distributed stage jobs")
 	case models.JobGenerateStage:
 		return executeDistributedStageJob(job.Input, snapshot)
 	default:

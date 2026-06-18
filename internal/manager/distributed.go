@@ -498,12 +498,13 @@ func distributedModelPlan(model models.Model, nodes []cluster.Node) DistributedM
 		},
 		EstimatedLatency: DistributedLatencyModel{
 			Confidence: "low",
-			Assumption: "planning estimate before the distributed runtime protocol exists",
+			Assumption: "planning estimate before the distributed tensor runtime adapter exists",
 		},
 		NextImplementationTargets: []string{
-			"worker-to-worker transport for activation tensors",
-			"model shard materialization per layer range",
-			"distributed generate job coordinator",
+			"manager-relayed activation frame transport",
+			"runtime adapter with prepare, prefill, decode, and complete hooks",
+			"llama.cpp layer-stage feasibility prototype",
+			"logical-to-physical model shard materialization",
 			"streaming partial-token protocol with cancellation",
 		},
 	}
@@ -545,7 +546,7 @@ func distributedModelPlan(model models.Model, nodes []cluster.Node) DistributedM
 	if !allStagesInstalled(plan.Stages) {
 		plan.Warnings = append(plan.Warnings, "model shards are not installed on all selected workers")
 	}
-	plan.Blockers = append(plan.Blockers, "distributed runtime protocol is not implemented yet")
+	plan.Blockers = append(plan.Blockers, "distributed tensor runtime adapter is not implemented yet")
 	plan.ExecutableNow = false
 	return plan
 }

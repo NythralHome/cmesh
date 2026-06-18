@@ -166,7 +166,7 @@ Example:
     }
   ],
   "blockers": [
-    "distributed runtime protocol is not implemented yet"
+    "distributed tensor runtime adapter is not implemented yet"
   ]
 }
 ```
@@ -257,7 +257,7 @@ One distributed inference request maps to:
 
 The parent job owns conversation input and output semantics. Stage jobs own layer ranges and worker assignment.
 
-In CDIP v0.1, planned stage jobs may remain queued with `waiting for coordinator` until activation transport exists.
+In CDIP v0.1, planned stage jobs are coordinator-driven. They can be prepared and advanced through the control plane, but real cross-machine tensor execution remains blocked until an activation transport and runtime adapter exist.
 
 ## Stage Lifecycle
 

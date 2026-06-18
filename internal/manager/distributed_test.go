@@ -49,7 +49,7 @@ func TestDistributedModelPlanBuildsPipelineStages(t *testing.T) {
 		t.Fatalf("expected feasible distributed plan, got %#v", plan)
 	}
 	if plan.ExecutableNow {
-		t.Fatalf("distributed execution should remain disabled until worker runtime protocol exists: %#v", plan)
+		t.Fatalf("distributed execution should remain disabled until tensor runtime adapter exists: %#v", plan)
 	}
 	if len(plan.Stages) != 2 {
 		t.Fatalf("expected two stages, got %#v", plan.Stages)
@@ -63,8 +63,8 @@ func TestDistributedModelPlanBuildsPipelineStages(t *testing.T) {
 	if plan.EstimatedLatency.PerOutputTokenMS <= 0 || plan.Network.InterStageHops != 1 {
 		t.Fatalf("expected latency and network estimates, got %#v", plan)
 	}
-	if !strings.Contains(strings.Join(plan.Blockers, " "), "distributed runtime protocol") {
-		t.Fatalf("expected protocol blocker, got %#v", plan.Blockers)
+	if !strings.Contains(strings.Join(plan.Blockers, " "), "distributed tensor runtime adapter") {
+		t.Fatalf("expected runtime adapter blocker, got %#v", plan.Blockers)
 	}
 }
 

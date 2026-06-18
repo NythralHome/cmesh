@@ -59,3 +59,8 @@
 - Runtime-specific distributed inference proof of concept.
 - LAN-first constraints.
 - Explicit compatibility and network requirements.
+- Manager-relayed activation frame transport.
+- Runtime adapter interface for `prepare`, `prefill`, `decode`, `complete`, and `abort`.
+- llama.cpp layer-stage feasibility prototype.
+- Logical layer shard execution before physical GGUF slicing.
+- Distributed correctness and latency benchmark against a single-worker baseline.

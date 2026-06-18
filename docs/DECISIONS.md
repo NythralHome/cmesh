@@ -33,3 +33,13 @@ CMesh will define distributed inference through CDIP, the CMesh Distributed Infe
 The protocol is versioned separately from manager dashboard APIs. CDIP defines roles, message envelopes, stage lifecycle, distributed plan shape, activation frame envelopes, and conformance validation. Manager REST endpoints may expose CDIP messages, but those endpoints are not themselves the protocol.
 
 The first CDIP version is intentionally limited to planning, stage job graph construction, lifecycle messages, and activation frame envelopes. Worker-to-worker activation transport and runtime-specific layer execution can be implemented behind the CDIP contract without changing the high-level protocol semantics.
+
+## ADR-0005: Runtime Adapter Gate For Real Distributed Inference
+
+Status: accepted
+
+CMesh will not claim real cross-machine model execution until a runtime adapter can execute model layer stages and exchange activation frames between workers.
+
+The first target is pipeline layer splitting because it maps to CDIP stage plans and to llama.cpp's documented `layer` multi-GPU split semantics. The current llama.cpp tooling supports splitting work across multiple GPUs visible to one host, but CMesh needs independent workers on separate machines. That gap must be closed behind a runtime adapter rather than by changing the CDIP control plane.
+
+Distributed plans may be feasible from a resource and placement perspective while still reporting `executable_now: false`. The explicit blocker is the missing distributed tensor runtime adapter, not the CDIP protocol itself.
