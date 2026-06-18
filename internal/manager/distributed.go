@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
@@ -357,8 +358,11 @@ func distributedStageJobRequests(parent jobs.Job, input models.DistributedGenera
 			Requirements: jobs.Requirements{
 				CPUCores: 1,
 			},
-			MaxAttempts:  1,
-			NoAutoAssign: true,
+			MaxAttempts:     1,
+			NoAutoAssign:    true,
+			CDIPState:       cdip.StagePlanned,
+			CDIPParentJobID: parent.ID,
+			CDIPStageIndex:  stage.Index,
 		})
 	}
 	return out, nil

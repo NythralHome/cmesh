@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
@@ -193,12 +194,84 @@ func TestDistributedGenerateEndpointCreatesPlannedJobGraph(t *testing.T) {
 		if stageJob.Type != models.JobGenerateStage || stageJob.Status != jobs.StatusQueued || stageJob.AssignedTo == "" {
 			t.Fatalf("expected queued assigned stage job, got %#v", stageJob)
 		}
+		if stageJob.CDIPState != cdip.StagePlanned || stageJob.CDIPParentJobID != payload.Job.ID {
+			t.Fatalf("expected planned CDIP stage metadata, got %#v", stageJob)
+		}
 		if stageJob.LastFailure != "waiting for coordinator" {
 			t.Fatalf("expected stage job to wait for coordinator, got %#v", stageJob)
 		}
 	}
 	if len(state.Jobs()) != 3 {
 		t.Fatalf("expected parent plus two stage jobs, got %#v", state.Jobs())
+	}
+}
+
+func TestCDIPStageLifecycleEndpoint(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	stageJob, err := state.CreateJob(jobs.CreateRequest{
+		Type:            models.JobGenerateStage,
+		Input:           `{"model_id":"qwen2.5-7b-instruct-q4-k-m"}`,
+		RequestedBy:     "test",
+		AssignedTo:      "node-a",
+		NoAutoAssign:    true,
+		CDIPState:       cdip.StagePlanned,
+		CDIPParentJobID: "job-parent",
+		CDIPStageIndex:  0,
+		MaxAttempts:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/cdip/stages/"+stageJob.ID+"/prepare", strings.NewReader(`{"detail":"loading shard"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected prepare status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	updated, ok := state.Job(stageJob.ID)
+	if !ok || updated.CDIPState != cdip.StagePreparing || !strings.Contains(updated.Result, "loading shard") {
+		t.Fatalf("expected preparing stage, got %#v", updated)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/cdip/stages/"+stageJob.ID+"/ready", strings.NewReader(`{}`))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ready status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	updated, _ = state.Job(stageJob.ID)
+	if updated.CDIPState != cdip.StageReady {
+		t.Fatalf("expected ready stage, got %#v", updated)
+	}
+}
+
+func TestCDIPStageLifecycleRejectsInvalidTransition(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	stageJob, err := state.CreateJob(jobs.CreateRequest{
+		Type:         models.JobGenerateStage,
+		Input:        `{"model_id":"qwen2.5-7b-instruct-q4-k-m"}`,
+		RequestedBy:  "test",
+		AssignedTo:   "node-a",
+		NoAutoAssign: true,
+		CDIPState:    cdip.StagePlanned,
+		MaxAttempts:  1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/cdip/stages/"+stageJob.ID+"/decode", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected conflict for invalid transition, got %d: %s", rec.Code, rec.Body.String())
+	}
+	updated, _ := state.Job(stageJob.ID)
+	if updated.CDIPState != cdip.StagePlanned {
+		t.Fatalf("invalid transition changed state: %#v", updated)
 	}
 }
 

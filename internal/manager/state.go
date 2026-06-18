@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
@@ -210,15 +211,18 @@ func (s *State) BenchmarkSummaryByNode() map[string]NodeBenchmarkSummary {
 func (s *State) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 	now := time.Now().UTC()
 	job := jobs.Job{
-		ID:           newJobID(),
-		Type:         req.Type,
-		Status:       jobs.StatusQueued,
-		RequestedBy:  req.RequestedBy,
-		Input:        req.Input,
-		Requirements: req.Requirements,
-		MaxAttempts:  normalizeMaxAttempts(req.MaxAttempts),
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:              newJobID(),
+		Type:            req.Type,
+		Status:          jobs.StatusQueued,
+		RequestedBy:     req.RequestedBy,
+		Input:           req.Input,
+		Requirements:    req.Requirements,
+		MaxAttempts:     normalizeMaxAttempts(req.MaxAttempts),
+		CDIPState:       req.CDIPState,
+		CDIPParentJobID: req.CDIPParentJobID,
+		CDIPStageIndex:  req.CDIPStageIndex,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 
 	s.mu.Lock()
@@ -258,15 +262,18 @@ func (s *State) CreateJobsBatch(requests []jobs.CreateRequest) ([]jobs.Job, erro
 
 	for _, req := range requests {
 		job := jobs.Job{
-			ID:           newJobID(),
-			Type:         req.Type,
-			Status:       jobs.StatusQueued,
-			RequestedBy:  req.RequestedBy,
-			Input:        req.Input,
-			Requirements: req.Requirements,
-			MaxAttempts:  normalizeMaxAttempts(req.MaxAttempts),
-			CreatedAt:    now,
-			UpdatedAt:    now,
+			ID:              newJobID(),
+			Type:            req.Type,
+			Status:          jobs.StatusQueued,
+			RequestedBy:     req.RequestedBy,
+			Input:           req.Input,
+			Requirements:    req.Requirements,
+			MaxAttempts:     normalizeMaxAttempts(req.MaxAttempts),
+			CDIPState:       req.CDIPState,
+			CDIPParentJobID: req.CDIPParentJobID,
+			CDIPStageIndex:  req.CDIPStageIndex,
+			CreatedAt:       now,
+			UpdatedAt:       now,
 		}
 		if req.NoAutoAssign {
 			job.AssignedTo = req.AssignedTo
@@ -381,6 +388,43 @@ func (s *State) UpdateJobProgress(jobID string, req jobs.ProgressRequest) (jobs.
 	return job, true
 }
 
+func (s *State) UpdateCDIPStageState(jobID string, next cdip.StageState, detail string) (jobs.Job, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, ok := s.jobs[jobID]
+	if !ok || job.Type != models.JobGenerateStage {
+		return jobs.Job{}, false
+	}
+	current := job.CDIPState
+	if current == "" {
+		current = cdip.StagePlanned
+	}
+	if !cdip.CanTransition(current, next) {
+		return jobs.Job{}, false
+	}
+	now := time.Now().UTC()
+	job.CDIPState = next
+	job.Result = cdipStageResult(next, detail, now)
+	job.UpdatedAt = now
+	switch next {
+	case cdip.StageCompleted:
+		job.Status = jobs.StatusSucceeded
+		job.FinishedAt = now
+	case cdip.StageFailed:
+		job.Status = jobs.StatusFailed
+		job.Error = strings.TrimSpace(detail)
+		job.LastFailure = job.Error
+		job.FinishedAt = now
+	case cdip.StageAborted:
+		job.Status = jobs.StatusCanceled
+		job.Error = strings.TrimSpace(detail)
+		job.FinishedAt = now
+	}
+	s.jobs[job.ID] = job
+	return job, true
+}
+
 func jobProgressResult(req jobs.ProgressRequest, updatedAt time.Time) string {
 	payload := map[string]any{
 		"kind":             "job.progress",
@@ -394,6 +438,17 @@ func jobProgressResult(req jobs.ProgressRequest, updatedAt time.Time) string {
 	if err != nil {
 		return ""
 	}
+	return string(body)
+}
+
+func cdipStageResult(state cdip.StageState, detail string, updatedAt time.Time) string {
+	payload := map[string]any{
+		"kind":       "cdip.stage.state",
+		"state":      state,
+		"detail":     strings.TrimSpace(detail),
+		"updated_at": updatedAt,
+	}
+	body, _ := json.Marshal(payload)
 	return string(body)
 }
 

@@ -3,11 +3,14 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
+	"github.com/cmesh/cmesh/internal/models"
 	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -84,6 +87,9 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_failure TEXT NOT NULL DEFAULT '';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS requirements JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdip_state TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdip_parent_job_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdip_stage_index INTEGER NOT NULL DEFAULT 0;
 `)
 	return err
 }
@@ -147,7 +153,7 @@ WHERE id = $1
 
 func (s *PostgresStore) failActiveJobsForWorker(nodeID string, now time.Time, reason string) {
 	rows, err := s.pool.Query(context.Background(), `
-SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
 FROM jobs
 WHERE assigned_to = $1 AND status IN ($2, $3)
 `, nodeID, string(jobs.StatusScheduled), string(jobs.StatusRunning))
@@ -282,15 +288,18 @@ func (s *PostgresStore) BenchmarkSummaryByNode() map[string]NodeBenchmarkSummary
 func (s *PostgresStore) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 	now := time.Now().UTC()
 	job := jobs.Job{
-		ID:           newJobID(),
-		Type:         req.Type,
-		Status:       jobs.StatusQueued,
-		RequestedBy:  req.RequestedBy,
-		Input:        req.Input,
-		Requirements: req.Requirements,
-		MaxAttempts:  normalizeMaxAttempts(req.MaxAttempts),
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:              newJobID(),
+		Type:            req.Type,
+		Status:          jobs.StatusQueued,
+		RequestedBy:     req.RequestedBy,
+		Input:           req.Input,
+		Requirements:    req.Requirements,
+		MaxAttempts:     normalizeMaxAttempts(req.MaxAttempts),
+		CDIPState:       req.CDIPState,
+		CDIPParentJobID: req.CDIPParentJobID,
+		CDIPStageIndex:  req.CDIPStageIndex,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 	if req.NoAutoAssign {
 		job.AssignedTo = req.AssignedTo
@@ -315,9 +324,9 @@ func (s *PostgresStore) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 
 	requirements, _ := json.Marshal(job.Requirements)
 	_, err := s.pool.Exec(context.Background(), `
-INSERT INTO jobs (id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-`, job.ID, job.Type, string(job.Status), job.RequestedBy, job.AssignedTo, job.Input, requirements, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.CreatedAt, job.UpdatedAt)
+INSERT INTO jobs (id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, cdip_state, cdip_parent_job_id, cdip_stage_index)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+`, job.ID, job.Type, string(job.Status), job.RequestedBy, job.AssignedTo, job.Input, requirements, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.CreatedAt, job.UpdatedAt, string(job.CDIPState), job.CDIPParentJobID, job.CDIPStageIndex)
 	return job, err
 }
 
@@ -332,15 +341,18 @@ func (s *PostgresStore) CreateJobsBatch(requests []jobs.CreateRequest) ([]jobs.J
 	created := make([]jobs.Job, 0, len(requests))
 	for _, req := range requests {
 		job := jobs.Job{
-			ID:           newJobID(),
-			Type:         req.Type,
-			Status:       jobs.StatusQueued,
-			RequestedBy:  req.RequestedBy,
-			Input:        req.Input,
-			Requirements: req.Requirements,
-			MaxAttempts:  normalizeMaxAttempts(req.MaxAttempts),
-			CreatedAt:    now,
-			UpdatedAt:    now,
+			ID:              newJobID(),
+			Type:            req.Type,
+			Status:          jobs.StatusQueued,
+			RequestedBy:     req.RequestedBy,
+			Input:           req.Input,
+			Requirements:    req.Requirements,
+			MaxAttempts:     normalizeMaxAttempts(req.MaxAttempts),
+			CDIPState:       req.CDIPState,
+			CDIPParentJobID: req.CDIPParentJobID,
+			CDIPStageIndex:  req.CDIPStageIndex,
+			CreatedAt:       now,
+			UpdatedAt:       now,
 		}
 		if req.NoAutoAssign {
 			job.AssignedTo = req.AssignedTo
@@ -365,9 +377,9 @@ func (s *PostgresStore) CreateJobsBatch(requests []jobs.CreateRequest) ([]jobs.J
 
 		requirements, _ := json.Marshal(job.Requirements)
 		if _, err := tx.Exec(context.Background(), `
-INSERT INTO jobs (id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-`, job.ID, job.Type, string(job.Status), job.RequestedBy, job.AssignedTo, job.Input, requirements, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.CreatedAt, job.UpdatedAt); err != nil {
+INSERT INTO jobs (id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, cdip_state, cdip_parent_job_id, cdip_stage_index)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+`, job.ID, job.Type, string(job.Status), job.RequestedBy, job.AssignedTo, job.Input, requirements, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.CreatedAt, job.UpdatedAt, string(job.CDIPState), job.CDIPParentJobID, job.CDIPStageIndex); err != nil {
 			return nil, err
 		}
 		created = append(created, job)
@@ -380,7 +392,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 
 func (s *PostgresStore) Jobs() []jobs.Job {
 	rows, err := s.pool.Query(context.Background(), `
-SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
 FROM jobs
 ORDER BY created_at DESC
 `)
@@ -401,7 +413,7 @@ ORDER BY created_at DESC
 
 func (s *PostgresStore) Job(id string) (jobs.Job, bool) {
 	row := s.pool.QueryRow(context.Background(), `
-SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
 FROM jobs
 WHERE id = $1
 `, id)
@@ -419,7 +431,7 @@ WHERE id = (
   ORDER BY created_at ASC
   LIMIT 1
 )
-RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
 `, nodeID, string(jobs.StatusScheduled), string(jobs.StatusRunning), now)
 	return scanJob(row)
 }
@@ -427,7 +439,7 @@ RETURNING id, type, status, requested_by, assigned_to, input, requirements, resu
 func (s *PostgresStore) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, bool) {
 	now := time.Now().UTC()
 	selectRow := s.pool.QueryRow(context.Background(), `
-SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
 FROM jobs
 WHERE id = $1 AND assigned_to = $2 AND status IN ($3, $4)
 `, jobID, req.NodeID, string(jobs.StatusRunning), string(jobs.StatusCanceled))
@@ -462,7 +474,7 @@ SET status = $2,
     started_at = $10,
     finished_at = $11
 WHERE id = $1
-RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
 `, job.ID, string(job.Status), job.AssignedTo, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.UpdatedAt, nullableTime(job.StartedAt), nullableTime(job.FinishedAt))
 	updated, ok := scanJob(updatedRow)
 	if ok {
@@ -479,8 +491,54 @@ UPDATE jobs
 SET result = $4,
     updated_at = $5
 WHERE id = $1 AND assigned_to = $2 AND status = $3
-RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
 `, jobID, req.NodeID, string(jobs.StatusRunning), result, now)
+	return scanJob(row)
+}
+
+func (s *PostgresStore) UpdateCDIPStageState(jobID string, next cdip.StageState, detail string) (jobs.Job, bool) {
+	now := time.Now().UTC()
+	current, ok := s.Job(jobID)
+	if !ok || current.Type != models.JobGenerateStage {
+		return jobs.Job{}, false
+	}
+	from := current.CDIPState
+	if from == "" {
+		from = cdip.StagePlanned
+	}
+	if !cdip.CanTransition(from, next) {
+		return jobs.Job{}, false
+	}
+	status := current.Status
+	errorText := current.Error
+	lastFailure := current.LastFailure
+	finishedAt := current.FinishedAt
+	switch next {
+	case cdip.StageCompleted:
+		status = jobs.StatusSucceeded
+		finishedAt = now
+	case cdip.StageFailed:
+		status = jobs.StatusFailed
+		errorText = strings.TrimSpace(detail)
+		lastFailure = errorText
+		finishedAt = now
+	case cdip.StageAborted:
+		status = jobs.StatusCanceled
+		errorText = strings.TrimSpace(detail)
+		finishedAt = now
+	}
+	row := s.pool.QueryRow(context.Background(), `
+UPDATE jobs
+SET cdip_state = $2,
+    status = $3,
+    result = $4,
+    error = $5,
+    last_failure = $6,
+    updated_at = $7,
+    finished_at = $8
+WHERE id = $1 AND type = $9
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
+`, jobID, string(next), string(status), cdipStageResult(next, detail, now), errorText, lastFailure, now, nullableTime(finishedAt), models.JobGenerateStage)
 	return scanJob(row)
 }
 
@@ -494,7 +552,7 @@ SET status = $2,
     updated_at = $4,
     finished_at = $4
 WHERE id = $1 AND status IN ($5, $6, $7)
-RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
 `, jobID, string(jobs.StatusCanceled), "canceled by operator", now, string(jobs.StatusQueued), string(jobs.StatusScheduled), string(jobs.StatusRunning))
 	job, ok := scanJob(row)
 	if ok {
@@ -595,7 +653,7 @@ func (s *PostgresStore) deriveNodeStatus(node cluster.Node, now time.Time) clust
 
 func (s *PostgresStore) scheduleQueuedJobs(now time.Time) {
 	rows, err := s.pool.Query(context.Background(), `
-SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
 FROM jobs
 WHERE status = $1 AND assigned_to = ''
 ORDER BY created_at ASC
@@ -718,6 +776,7 @@ func scanJob(row jobScanner) (jobs.Job, bool) {
 	var startedAt *time.Time
 	var finishedAt *time.Time
 	var requirements []byte
+	var cdipState string
 	if err := row.Scan(
 		&job.ID,
 		&job.Type,
@@ -735,10 +794,14 @@ func scanJob(row jobScanner) (jobs.Job, bool) {
 		&job.UpdatedAt,
 		&startedAt,
 		&finishedAt,
+		&cdipState,
+		&job.CDIPParentJobID,
+		&job.CDIPStageIndex,
 	); err != nil {
 		return jobs.Job{}, false
 	}
 	job.Status = jobs.Status(status)
+	job.CDIPState = cdip.StageState(cdipState)
 	if startedAt != nil {
 		job.StartedAt = *startedAt
 	}

@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
@@ -20,6 +21,7 @@ type Store interface {
 	Job(id string) (jobs.Job, bool)
 	NextJobForWorker(nodeID string) (jobs.Job, bool)
 	UpdateJobProgress(jobID string, req jobs.ProgressRequest) (jobs.Job, bool)
+	UpdateCDIPStageState(jobID string, next cdip.StageState, detail string) (jobs.Job, bool)
 	CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, bool)
 	CancelJob(jobID string) (jobs.Job, bool)
 	Nodes() []cluster.Node

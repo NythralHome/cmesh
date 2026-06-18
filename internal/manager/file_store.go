@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
@@ -87,6 +88,14 @@ func (s *FileStore) CreateJobsBatch(requests []jobs.CreateRequest) ([]jobs.Job, 
 
 func (s *FileStore) NextJobForWorker(nodeID string) (jobs.Job, bool) {
 	job, ok := s.State.NextJobForWorker(nodeID)
+	if ok {
+		_ = s.save()
+	}
+	return job, ok
+}
+
+func (s *FileStore) UpdateCDIPStageState(jobID string, next cdip.StageState, detail string) (jobs.Job, bool) {
+	job, ok := s.State.UpdateCDIPStageState(jobID, next, detail)
 	if ok {
 		_ = s.save()
 	}

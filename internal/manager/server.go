@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
@@ -77,6 +78,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/memories/", s.handleMemory)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/jobs/", s.handleJob)
+	mux.HandleFunc("/v1/cdip/stages/", s.handleCDIPStage)
 	mux.HandleFunc("/v1/workers/", s.handleWorkerRoutes)
 	mux.HandleFunc("/v1/workers/join", s.handleWorkerJoin)
 	mux.HandleFunc("/v1/workers/heartbeat", s.handleWorkerHeartbeat)
@@ -1403,6 +1405,63 @@ func (s *Server) handleJobProgress(w http.ResponseWriter, r *http.Request, jobID
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleCDIPStage(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/cdip/stages/"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	next, ok := cdipStageAction(parts[1])
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	var req struct {
+		Detail string `json:"detail"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	job, ok := s.state.UpdateCDIPStageState(parts[0], next, req.Detail)
+	if !ok {
+		http.Error(w, "invalid CDIP stage transition", http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job":        job,
+		"cdip_state": job.CDIPState,
+	})
+}
+
+func cdipStageAction(action string) (cdip.StageState, bool) {
+	switch action {
+	case "prepare":
+		return cdip.StagePreparing, true
+	case "ready":
+		return cdip.StageReady, true
+	case "prefill":
+		return cdip.StagePrefill, true
+	case "decode":
+		return cdip.StageDecode, true
+	case "complete":
+		return cdip.StageCompleted, true
+	case "abort":
+		return cdip.StageAborted, true
+	case "fail":
+		return cdip.StageFailed, true
+	default:
+		return "", false
+	}
 }
 
 func (s *Server) handleWorkerRoutes(w http.ResponseWriter, r *http.Request) {
