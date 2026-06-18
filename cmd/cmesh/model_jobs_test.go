@@ -10,11 +10,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
 	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/cmesh/cmesh/internal/workerstatus"
 )
+
+func TestDistributedGenerateJobTypeIsKnownButNotExecutableYet(t *testing.T) {
+	if !isModelJobType(models.JobGenerateDistributed) {
+		t.Fatalf("expected %s to be tracked as a model job", models.JobGenerateDistributed)
+	}
+	_, err := executeWorkerJob(jobs.Job{
+		Type:  models.JobGenerateDistributed,
+		Input: `{"model_id":"qwen2.5-7b-instruct-q4-k-m","prompt":"hello"}`,
+	}, cluster.ResourceSnapshot{}, t.TempDir(), "node-a", time.Now().UTC(), "")
+	if err == nil {
+		t.Fatal("expected distributed generate to be blocked until protocol exists")
+	}
+	if !strings.Contains(err.Error(), "distributed runtime protocol") {
+		t.Fatalf("expected distributed protocol error, got %v", err)
+	}
+}
 
 func TestExecuteModelDeleteJobRemovesModelDirectory(t *testing.T) {
 	cacheDir := t.TempDir()

@@ -6,11 +6,12 @@ import (
 )
 
 const (
-	JobInstall  = "model.install"
-	JobDelete   = "model.delete"
-	JobGenerate = "model.generate"
-	JobRepair   = "model.repair"
-	JobCleanup  = "model.cleanup"
+	JobInstall             = "model.install"
+	JobDelete              = "model.delete"
+	JobGenerate            = "model.generate"
+	JobGenerateDistributed = "model.generate.distributed"
+	JobRepair              = "model.repair"
+	JobCleanup             = "model.cleanup"
 )
 
 type Runtime string
@@ -69,6 +70,27 @@ type GenerateInput struct {
 	MaxTokens      int           `json:"max_tokens,omitempty"`
 	Temperature    string        `json:"temperature,omitempty"`
 	CacheDir       string        `json:"cache_dir,omitempty"`
+}
+
+type DistributedGenerateInput struct {
+	ModelID        string                  `json:"model_id"`
+	Prompt         string                  `json:"prompt"`
+	Messages       []ChatMessage           `json:"messages,omitempty"`
+	SystemPrompt   string                  `json:"system_prompt,omitempty"`
+	ConversationID string                  `json:"conversation_id,omitempty"`
+	MaxTokens      int                     `json:"max_tokens,omitempty"`
+	Temperature    string                  `json:"temperature,omitempty"`
+	Mode           string                  `json:"mode"`
+	Stages         []DistributedStageInput `json:"stages"`
+}
+
+type DistributedStageInput struct {
+	Index      int    `json:"index"`
+	NodeID     string `json:"node_id"`
+	NodeName   string `json:"node_name,omitempty"`
+	LayerStart int    `json:"layer_start"`
+	LayerEnd   int    `json:"layer_end"`
+	Layers     int    `json:"layers"`
 }
 
 type ChatMessage struct {

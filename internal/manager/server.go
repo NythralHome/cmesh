@@ -676,6 +676,8 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "distributed-plan":
 		s.handleModelDistributedPlan(w, r, model)
+	case "distributed-generate":
+		s.handleModelDistributedGenerate(w, r, model)
 	case "placement":
 		s.handleModelPlacement(w, r, model)
 	case "install":
@@ -689,6 +691,99 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleModelDistributedGenerate(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Prompt         string `json:"prompt"`
+		ConversationID string `json:"conversation_id"`
+		SystemPrompt   string `json:"system_prompt"`
+		MaxTokens      int    `json:"max_tokens"`
+		Temperature    string `json:"temperature"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		http.Error(w, "prompt is required", http.StatusBadRequest)
+		return
+	}
+	plan := distributedModelPlan(model, s.state.Nodes())
+	if !plan.Feasible || !plan.ExecutableNow {
+		reason := "distributed model execution is not ready"
+		if len(plan.Blockers) > 0 {
+			reason = strings.Join(plan.Blockers, " | ")
+		}
+		writeJSON(w, http.StatusConflict, distributedGenerateConflictResponse{
+			Error:  "distributed model generate is not executable",
+			Reason: reason,
+			Plan:   plan,
+		})
+		return
+	}
+	conversationID := strings.TrimSpace(req.ConversationID)
+	if conversationID == "" {
+		conversationID = newConversationID()
+	}
+	if activeJobID := activeGenerateJobForConversation(s.state.Jobs(), conversationID); activeJobID != "" {
+		http.Error(w, "conversation already has an active generate job: "+activeJobID, http.StatusConflict)
+		return
+	}
+	systemPrompt := strings.TrimSpace(req.SystemPrompt)
+	if systemPrompt == "" {
+		systemPrompt = modelDefaultSystemPrompt(model)
+	}
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = models.QualityPresetFor(model).MaxTokens
+	}
+	temperature := strings.TrimSpace(req.Temperature)
+	if temperature == "" {
+		temperature = models.QualityPresetFor(model).Temperature
+	}
+	conversation := appendConversationMessage(s.state, conversationID, model.ID, "distributed", systemPrompt, models.ChatMessage{
+		Role:    "user",
+		Content: req.Prompt,
+	})
+	effectiveSystemPrompt := systemPromptWithMemory(systemPrompt, model.ID, s.state)
+	budgetedMessages := budgetConversationMessages(model, effectiveSystemPrompt, conversation.Messages, maxTokens)
+	input, err := json.Marshal(models.DistributedGenerateInput{
+		ModelID:        model.ID,
+		Prompt:         req.Prompt,
+		Messages:       budgetedMessages,
+		SystemPrompt:   effectiveSystemPrompt,
+		ConversationID: conversation.ID,
+		MaxTokens:      maxTokens,
+		Temperature:    temperature,
+		Mode:           plan.Mode,
+		Stages:         distributedStageInputs(plan.Stages),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	job, err := s.state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerateDistributed,
+		Input:       string(input),
+		RequestedBy: "dashboard-chat",
+		Requirements: jobs.Requirements{
+			CPUCores:    len(plan.Stages),
+			MemoryBytes: model.MemoryBytes,
+			DiskBytes:   model.DiskBytes,
+			VRAMBytes:   model.VRAMBytes,
+		},
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, job)
 }
 
 func (s *Server) handleModelDistributedPlan(w http.ResponseWriter, r *http.Request, model models.Model) {
@@ -2292,6 +2387,27 @@ type modelInstallConflictResponse struct {
 	Error     string             `json:"error"`
 	Reason    string             `json:"reason"`
 	Placement ModelPlacementPlan `json:"placement"`
+}
+
+type distributedGenerateConflictResponse struct {
+	Error  string               `json:"error"`
+	Reason string               `json:"reason"`
+	Plan   DistributedModelPlan `json:"plan"`
+}
+
+func distributedStageInputs(stages []DistributedPlanStage) []models.DistributedStageInput {
+	out := make([]models.DistributedStageInput, 0, len(stages))
+	for _, stage := range stages {
+		out = append(out, models.DistributedStageInput{
+			Index:      stage.Index,
+			NodeID:     stage.NodeID,
+			NodeName:   stage.NodeName,
+			LayerStart: stage.LayerStart,
+			LayerEnd:   stage.LayerEnd,
+			Layers:     stage.Layers,
+		})
+	}
+	return out
 }
 
 func appendConversationMessage(store Store, id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation {

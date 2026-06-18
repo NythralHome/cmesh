@@ -125,3 +125,55 @@ func TestModelDistributedPlanEndpoint(t *testing.T) {
 		t.Fatalf("expected two planned stages, got %#v", payload.Plan.Stages)
 	}
 }
+
+func TestDistributedGenerateEndpointReturnsPlanConflictUntilRuntimeExists(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	for _, name := range []string{"worker-a", "worker-b"} {
+		joinWorkerWithResourcesForTest(t, srv, name, cluster.ResourceSnapshot{
+			CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+			Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+			Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 8 * gb, FreeBytes: 64 * gb},
+			Runtimes: []cluster.RuntimeResource{{
+				Name:       string(models.RuntimeLlamaCPP),
+				Ready:      true,
+				Version:    "test",
+				BinaryPath: "/tmp/llama-cli",
+			}},
+			Models: []cluster.ModelResource{{
+				ID:      "qwen2.5-7b-instruct-q4-k-m",
+				Name:    "Qwen2.5 7B Instruct",
+				Runtime: string(models.RuntimeLlamaCPP),
+				Bytes:   5 * gb,
+				Ready:   true,
+			}},
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-7b-instruct-q4-k-m/distributed-generate", strings.NewReader(`{"prompt":"hello from distributed cluster"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var conflict distributedGenerateConflictResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Error != "distributed model generate is not executable" {
+		t.Fatalf("expected distributed generate conflict, got %#v", conflict)
+	}
+	if !conflict.Plan.Feasible || conflict.Plan.ExecutableNow {
+		t.Fatalf("expected feasible but non-executable plan, got %#v", conflict.Plan)
+	}
+	if len(conflict.Plan.Stages) != 2 {
+		t.Fatalf("expected distributed stages in conflict payload, got %#v", conflict.Plan.Stages)
+	}
+	if !strings.Contains(conflict.Reason, "distributed runtime protocol") {
+		t.Fatalf("expected runtime protocol blocker, got %#v", conflict)
+	}
+	if len(state.Jobs()) != 0 {
+		t.Fatalf("distributed-generate must not create a dead job while protocol is unavailable, got %#v", state.Jobs())
+	}
+}

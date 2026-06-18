@@ -830,7 +830,7 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapsh
 }
 
 func isModelJobType(jobType string) bool {
-	return jobType == models.JobInstall || jobType == models.JobDelete || jobType == models.JobGenerate || jobType == models.JobRepair || jobType == models.JobCleanup
+	return jobType == models.JobInstall || jobType == models.JobDelete || jobType == models.JobGenerate || jobType == models.JobGenerateDistributed || jobType == models.JobRepair || jobType == models.JobCleanup
 }
 
 func executeJob(job jobs.Job) (string, error) {
@@ -864,6 +864,8 @@ func executeWorkerJob(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir 
 		return executeModelDeleteJob(job.Input, cacheDir)
 	case models.JobGenerate:
 		return executeModelGenerateJob(job.Input, cacheDir)
+	case models.JobGenerateDistributed:
+		return "", fmt.Errorf("distributed model generate requires the manager distributed runtime protocol")
 	default:
 		return "", fmt.Errorf("unsupported job type %q", job.Type)
 	}
