@@ -320,6 +320,15 @@ CDIP separates control messages from activation frames.
 
 Control messages can be JSON over HTTP in v0.1. Activation frames require streaming transport.
 
+The first implemented relay is manager-mediated HTTP:
+
+```http
+POST /v1/cdip/activations/{parent_job_id}/{stage_job_id}/frames
+GET /v1/cdip/activations/{parent_job_id}/{stage_job_id}/frames?timeout_ms=250
+```
+
+This endpoint is a relay, not the final high-performance transport. It exists so workers can exchange validated activation frame envelopes through the manager while the runtime adapter is being developed. A future direct worker transport can keep the same CDIP frame contract.
+
 Frame envelope:
 
 ```json
@@ -339,7 +348,7 @@ Frame envelope:
 }
 ```
 
-The binary payload MAY be sent after the JSON envelope, depending on transport.
+The binary payload MAY be sent after the JSON envelope, depending on transport. The HTTP relay currently accepts JSON with `header` and base64-encoded `payload` fields.
 
 v0.1 activation transport requirements:
 

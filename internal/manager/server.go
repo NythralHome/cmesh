@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -91,6 +92,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/memories/", s.handleMemory)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/jobs/", s.handleJob)
+	mux.HandleFunc("/v1/cdip/activations/", s.handleCDIPActivation)
 	mux.HandleFunc("/v1/cdip/jobs/", s.handleCDIPJob)
 	mux.HandleFunc("/v1/cdip/stages/", s.handleCDIPStage)
 	mux.HandleFunc("/v1/workers/", s.handleWorkerRoutes)
@@ -1595,6 +1597,96 @@ func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleCDIPActivation(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/cdip/activations/"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] != "frames" {
+		http.NotFound(w, r)
+		return
+	}
+	parentJobID := parts[0]
+	stageJobID := parts[1]
+	stageJob, ok := s.validateCDIPActivationStream(parentJobID, stageJobID)
+	if !ok {
+		http.Error(w, "CDIP activation stream not found", http.StatusNotFound)
+		return
+	}
+	stream := transport.StreamID{ParentJobID: parentJobID, StageJobID: stageJobID}
+
+	switch r.Method {
+	case http.MethodPost:
+		var frame transport.ActivationFrame
+		if err := json.NewDecoder(r.Body).Decode(&frame); err != nil {
+			http.Error(w, "invalid activation frame", http.StatusBadRequest)
+			return
+		}
+		if frame.Header.ParentJobID != parentJobID || frame.Header.StageJobID != stageJobID {
+			http.Error(w, "activation frame stream does not match URL", http.StatusBadRequest)
+			return
+		}
+		if err := frame.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writer, err := s.cdipActivationTransport.OpenWriter(r.Context(), stream, stageJob.AssignedTo)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		if err := writer.Send(r.Context(), frame); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"stream": map[string]string{
+				"parent_job_id": parentJobID,
+				"stage_job_id":  stageJobID,
+			},
+			"sequence": frame.Header.Sequence,
+			"bytes":    len(frame.Payload),
+		})
+	case http.MethodGet:
+		timeout := time.Duration(intQuery(r, "timeout_ms", 250)) * time.Millisecond
+		if timeout <= 0 {
+			timeout = 250 * time.Millisecond
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
+		defer cancel()
+		reader, err := s.cdipActivationTransport.OpenReader(ctx, stream)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		frame, err := reader.Receive(ctx)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusOK, frame)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) validateCDIPActivationStream(parentJobID string, stageJobID string) (jobs.Job, bool) {
+	parent, ok := s.state.Job(parentJobID)
+	if !ok || parent.Type != models.JobGenerateDistributed {
+		return jobs.Job{}, false
+	}
+	stageJob, ok := s.state.Job(stageJobID)
+	if !ok || stageJob.Type != models.JobGenerateStage || stageJob.CDIPParentJobID != parentJobID {
+		return jobs.Job{}, false
+	}
+	return stageJob, true
 }
 
 func cdipStageAction(action string) (cdip.StageState, bool) {

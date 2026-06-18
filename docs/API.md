@@ -180,6 +180,46 @@ Example:
 }
 ```
 
+## CDIP Activation Relay
+
+The first distributed-runtime transport is manager-relayed. It is intended for correctness and adapter development before direct worker-to-worker transport exists.
+
+Push an activation frame:
+
+```http
+POST /v1/cdip/activations/{parent_job_id}/{stage_job_id}/frames
+Content-Type: application/json
+```
+
+Example body:
+
+```json
+{
+  "header": {
+    "protocol": "cdip",
+    "version": "0.1",
+    "type": "activation.chunk",
+    "parent_job_id": "job-parent",
+    "stage_job_id": "job-stage-0",
+    "sequence": 1,
+    "content_type": "application/vnd.cmesh.activation+binary",
+    "encoding": "raw",
+    "shape": [1, 1, 4],
+    "dtype": "f16",
+    "payload_bytes": 4
+  },
+  "payload": "CQgHBg=="
+}
+```
+
+Read the next activation frame:
+
+```http
+GET /v1/cdip/activations/{parent_job_id}/{stage_job_id}/frames?timeout_ms=250
+```
+
+Returns `200` with the frame when one is available, or `204 No Content` when the relay queue is empty before the timeout expires.
+
 ## Cluster Benchmarks
 
 ```http

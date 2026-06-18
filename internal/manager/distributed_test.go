@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/transport"
 )
 
 func TestDistributedModelPlanBuildsPipelineStages(t *testing.T) {
@@ -985,6 +987,79 @@ func TestCDIPDecodeEndpointBuildsStageDecodeMessagesAndActivationFrames(t *testi
 		if frame.Type != cdip.MessageActivationChunk || frame.Sequence != 3 {
 			t.Fatalf("unexpected activation frame: %#v", frame)
 		}
+	}
+}
+
+func TestCDIPActivationFrameRelayEndpoint(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	parent, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerateDistributed,
+		Input:       `{"model_id":"qwen2.5-0.5b-instruct-q4-k-m","prompt":"hello"}`,
+		RequestedBy: "test",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := state.CreateJob(jobs.CreateRequest{
+		Type:            models.JobGenerateStage,
+		Input:           `{"model_id":"qwen2.5-0.5b-instruct-q4-k-m"}`,
+		RequestedBy:     "test",
+		AssignedTo:      "node-b",
+		MaxAttempts:     1,
+		CDIPState:       cdip.StageDecode,
+		CDIPParentJobID: parent.ID,
+		CDIPStageIndex:  1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := transport.ActivationFrame{
+		Header: cdip.ActivationChunk{
+			Envelope:     cdip.NewEnvelope(cdip.MessageActivationChunk),
+			ParentJobID:  parent.ID,
+			StageJobID:   stage.ID,
+			Sequence:     4,
+			ContentType:  "application/vnd.cmesh.activation+binary",
+			Encoding:     "raw",
+			Shape:        []int{1, 1, 4},
+			DType:        "f16",
+			PayloadBytes: 4,
+		},
+		Payload: []byte{9, 8, 7, 6},
+	}
+	body, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/cdip/activations/"+parent.ID+"/"+stage.ID+"/frames", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/cdip/activations/"+parent.ID+"/"+stage.ID+"/frames?timeout_ms=100", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got transport.ActivationFrame
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Header.Sequence != frame.Header.Sequence || string(got.Payload) != string(frame.Payload) {
+		t.Fatalf("unexpected relayed activation frame: %#v", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/cdip/activations/"+parent.ID+"/"+stage.ID+"/frames?timeout_ms=1", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 after queue drains, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
