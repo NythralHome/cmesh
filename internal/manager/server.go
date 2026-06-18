@@ -23,6 +23,7 @@ import (
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/protocol"
 	"github.com/cmesh/cmesh/internal/resources"
 	"github.com/cmesh/cmesh/internal/transport"
 	"github.com/cmesh/cmesh/internal/version"
@@ -1786,13 +1787,13 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 	return plan
 }
 
-func distributedRPCExecutionPlanForJob(plan ModelDistributedRPCPlan) models.DistributedRPCExecutionPlan {
-	backends := make([]models.DistributedRPCBackend, 0, len(plan.Backends))
+func distributedRPCExecutionPlanForJob(plan ModelDistributedRPCPlan) protocol.DistributedRPCExecutionPlan {
+	backends := make([]protocol.DistributedRPCBackend, 0, len(plan.Backends))
 	for _, backend := range plan.Backends {
 		if !rpcPlanContainsEndpoint(plan.RPCEndpoints, backend.Endpoint) {
 			continue
 		}
-		backends = append(backends, models.DistributedRPCBackend{
+		backends = append(backends, protocol.DistributedRPCBackend{
 			NodeID:       backend.NodeID,
 			NodeName:     backend.NodeName,
 			Runtime:      backend.Runtime,
@@ -1802,8 +1803,11 @@ func distributedRPCExecutionPlanForJob(plan ModelDistributedRPCPlan) models.Dist
 			Error:        backend.Error,
 		})
 	}
-	return models.DistributedRPCExecutionPlan{
+	return protocol.DistributedRPCExecutionPlan{
 		ID:                  newJobID(),
+		Protocol:            protocol.DistributedRPCProtocol,
+		ProtocolVersion:     protocol.DistributedRPCProtocolVersion,
+		PlanSchemaVersion:   protocol.DistributedRPCPlanSchemaVersion,
 		Mode:                plan.Mode,
 		ModelID:             plan.ModelID,
 		CoordinatorNodeID:   plan.CoordinatorNodeID,

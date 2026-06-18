@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/cmesh/cmesh/internal/cdip"
+	"github.com/cmesh/cmesh/internal/protocol"
 )
 
 const (
@@ -90,37 +91,15 @@ type DistributedGenerateInput struct {
 }
 
 type DistributedRPCGenerateInput struct {
-	ModelID        string                      `json:"model_id"`
-	Prompt         string                      `json:"prompt"`
-	Messages       []ChatMessage               `json:"messages,omitempty"`
-	SystemPrompt   string                      `json:"system_prompt,omitempty"`
-	ConversationID string                      `json:"conversation_id,omitempty"`
-	MaxTokens      int                         `json:"max_tokens,omitempty"`
-	Temperature    string                      `json:"temperature,omitempty"`
-	RPCEndpoints   []string                    `json:"rpc_endpoints"`
-	ExecutionPlan  DistributedRPCExecutionPlan `json:"execution_plan,omitempty"`
-}
-
-type DistributedRPCExecutionPlan struct {
-	ID                  string                  `json:"id,omitempty"`
-	Mode                string                  `json:"mode"`
-	ModelID             string                  `json:"model_id"`
-	CoordinatorNodeID   string                  `json:"coordinator_node_id,omitempty"`
-	CoordinatorNodeName string                  `json:"coordinator_node_name,omitempty"`
-	RPCEndpoints        []string                `json:"rpc_endpoints"`
-	Backends            []DistributedRPCBackend `json:"backends,omitempty"`
-	HealthChecked       bool                    `json:"health_checked"`
-	PlannedAt           string                  `json:"planned_at,omitempty"`
-}
-
-type DistributedRPCBackend struct {
-	NodeID       string `json:"node_id"`
-	NodeName     string `json:"node_name"`
-	Runtime      string `json:"runtime"`
-	Endpoint     string `json:"endpoint"`
-	HealthStatus string `json:"health_status,omitempty"`
-	LatencyMS    int64  `json:"latency_ms,omitempty"`
-	Error        string `json:"error,omitempty"`
+	ModelID        string                               `json:"model_id"`
+	Prompt         string                               `json:"prompt"`
+	Messages       []ChatMessage                        `json:"messages,omitempty"`
+	SystemPrompt   string                               `json:"system_prompt,omitempty"`
+	ConversationID string                               `json:"conversation_id,omitempty"`
+	MaxTokens      int                                  `json:"max_tokens,omitempty"`
+	Temperature    string                               `json:"temperature,omitempty"`
+	RPCEndpoints   []string                             `json:"rpc_endpoints"`
+	ExecutionPlan  protocol.DistributedRPCExecutionPlan `json:"execution_plan,omitempty"`
 }
 
 type DistributedStageInput struct {

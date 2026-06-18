@@ -16,6 +16,7 @@ import (
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/protocol"
 	"github.com/cmesh/cmesh/internal/resources"
 )
 
@@ -2293,6 +2294,9 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 	}
 	if input.ModelID != "qwen2.5-0.5b-instruct-q4-k-m" || input.Prompt != "hello" || len(input.RPCEndpoints) != 1 || input.RPCEndpoints[0] != listener.Addr().String() {
 		t.Fatalf("unexpected distributed rpc input: %#v", input)
+	}
+	if input.ExecutionPlan.Protocol != protocol.DistributedRPCProtocol || input.ExecutionPlan.ProtocolVersion != protocol.DistributedRPCProtocolVersion || input.ExecutionPlan.PlanSchemaVersion != protocol.DistributedRPCPlanSchemaVersion {
+		t.Fatalf("unexpected distributed rpc protocol metadata: %#v", input.ExecutionPlan)
 	}
 	if input.ExecutionPlan.Mode != "llama.cpp-rpc" || input.ExecutionPlan.ModelID != input.ModelID || input.ExecutionPlan.CoordinatorNodeID != job.AssignedTo {
 		t.Fatalf("unexpected distributed rpc execution plan: %#v", input.ExecutionPlan)
