@@ -978,6 +978,8 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "distributed-plan":
 		s.handleModelDistributedPlan(w, r, model)
+	case "distributed-rpc-readiness":
+		s.handleModelDistributedRPCReadiness(w, r, model)
 	case "distributed-rpc-generate":
 		s.handleModelDistributedRPCGenerate(w, r, model)
 	case "distributed-generate":
@@ -1394,6 +1396,65 @@ func (s *Server) handleModelGenerate(w http.ResponseWriter, r *http.Request, mod
 		return
 	}
 	writeJSON(w, http.StatusCreated, job)
+}
+
+type ModelDistributedRPCReadiness struct {
+	Ready        bool                  `json:"ready"`
+	ModelID      string                `json:"model_id"`
+	NodeID       string                `json:"node_id,omitempty"`
+	Blockers     []string              `json:"blockers,omitempty"`
+	RPCEndpoints []string              `json:"rpc_endpoints,omitempty"`
+	RPCPool      RuntimeRPCPoolSummary `json:"rpc_pool"`
+}
+
+func (s *Server) handleModelDistributedRPCReadiness(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	readiness := s.modelDistributedRPCReadiness(model, nodeID)
+	writeJSON(w, http.StatusOK, readiness)
+}
+
+func (s *Server) modelDistributedRPCReadiness(model models.Model, nodeID string) ModelDistributedRPCReadiness {
+	readiness := ModelDistributedRPCReadiness{
+		ModelID: model.ID,
+		NodeID:  strings.TrimSpace(nodeID),
+	}
+	summary, _, endpoints := runtimeRPCPoolReport(s.state.Nodes())
+	readiness.RPCPool = summary
+	readiness.RPCEndpoints = endpoints
+	if len(endpoints) == 0 {
+		readiness.Blockers = append(readiness.Blockers, "no active llama.cpp rpc endpoints are available")
+	}
+	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
+	if len(summaries) == 0 {
+		readiness.Blockers = append(readiness.Blockers, "model is not available")
+		return readiness
+	}
+	modelSummary := summaries[0]
+	if readiness.NodeID == "" {
+		for _, install := range modelSummary.Installed {
+			if install.GenerateReady {
+				readiness.NodeID = install.NodeID
+				break
+			}
+		}
+	}
+	if readiness.NodeID == "" {
+		readiness.Blockers = append(readiness.Blockers, "select a worker with this model installed")
+	} else if !modelInstalledOn(modelSummary, readiness.NodeID) {
+		readiness.Blockers = append(readiness.Blockers, "model is not installed on the selected worker")
+	} else if !modelGeneratableOn(modelSummary, readiness.NodeID) {
+		if reason := modelGenerateBlockedReason(modelSummary, readiness.NodeID); reason != "" {
+			readiness.Blockers = append(readiness.Blockers, reason)
+		} else {
+			readiness.Blockers = append(readiness.Blockers, "selected worker cannot generate this model")
+		}
+	}
+	readiness.Ready = len(readiness.Blockers) == 0
+	return readiness
 }
 
 func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *http.Request, model models.Model) {
@@ -7957,10 +8018,28 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         setChatSubmitting(false);
       });
     }
-    function smokeRPCPoolForChat() {
-      if (modelStatus) modelStatus.innerText = "Checking RPC pool before distributed generate...";
-      return fetch("/v1/runtime/rpc-pool/smoke?timeout_ms=1000", {
-        method: "POST"
+    function checkDistributedRPCReadiness(modelID, nodeID) {
+      if (modelStatus) modelStatus.innerText = "Checking distributed RPC readiness...";
+      var params = new URLSearchParams();
+      if (nodeID) params.set("node_id", nodeID);
+      return fetch("/v1/models/" + encodeURIComponent(modelID) + "/distributed-rpc-readiness?" + params.toString()).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(payload) {
+        if (!payload.ready) {
+          throw new Error((payload.blockers || []).join("; ") || "distributed RPC is not ready");
+        }
+        return payload;
+      });
+    }
+    function smokeRPCPoolForChat(modelID, nodeID) {
+      return checkDistributedRPCReadiness(modelID, nodeID).then(function() {
+        if (modelStatus) modelStatus.innerText = "Checking RPC pool network reachability...";
+        return fetch("/v1/runtime/rpc-pool/smoke?timeout_ms=1000", {
+          method: "POST"
+        });
       }).then(function(response) {
         return response.json().then(function(payload) {
           if (!response.ok || !payload.runnable_now) {
@@ -8222,7 +8301,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         var maxTokens = parseInt(chatMaxTokens && chatMaxTokens.value ? chatMaxTokens.value : "512", 10);
         if (!Number.isFinite(maxTokens) || maxTokens < 16) maxTokens = 512;
         if (maxTokens > 2048) maxTokens = 2048;
-        (useRPC ? smokeRPCPoolForChat() : Promise.resolve(null)).then(function() {
+        (useRPC ? smokeRPCPoolForChat(modelID, nodeID) : Promise.resolve(null)).then(function() {
           appendChatMessage("user", prompt);
           chatForm.elements.prompt.value = "";
           return submitChatGenerate(modelID, nodeID, prompt, useRPC, maxTokens);
