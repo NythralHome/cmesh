@@ -36,6 +36,23 @@ type DistributedRPCBackend struct {
 	Error        string `json:"error,omitempty"`
 }
 
+type DistributedRPCExecutionResult struct {
+	Protocol          string   `json:"protocol"`
+	ProtocolVersion   int      `json:"protocol_version"`
+	PlanSchemaVersion int      `json:"plan_schema_version"`
+	PlanID            string   `json:"plan_id,omitempty"`
+	Kind              string   `json:"kind"`
+	ModelID           string   `json:"model_id"`
+	Output            string   `json:"output"`
+	Runtime           string   `json:"runtime"`
+	RuntimeVersion    string   `json:"runtime_version,omitempty"`
+	WorkerRuntime     string   `json:"worker_runtime"`
+	RPCEndpoints      []string `json:"rpc_endpoints"`
+	RPCEndpointCount  int      `json:"rpc_endpoint_count"`
+	DurationMS        int64    `json:"duration_ms"`
+	CompletedAt       string   `json:"completed_at,omitempty"`
+}
+
 func ValidateDistributedRPCExecutionPlan(plan DistributedRPCExecutionPlan, modelID string, coordinatorNodeID string) error {
 	if strings.TrimSpace(plan.Protocol) == "" {
 		return fmt.Errorf("execution_plan.protocol is required")
@@ -84,6 +101,46 @@ func ValidateDistributedRPCExecutionPlan(plan DistributedRPCExecutionPlan, model
 		}
 		if strings.TrimSpace(backend.NodeID) == "" {
 			return fmt.Errorf("execution_plan backend %q has empty node_id", endpoint)
+		}
+	}
+	return nil
+}
+
+func ValidateDistributedRPCExecutionResult(result DistributedRPCExecutionResult, plan DistributedRPCExecutionPlan) error {
+	if result.Protocol != DistributedRPCProtocol {
+		return fmt.Errorf("unsupported distributed rpc result protocol %q", result.Protocol)
+	}
+	if result.ProtocolVersion != DistributedRPCProtocolVersion {
+		return fmt.Errorf("unsupported distributed rpc result protocol_version %d", result.ProtocolVersion)
+	}
+	if result.PlanSchemaVersion != DistributedRPCPlanSchemaVersion {
+		return fmt.Errorf("unsupported distributed rpc result plan_schema_version %d", result.PlanSchemaVersion)
+	}
+	if strings.TrimSpace(result.Kind) == "" {
+		return fmt.Errorf("execution_result.kind is required")
+	}
+	if strings.TrimSpace(result.ModelID) == "" {
+		return fmt.Errorf("execution_result.model_id is required")
+	}
+	if strings.TrimSpace(result.Output) == "" {
+		return fmt.Errorf("execution_result.output is required")
+	}
+	if len(cleanRPCEndpoints(result.RPCEndpoints)) == 0 {
+		return fmt.Errorf("execution_result.rpc_endpoints is required")
+	}
+	if plan.ID != "" && result.PlanID != "" && result.PlanID != plan.ID {
+		return fmt.Errorf("execution_result.plan_id %q does not match plan id %q", result.PlanID, plan.ID)
+	}
+	if plan.ModelID != "" && result.ModelID != plan.ModelID {
+		return fmt.Errorf("execution_result.model_id %q does not match plan model_id %q", result.ModelID, plan.ModelID)
+	}
+	planEndpoints := map[string]bool{}
+	for _, endpoint := range cleanRPCEndpoints(plan.RPCEndpoints) {
+		planEndpoints[endpoint] = true
+	}
+	for _, endpoint := range cleanRPCEndpoints(result.RPCEndpoints) {
+		if !planEndpoints[endpoint] {
+			return fmt.Errorf("execution_result endpoint %q is not listed in execution plan", endpoint)
 		}
 	}
 	return nil

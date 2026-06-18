@@ -70,3 +70,61 @@ func TestValidateDistributedRPCExecutionPlanRejectsBackendOutsideEndpoints(t *te
 		t.Fatal("expected backend endpoint validation error")
 	}
 }
+
+func TestValidateDistributedRPCExecutionResult(t *testing.T) {
+	plan := validDistributedRPCPlanForTest()
+	result := DistributedRPCExecutionResult{
+		Protocol:          DistributedRPCProtocol,
+		ProtocolVersion:   DistributedRPCProtocolVersion,
+		PlanSchemaVersion: DistributedRPCPlanSchemaVersion,
+		PlanID:            plan.ID,
+		Kind:              "model.generate.distributed_rpc",
+		ModelID:           plan.ModelID,
+		Output:            "hello",
+		Runtime:           "llama.cpp",
+		WorkerRuntime:     "darwin/arm64",
+		RPCEndpoints:      plan.RPCEndpoints,
+		RPCEndpointCount:  len(plan.RPCEndpoints),
+		DurationMS:        42,
+	}
+	if err := ValidateDistributedRPCExecutionResult(result, plan); err != nil {
+		t.Fatalf("expected valid result, got %v", err)
+	}
+}
+
+func TestValidateDistributedRPCExecutionResultRejectsEndpointOutsidePlan(t *testing.T) {
+	plan := validDistributedRPCPlanForTest()
+	result := DistributedRPCExecutionResult{
+		Protocol:          DistributedRPCProtocol,
+		ProtocolVersion:   DistributedRPCProtocolVersion,
+		PlanSchemaVersion: DistributedRPCPlanSchemaVersion,
+		PlanID:            plan.ID,
+		Kind:              "model.generate.distributed_rpc",
+		ModelID:           plan.ModelID,
+		Output:            "hello",
+		Runtime:           "llama.cpp",
+		WorkerRuntime:     "darwin/arm64",
+		RPCEndpoints:      []string{"127.0.0.1:50053"},
+		RPCEndpointCount:  1,
+	}
+	if err := ValidateDistributedRPCExecutionResult(result, plan); err == nil {
+		t.Fatal("expected endpoint validation error")
+	}
+}
+
+func validDistributedRPCPlanForTest() DistributedRPCExecutionPlan {
+	return DistributedRPCExecutionPlan{
+		ID:                "plan-test",
+		Protocol:          DistributedRPCProtocol,
+		ProtocolVersion:   DistributedRPCProtocolVersion,
+		PlanSchemaVersion: DistributedRPCPlanSchemaVersion,
+		Mode:              "llama.cpp-rpc",
+		ModelID:           "model-a",
+		CoordinatorNodeID: "node-a",
+		RPCEndpoints:      []string{"127.0.0.1:50052"},
+		Backends: []DistributedRPCBackend{{
+			NodeID:   "node-b",
+			Endpoint: "127.0.0.1:50052",
+		}},
+	}
+}

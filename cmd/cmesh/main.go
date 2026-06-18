@@ -1117,15 +1117,16 @@ type modelCleanupResult struct {
 }
 
 type modelGenerateResult struct {
-	Kind             string   `json:"kind"`
-	ModelID          string   `json:"model_id"`
-	Output           string   `json:"output"`
-	Tokens           int      `json:"tokens,omitempty"`
-	WorkerRuntime    string   `json:"worker_runtime"`
-	ModelRuntime     string   `json:"model_runtime"`
-	RuntimeVersion   string   `json:"runtime_version,omitempty"`
-	RPCEndpoints     []string `json:"rpc_endpoints,omitempty"`
-	RPCEndpointCount int      `json:"rpc_endpoint_count,omitempty"`
+	Kind             string                                 `json:"kind"`
+	ModelID          string                                 `json:"model_id"`
+	Output           string                                 `json:"output"`
+	Tokens           int                                    `json:"tokens,omitempty"`
+	WorkerRuntime    string                                 `json:"worker_runtime"`
+	ModelRuntime     string                                 `json:"model_runtime"`
+	RuntimeVersion   string                                 `json:"runtime_version,omitempty"`
+	RPCEndpoints     []string                               `json:"rpc_endpoints,omitempty"`
+	RPCEndpointCount int                                    `json:"rpc_endpoint_count,omitempty"`
+	ExecutionResult  protocol.DistributedRPCExecutionResult `json:"execution_result,omitempty"`
 }
 
 func executeModelInstallJob(input string, cacheDir string, progress func(int64, int64)) (string, error) {
@@ -1488,7 +1489,7 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	if err := json.Unmarshal([]byte(input), &req); err != nil {
 		return "", fmt.Errorf("invalid model generate input: %w", err)
 	}
-	return executeModelGenerate(req, cacheDir, nil, string(models.JobGenerate))
+	return executeModelGenerate(req, cacheDir, nil, string(models.JobGenerate), protocol.DistributedRPCExecutionPlan{})
 }
 
 func executeModelDistributedRPCGenerateJob(input string, cacheDir string, nodeID string) (string, error) {
@@ -1508,10 +1509,10 @@ func executeModelDistributedRPCGenerateJob(input string, cacheDir string, nodeID
 		MaxTokens:      req.MaxTokens,
 		Temperature:    req.Temperature,
 	}
-	return executeModelGenerate(generateReq, cacheDir, req.ExecutionPlan.RPCEndpoints, string(models.JobGenerateDistributedRPC))
+	return executeModelGenerate(generateReq, cacheDir, req.ExecutionPlan.RPCEndpoints, string(models.JobGenerateDistributedRPC), req.ExecutionPlan)
 }
 
-func executeModelGenerate(req models.GenerateInput, cacheDir string, rpcEndpoints []string, resultKind string) (string, error) {
+func executeModelGenerate(req models.GenerateInput, cacheDir string, rpcEndpoints []string, resultKind string, executionPlan protocol.DistributedRPCExecutionPlan) (string, error) {
 	if strings.TrimSpace(req.Prompt) == "" {
 		return "", fmt.Errorf("prompt is required")
 	}
@@ -1574,7 +1575,9 @@ func executeModelGenerate(req models.GenerateInput, cacheDir string, rpcEndpoint
 	stderr.limit = 16 * 1024
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	started := time.Now()
 	err = cmd.Run()
+	durationMS := time.Since(started).Milliseconds()
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("%s timed out after %s", model.Runtime, timeout)
 	}
@@ -1597,6 +1600,27 @@ func executeModelGenerate(req models.GenerateInput, cacheDir string, rpcEndpoint
 		RuntimeVersion:   runtimeStatus.Version,
 		RPCEndpoints:     cleanRPCEndpoints,
 		RPCEndpointCount: len(cleanRPCEndpoints),
+	}
+	if resultKind == string(models.JobGenerateDistributedRPC) {
+		result.ExecutionResult = protocol.DistributedRPCExecutionResult{
+			Protocol:          protocol.DistributedRPCProtocol,
+			ProtocolVersion:   protocol.DistributedRPCProtocolVersion,
+			PlanSchemaVersion: protocol.DistributedRPCPlanSchemaVersion,
+			PlanID:            executionPlan.ID,
+			Kind:              resultKind,
+			ModelID:           model.ID,
+			Output:            text,
+			Runtime:           string(model.Runtime),
+			RuntimeVersion:    runtimeStatus.Version,
+			WorkerRuntime:     result.WorkerRuntime,
+			RPCEndpoints:      cleanRPCEndpoints,
+			RPCEndpointCount:  len(cleanRPCEndpoints),
+			DurationMS:        durationMS,
+			CompletedAt:       time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := protocol.ValidateDistributedRPCExecutionResult(result.ExecutionResult, executionPlan); err != nil {
+			return "", fmt.Errorf("invalid distributed rpc execution result: %w", err)
+		}
 	}
 	body, err := json.Marshal(result)
 	return string(body), err
