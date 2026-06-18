@@ -43,6 +43,8 @@ type Server struct {
 	snapshots               map[string]CapacitySnapshot
 }
 
+const rpcEndpointQuarantineConsecutiveFailures = 3
+
 type ServerOptions struct {
 	Addr                  string
 	JoinToken             string
@@ -661,7 +663,7 @@ func (s *Server) handleRuntimeRPCPool(w http.ResponseWriter, r *http.Request) {
 	}
 	summary, workers, endpoints := runtimeRPCPoolReport(s.state.Nodes())
 	health := s.state.RPCHealth()
-	rankedEndpoints := rankRPCEndpoints(endpoints, health)
+	rankedEndpoints := usableRPCEndpoints(endpoints, health, false)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"summary":           summary,
 		"workers":           workers,
@@ -687,7 +689,7 @@ func (s *Server) handleRuntimeRPCPoolSmoke(w http.ResponseWriter, r *http.Reques
 		timeoutMS = 5000
 	}
 	_, workers, endpoints := runtimeRPCPoolReport(s.state.Nodes())
-	report := smokeRuntimeRPCEndpoints(r.Context(), rankRPCEndpoints(endpoints, s.state.RPCHealth()), time.Duration(timeoutMS)*time.Millisecond)
+	report := smokeRuntimeRPCEndpoints(r.Context(), usableRPCEndpoints(endpoints, s.state.RPCHealth(), true), time.Duration(timeoutMS)*time.Millisecond)
 	s.recordRPCHealthReport(workers, report)
 	report.TimeoutMS = timeoutMS
 	status := http.StatusOK
@@ -809,13 +811,7 @@ func rankRPCEndpoints(endpoints []string, health []RPCHealthRecord) []string {
 	if len(out) <= 1 {
 		return out
 	}
-	healthByEndpoint := make(map[string]RPCHealthRecord, len(health))
-	for _, record := range health {
-		endpoint := strings.TrimSpace(record.Endpoint)
-		if endpoint != "" {
-			healthByEndpoint[endpoint] = record
-		}
-	}
+	healthByEndpoint := rpcHealthByEndpoint(health)
 	sort.SliceStable(out, func(i, j int) bool {
 		left, leftKnown := healthByEndpoint[out[i]]
 		right, rightKnown := healthByEndpoint[out[j]]
@@ -844,6 +840,53 @@ func rankRPCEndpoints(endpoints []string, health []RPCHealthRecord) []string {
 		return out[i] < out[j]
 	})
 	return out
+}
+
+func usableRPCEndpoints(endpoints []string, health []RPCHealthRecord, includeQuarantined bool) []string {
+	ranked := rankRPCEndpoints(endpoints, health)
+	if includeQuarantined {
+		return ranked
+	}
+	healthByEndpoint := rpcHealthByEndpoint(health)
+	out := make([]string, 0, len(ranked))
+	for _, endpoint := range ranked {
+		record, ok := healthByEndpoint[endpoint]
+		if ok && rpcEndpointQuarantined(record) {
+			continue
+		}
+		out = append(out, endpoint)
+	}
+	return out
+}
+
+func rpcHealthByEndpoint(health []RPCHealthRecord) map[string]RPCHealthRecord {
+	out := make(map[string]RPCHealthRecord, len(health))
+	for _, record := range health {
+		endpoint := strings.TrimSpace(record.Endpoint)
+		if endpoint != "" {
+			out[endpoint] = record
+		}
+	}
+	return out
+}
+
+func quarantinedRPCEndpoints(endpoints []string, health []RPCHealthRecord) []string {
+	endpointSet := map[string]bool{}
+	for _, endpoint := range cleanEndpointList(endpoints) {
+		endpointSet[endpoint] = true
+	}
+	out := make([]string, 0)
+	for _, record := range health {
+		if endpointSet[record.Endpoint] && rpcEndpointQuarantined(record) {
+			out = append(out, record.Endpoint)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func rpcEndpointQuarantined(record RPCHealthRecord) bool {
+	return !record.Ready && record.ConsecutiveFailures >= rpcEndpointQuarantineConsecutiveFailures
 }
 
 func rpcHealthRank(record RPCHealthRecord, known bool) int {
@@ -1567,15 +1610,19 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 		ModelID:      model.ID,
 		Mode:         "llama.cpp-rpc",
 		RPCPool:      summary,
-		RPCEndpoints: rankRPCEndpoints(endpoints, health),
+		RPCEndpoints: usableRPCEndpoints(endpoints, health, false),
+	}
+	if quarantined := quarantinedRPCEndpoints(endpoints, health); len(quarantined) > 0 && !checkHealth {
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf("%d llama.cpp rpc endpoint(s) are quarantined after repeated health failures", len(quarantined)))
 	}
 	healthByEndpoint := map[string]RuntimeRPCSmokeResult{}
+	recordByEndpoint := rpcHealthByEndpoint(health)
 	if checkHealth && len(endpoints) > 0 {
 		if healthTimeout <= 0 {
 			healthTimeout = time.Second
 		}
 		plan.HealthChecked = true
-		report := smokeRuntimeRPCEndpoints(ctx, rankRPCEndpoints(endpoints, health), healthTimeout)
+		report := smokeRuntimeRPCEndpoints(ctx, usableRPCEndpoints(endpoints, health, true), healthTimeout)
 		s.recordRPCHealthReport(workers, report)
 		readyEndpoints := make([]string, 0, len(endpoints))
 		for _, result := range report.Results {
@@ -1584,7 +1631,7 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 				readyEndpoints = append(readyEndpoints, result.Endpoint)
 			}
 		}
-		plan.RPCEndpoints = rankRPCEndpoints(readyEndpoints, s.state.RPCHealth())
+		plan.RPCEndpoints = usableRPCEndpoints(readyEndpoints, s.state.RPCHealth(), false)
 		if report.Ready == 0 {
 			plan.Blockers = append(plan.Blockers, "no reachable llama.cpp rpc endpoints passed health check")
 		}
@@ -1603,6 +1650,12 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 			Runtime:      worker.Runtime,
 			Endpoint:     endpoint,
 			HealthStatus: "unchecked",
+		}
+		if !plan.HealthChecked {
+			if record, ok := recordByEndpoint[endpoint]; ok && rpcEndpointQuarantined(record) {
+				backend.HealthStatus = "quarantined"
+				backend.Error = fmt.Sprintf("endpoint has %d consecutive health failures", record.ConsecutiveFailures)
+			}
 		}
 		if plan.HealthChecked {
 			backend.HealthStatus = "failed"

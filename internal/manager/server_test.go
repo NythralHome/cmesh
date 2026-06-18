@@ -2321,6 +2321,94 @@ func TestRankRPCEndpointsUsesHealthScore(t *testing.T) {
 	}
 }
 
+func TestUsableRPCEndpointsExcludesQuarantined(t *testing.T) {
+	endpoints := []string{"10.0.0.10:50052", "10.0.0.20:50052"}
+	health := []RPCHealthRecord{
+		{Endpoint: "10.0.0.10:50052", Ready: false, Failures: 5, ConsecutiveFailures: rpcEndpointQuarantineConsecutiveFailures},
+		{Endpoint: "10.0.0.20:50052", Ready: true, Successes: 1, LastLatencyMS: 10},
+	}
+
+	if got := usableRPCEndpoints(endpoints, health, false); !reflect.DeepEqual(got, []string{"10.0.0.20:50052"}) {
+		t.Fatalf("expected quarantined endpoint excluded, got %#v", got)
+	}
+	if got := usableRPCEndpoints(endpoints, health, true); !reflect.DeepEqual(got, []string{"10.0.0.20:50052", "10.0.0.10:50052"}) {
+		t.Fatalf("expected explicit health check to include quarantined endpoint, got %#v", got)
+	}
+}
+
+func TestModelDistributedRPCPlanExcludesQuarantinedEndpoints(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	join := joinWorkerWithResourcesForTest(t, srv, "rpc-plan-worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Models: []cluster.ModelResource{{
+			ID:      "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:    "Qwen2.5 0.5B Instruct",
+			Runtime: "llama.cpp",
+			Path:    "/tmp/qwen.gguf",
+			Ready:   true,
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: "10.0.0.10:50052",
+			}},
+		}},
+	})
+	joinWorkerWithResourcesForTest(t, srv, "rpc-plan-worker-b", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: "10.0.0.20:50052",
+			}},
+		}},
+	})
+	for i := 0; i < rpcEndpointQuarantineConsecutiveFailures; i++ {
+		state.PutRPCHealth(RPCHealthUpdate{
+			Endpoint: "10.0.0.20:50052",
+			Ready:    false,
+			Error:    "connection refused",
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/distributed-rpc-plan?node_id="+join.NodeID, nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var plan ModelDistributedRPCPlan
+	if err := json.Unmarshal(rec.Body.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.RPCEndpoints) != 1 || plan.RPCEndpoints[0] != "10.0.0.10:50052" {
+		t.Fatalf("expected quarantined endpoint excluded from plan, got %#v", plan.RPCEndpoints)
+	}
+	if len(plan.Warnings) == 0 {
+		t.Fatalf("expected quarantine warning, got %#v", plan)
+	}
+	var sawQuarantinedBackend bool
+	for _, backend := range plan.Backends {
+		if backend.Endpoint == "10.0.0.20:50052" && backend.HealthStatus == "quarantined" {
+			sawQuarantinedBackend = true
+		}
+	}
+	if !sawQuarantinedBackend {
+		t.Fatalf("expected quarantined backend marker, got %#v", plan.Backends)
+	}
+}
+
 func TestModelDistributedRPCPlanEndpoint(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
