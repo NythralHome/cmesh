@@ -1497,6 +1497,13 @@ func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusAccepted, result)
+	case "prefill":
+		result, err := startCDIPPrefill(s.state, parts[0])
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
 	case "mock-run":
 		result, err := runCDIPMockCoordinator(s.state, parts[0])
 		if err != nil {

@@ -76,6 +76,12 @@ type CDIPPrepareResult struct {
 	Messages  []cdip.StagePrepare `json:"messages"`
 }
 
+type CDIPCommandResult struct {
+	ParentJob jobs.Job            `json:"parent_job"`
+	StageJobs []jobs.Job          `json:"stage_jobs"`
+	Messages  []cdip.StageCommand `json:"messages"`
+}
+
 func prepareCDIPDistributedJob(store Store, parentJobID string) (CDIPPrepareResult, error) {
 	parent, ok := store.Job(parentJobID)
 	if !ok || parent.Type != models.JobGenerateDistributed {
@@ -117,6 +123,48 @@ func prepareCDIPDistributedJob(store Store, parentJobID string) (CDIPPrepareResu
 		}
 	}
 	return CDIPPrepareResult{
+		ParentJob: parent,
+		StageJobs: cdipStageJobsForParent(store.Jobs(), parent.ID),
+		Messages:  messages,
+	}, nil
+}
+
+func startCDIPPrefill(store Store, parentJobID string) (CDIPCommandResult, error) {
+	parent, ok := store.Job(parentJobID)
+	if !ok || parent.Type != models.JobGenerateDistributed {
+		return CDIPCommandResult{}, fmt.Errorf("distributed parent job not found")
+	}
+	if parent.Status == jobs.StatusSucceeded || parent.Status == jobs.StatusFailed || parent.Status == jobs.StatusCanceled {
+		return CDIPCommandResult{}, fmt.Errorf("distributed parent job is already terminal")
+	}
+	stages := cdipStageJobsForParent(store.Jobs(), parent.ID)
+	if len(stages) < 2 {
+		return CDIPCommandResult{}, fmt.Errorf("distributed parent job has no stage graph")
+	}
+	for _, stageJob := range stages {
+		if stageJob.CDIPState != cdip.StageReady {
+			return CDIPCommandResult{}, fmt.Errorf("stage %s is %s, expected %s", stageJob.ID, stageJob.CDIPState, cdip.StageReady)
+		}
+	}
+	messages := make([]cdip.StageCommand, 0, len(stages))
+	for _, stageJob := range stages {
+		msg := cdip.StageCommand{
+			Envelope:    cdip.NewEnvelope(cdip.MessageStagePrefill),
+			ParentJobID: parent.ID,
+			StageJobID:  stageJob.ID,
+			StageIndex:  stageJob.CDIPStageIndex,
+		}
+		if err := msg.Validate(cdip.MessageStagePrefill); err != nil {
+			return CDIPCommandResult{}, fmt.Errorf("invalid stage.prefill for %s: %w", stageJob.ID, err)
+		}
+		messages = append(messages, msg)
+	}
+	for _, stageJob := range stages {
+		if _, ok := store.UpdateCDIPStageState(stageJob.ID, cdip.StagePrefill, "coordinator sent stage.prefill"); !ok {
+			return CDIPCommandResult{}, fmt.Errorf("failed to prefill stage %s", stageJob.ID)
+		}
+	}
+	return CDIPCommandResult{
 		ParentJob: parent,
 		StageJobs: cdipStageJobsForParent(store.Jobs(), parent.ID),
 		Messages:  messages,

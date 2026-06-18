@@ -280,6 +280,38 @@ func (m StagePrepare) Validate() error {
 	return nil
 }
 
+type StageCommand struct {
+	Envelope
+	ParentJobID string `json:"parent_job_id"`
+	StageJobID  string `json:"stage_job_id"`
+	StageIndex  int    `json:"stage_index"`
+	Step        uint64 `json:"step,omitempty"`
+}
+
+func (m StageCommand) Validate(expected MessageType) error {
+	if err := m.Envelope.Validate(); err != nil {
+		return err
+	}
+	if m.Type != expected {
+		return fmt.Errorf("expected %s message, got %s", expected, m.Type)
+	}
+	switch expected {
+	case MessageStagePrefill, MessageStageDecode, MessageStageComplete, MessageStageAbort:
+	default:
+		return fmt.Errorf("message type %s is not a stage command", expected)
+	}
+	if strings.TrimSpace(m.ParentJobID) == "" {
+		return errors.New("parent_job_id is required")
+	}
+	if strings.TrimSpace(m.StageJobID) == "" {
+		return errors.New("stage_job_id is required")
+	}
+	if m.StageIndex < 0 {
+		return errors.New("stage_index must be non-negative")
+	}
+	return nil
+}
+
 type StageState string
 
 const (

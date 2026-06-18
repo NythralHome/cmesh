@@ -151,6 +151,25 @@ func TestStagePrepareValidation(t *testing.T) {
 	}
 }
 
+func TestStageCommandValidation(t *testing.T) {
+	msg := StageCommand{
+		Envelope:    NewEnvelope(MessageStagePrefill),
+		ParentJobID: "job-parent",
+		StageJobID:  "job-stage",
+		StageIndex:  1,
+	}
+	if err := msg.Validate(MessageStagePrefill); err != nil {
+		t.Fatal(err)
+	}
+	if err := msg.Validate(MessageStageDecode); err == nil || !strings.Contains(err.Error(), "expected") {
+		t.Fatalf("expected message type mismatch, got %v", err)
+	}
+	msg.StageIndex = -1
+	if err := msg.Validate(MessageStagePrefill); err == nil || !strings.Contains(err.Error(), "stage_index") {
+		t.Fatalf("expected stage_index error, got %v", err)
+	}
+}
+
 func TestStageLifecycleTransitions(t *testing.T) {
 	valid := []struct {
 		from StageState

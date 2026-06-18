@@ -484,6 +484,91 @@ func TestCDIPStageReadyCompletionUpdatesLifecycle(t *testing.T) {
 	}
 }
 
+func TestCDIPPrefillEndpointRequiresReadyStages(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	parent, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerateDistributed,
+		Input:       `{"model_id":"qwen2.5-7b-instruct-q4-k-m","prompt":"hello"}`,
+		RequestedBy: "test",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, stateValue := range []cdip.StageState{cdip.StageReady, cdip.StagePreparing} {
+		_, err := state.CreateJob(jobs.CreateRequest{
+			Type:            models.JobGenerateStage,
+			Input:           `{"model_id":"qwen2.5-7b-instruct-q4-k-m"}`,
+			RequestedBy:     "distributed-coordinator:" + parent.ID,
+			AssignedTo:      []string{"node-a", "node-b"}[index],
+			CDIPState:       stateValue,
+			CDIPParentJobID: parent.ID,
+			CDIPStageIndex:  index,
+			NoAutoAssign:    true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+parent.ID+"/prefill", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCDIPPrefillEndpointBuildsStagePrefillMessages(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	parent, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerateDistributed,
+		Input:       `{"model_id":"qwen2.5-7b-instruct-q4-k-m","prompt":"hello"}`,
+		RequestedBy: "test",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, nodeID := range []string{"node-a", "node-b"} {
+		_, err := state.CreateJob(jobs.CreateRequest{
+			Type:            models.JobGenerateStage,
+			Input:           `{"model_id":"qwen2.5-7b-instruct-q4-k-m"}`,
+			RequestedBy:     "distributed-coordinator:" + parent.ID,
+			AssignedTo:      nodeID,
+			CDIPState:       cdip.StageReady,
+			CDIPParentJobID: parent.ID,
+			CDIPStageIndex:  index,
+			NoAutoAssign:    true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+parent.ID+"/prefill", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var result CDIPCommandResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) != 2 || len(result.StageJobs) != 2 {
+		t.Fatalf("unexpected prefill result: %#v", result)
+	}
+	for i, msg := range result.Messages {
+		if err := msg.Validate(cdip.MessageStagePrefill); err != nil {
+			t.Fatal(err)
+		}
+		if msg.StageIndex != i || result.StageJobs[i].CDIPState != cdip.StagePrefill {
+			t.Fatalf("expected stage %d prefill, got msg=%#v job=%#v", i, msg, result.StageJobs[i])
+		}
+	}
+}
+
 func TestDistributedStageJobRequestsBuildPipelineTopology(t *testing.T) {
 	parent := jobs.Job{ID: "job-parent", Type: models.JobGenerateDistributed}
 	input := models.DistributedGenerateInput{
