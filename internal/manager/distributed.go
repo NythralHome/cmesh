@@ -263,6 +263,66 @@ func startCDIPDecode(store Store, bus transport.ActivationTransport, parentJobID
 	}, nil
 }
 
+func completeCDIPDistributedJob(store Store, parentJobID string, output string) (CDIPCommandResult, error) {
+	parent, ok := store.Job(parentJobID)
+	if !ok || parent.Type != models.JobGenerateDistributed {
+		return CDIPCommandResult{}, fmt.Errorf("distributed parent job not found")
+	}
+	if parent.Status == jobs.StatusSucceeded || parent.Status == jobs.StatusFailed || parent.Status == jobs.StatusCanceled {
+		return CDIPCommandResult{}, fmt.Errorf("distributed parent job is already terminal")
+	}
+	stages := cdipStageJobsForParent(store.Jobs(), parent.ID)
+	if len(stages) < 2 {
+		return CDIPCommandResult{}, fmt.Errorf("distributed parent job has no stage graph")
+	}
+	for _, stageJob := range stages {
+		if stageJob.CDIPState != cdip.StageDecode {
+			return CDIPCommandResult{}, fmt.Errorf("stage %s is %s, expected %s", stageJob.ID, stageJob.CDIPState, cdip.StageDecode)
+		}
+	}
+	messages := make([]cdip.StageCommand, 0, len(stages))
+	for _, stageJob := range stages {
+		msg := cdip.StageCommand{
+			Envelope:    cdip.NewEnvelope(cdip.MessageStageComplete),
+			ParentJobID: parent.ID,
+			StageJobID:  stageJob.ID,
+			StageIndex:  stageJob.CDIPStageIndex,
+		}
+		if err := msg.Validate(cdip.MessageStageComplete); err != nil {
+			return CDIPCommandResult{}, fmt.Errorf("invalid stage.complete for %s: %w", stageJob.ID, err)
+		}
+		messages = append(messages, msg)
+	}
+	for _, stageJob := range stages {
+		if _, ok := store.UpdateCDIPStageState(stageJob.ID, cdip.StageCompleted, "coordinator sent stage.complete"); !ok {
+			return CDIPCommandResult{}, fmt.Errorf("failed to complete stage %s", stageJob.ID)
+		}
+	}
+	if strings.TrimSpace(output) == "" {
+		output = "CDIP distributed inference completed"
+	}
+	resultBody, err := json.Marshal(map[string]any{
+		"kind":        "cdip.distributed_result",
+		"protocol":    cdip.Protocol,
+		"version":     cdip.Version,
+		"parent_job":  parent.ID,
+		"stage_count": len(stages),
+		"output":      output,
+	})
+	if err != nil {
+		return CDIPCommandResult{}, err
+	}
+	parent, ok = store.CompleteCoordinatorJob(parent.ID, string(resultBody), "")
+	if !ok {
+		return CDIPCommandResult{}, fmt.Errorf("failed to complete distributed parent job")
+	}
+	return CDIPCommandResult{
+		ParentJob: parent,
+		StageJobs: cdipStageJobsForParent(store.Jobs(), parent.ID),
+		Messages:  messages,
+	}, nil
+}
+
 func runCDIPMockCoordinator(store Store, parentJobID string) (CDIPMockRunResult, error) {
 	parent, ok := store.Job(parentJobID)
 	if !ok || parent.Type != models.JobGenerateDistributed {

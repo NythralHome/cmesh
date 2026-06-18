@@ -1518,6 +1518,19 @@ func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusAccepted, result)
+	case "complete":
+		var req struct {
+			Output string `json:"output"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&req)
+		}
+		result, err := completeCDIPDistributedJob(s.state, parts[0], req.Output)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
 	case "mock-run":
 		result, err := runCDIPMockCoordinator(s.state, parts[0])
 		if err != nil {

@@ -662,6 +662,94 @@ func TestCDIPDecodeEndpointBuildsStageDecodeMessagesAndActivationFrames(t *testi
 	}
 }
 
+func TestCDIPCompleteEndpointRequiresDecodeStages(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	parent, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerateDistributed,
+		Input:       `{"model_id":"qwen2.5-7b-instruct-q4-k-m","prompt":"hello"}`,
+		RequestedBy: "test",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, stateValue := range []cdip.StageState{cdip.StageDecode, cdip.StagePrefill} {
+		_, err := state.CreateJob(jobs.CreateRequest{
+			Type:            models.JobGenerateStage,
+			Input:           `{"model_id":"qwen2.5-7b-instruct-q4-k-m"}`,
+			RequestedBy:     "distributed-coordinator:" + parent.ID,
+			AssignedTo:      []string{"node-a", "node-b"}[index],
+			CDIPState:       stateValue,
+			CDIPParentJobID: parent.ID,
+			CDIPStageIndex:  index,
+			NoAutoAssign:    true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+parent.ID+"/complete", strings.NewReader(`{"output":"done"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCDIPCompleteEndpointCompletesStagesAndParent(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	parent, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerateDistributed,
+		Input:       `{"model_id":"qwen2.5-7b-instruct-q4-k-m","prompt":"hello"}`,
+		RequestedBy: "test",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, nodeID := range []string{"node-a", "node-b", "node-c"} {
+		_, err := state.CreateJob(jobs.CreateRequest{
+			Type:            models.JobGenerateStage,
+			Input:           `{"model_id":"qwen2.5-7b-instruct-q4-k-m"}`,
+			RequestedBy:     "distributed-coordinator:" + parent.ID,
+			AssignedTo:      nodeID,
+			CDIPState:       cdip.StageDecode,
+			CDIPParentJobID: parent.ID,
+			CDIPStageIndex:  index,
+			NoAutoAssign:    true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+parent.ID+"/complete", strings.NewReader(`{"output":"distributed answer"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var result CDIPCommandResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ParentJob.Status != jobs.StatusSucceeded || !strings.Contains(result.ParentJob.Result, "distributed answer") {
+		t.Fatalf("expected completed parent job, got %#v", result.ParentJob)
+	}
+	if len(result.Messages) != 3 || len(result.StageJobs) != 3 {
+		t.Fatalf("unexpected complete result: %#v", result)
+	}
+	for i, msg := range result.Messages {
+		if err := msg.Validate(cdip.MessageStageComplete); err != nil {
+			t.Fatal(err)
+		}
+		if msg.StageIndex != i || result.StageJobs[i].CDIPState != cdip.StageCompleted || result.StageJobs[i].Status != jobs.StatusSucceeded {
+			t.Fatalf("expected stage %d completed, got msg=%#v job=%#v", i, msg, result.StageJobs[i])
+		}
+	}
+}
+
 func TestDistributedStageJobRequestsBuildPipelineTopology(t *testing.T) {
 	parent := jobs.Job{ID: "job-parent", Type: models.JobGenerateDistributed}
 	input := models.DistributedGenerateInput{
