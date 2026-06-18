@@ -25,11 +25,13 @@ type DiscoveryOptions struct {
 }
 
 type LlamaCPPRPCState struct {
-	Running   bool      `json:"running"`
-	Endpoint  string    `json:"endpoint"`
-	PID       int       `json:"pid,omitempty"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Running           bool      `json:"running"`
+	Endpoint          string    `json:"endpoint"`
+	BindEndpoint      string    `json:"bind_endpoint,omitempty"`
+	AdvertiseEndpoint string    `json:"advertise_endpoint,omitempty"`
+	PID               int       `json:"pid,omitempty"`
+	StartedAt         time.Time `json:"started_at,omitempty"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 func DiscoverLocal(options DiscoveryOptions) cluster.ResourceSnapshot {
@@ -79,6 +81,14 @@ func WriteLlamaCPPRPCState(cacheDir string, state LlamaCPPRPCState) error {
 		return nil
 	}
 	state.Endpoint = strings.TrimSpace(state.Endpoint)
+	state.BindEndpoint = strings.TrimSpace(state.BindEndpoint)
+	state.AdvertiseEndpoint = strings.TrimSpace(state.AdvertiseEndpoint)
+	if state.AdvertiseEndpoint == "" {
+		state.AdvertiseEndpoint = state.Endpoint
+	}
+	if state.Endpoint == "" {
+		state.Endpoint = state.AdvertiseEndpoint
+	}
 	state.UpdatedAt = time.Now().UTC()
 	path := LlamaCPPRPCStatePath(cacheDir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -118,6 +128,14 @@ func ReadLlamaCPPRPCState(cacheDir string) (LlamaCPPRPCState, bool) {
 		return LlamaCPPRPCState{}, false
 	}
 	state.Endpoint = strings.TrimSpace(state.Endpoint)
+	state.BindEndpoint = strings.TrimSpace(state.BindEndpoint)
+	state.AdvertiseEndpoint = strings.TrimSpace(state.AdvertiseEndpoint)
+	if state.AdvertiseEndpoint == "" {
+		state.AdvertiseEndpoint = state.Endpoint
+	}
+	if state.Endpoint == "" {
+		state.Endpoint = state.AdvertiseEndpoint
+	}
 	if !state.Running || state.Endpoint == "" {
 		return LlamaCPPRPCState{}, false
 	}

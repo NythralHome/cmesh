@@ -285,6 +285,20 @@ func TestLlamaCPPRPCArgs(t *testing.T) {
 	}
 }
 
+func TestRPCAdvertiseEndpointCanDifferFromBindEndpoint(t *testing.T) {
+	cfg := normalizeConfig(Config{
+		RPCHost:          "0.0.0.0",
+		RPCAdvertiseHost: "10.0.0.25",
+		RPCPort:          50052,
+	})
+	if got := rpcBindEndpoint(cfg); got != "0.0.0.0:50052" {
+		t.Fatalf("unexpected bind endpoint %q", got)
+	}
+	if got := rpcAdvertiseEndpoint(cfg); got != "10.0.0.25:50052" {
+		t.Fatalf("unexpected advertise endpoint %q", got)
+	}
+}
+
 func TestStopWorkerStopsProcess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-based process signal test is unix-only")
@@ -347,15 +361,16 @@ func TestStartStopLlamaCPPRPCServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	server.config = Config{
-		ManagerURL:     "https://cmesh.example.com",
-		NodeName:       "test-worker",
-		CPU:            1,
-		MemoryGB:       1,
-		DiskGB:         1,
-		RPCHost:        "127.0.0.1",
-		RPCPort:        50123,
-		RPCCache:       true,
-		WorkerCacheDir: filepath.Join(dir, "cache"),
+		ManagerURL:       "https://cmesh.example.com",
+		NodeName:         "test-worker",
+		CPU:              1,
+		MemoryGB:         1,
+		DiskGB:           1,
+		RPCHost:          "127.0.0.1",
+		RPCAdvertiseHost: "10.0.0.25",
+		RPCPort:          50123,
+		RPCCache:         true,
+		WorkerCacheDir:   filepath.Join(dir, "cache"),
 	}
 
 	if err := server.startLlamaCPPRPC(); err != nil {
@@ -365,11 +380,11 @@ func TestStartStopLlamaCPPRPCServer(t *testing.T) {
 	if !status.RPC.Running || status.RPC.PID == 0 {
 		t.Fatalf("expected rpc server running, got %+v", status.RPC)
 	}
-	if status.RPC.Endpoint != "127.0.0.1:50123" {
+	if status.RPC.Endpoint != "10.0.0.25:50123" {
 		t.Fatalf("expected rpc endpoint, got %+v", status.RPC)
 	}
 	state, ok := resources.ReadLlamaCPPRPCState(server.config.WorkerCacheDir)
-	if !ok || state.Endpoint != "127.0.0.1:50123" || state.PID == 0 {
+	if !ok || state.Endpoint != "10.0.0.25:50123" || state.BindEndpoint != "127.0.0.1:50123" || state.PID == 0 {
 		t.Fatalf("expected rpc state file, got ok=%v state=%+v", ok, state)
 	}
 	if err := server.stopLlamaCPPRPC(); err != nil {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,22 +24,25 @@ import (
 	"github.com/cmesh/cmesh/internal/workerstatus"
 )
 
+var inferredRPCAdvertiseHosts sync.Map
+
 type Config struct {
-	ManagerURL     string `json:"manager_url"`
-	JoinToken      string `json:"join_token"`
-	NodeName       string `json:"node_name"`
-	CPU            int    `json:"cpu"`
-	MemoryGB       int    `json:"memory_gb"`
-	DiskGB         int    `json:"disk_gb"`
-	GPUEnabled     bool   `json:"gpu_enabled"`
-	VRAMGB         int    `json:"vram_gb"`
-	JobSlots       int    `json:"job_slots"`
-	Benchmark      bool   `json:"benchmark"`
-	RPCHost        string `json:"rpc_host"`
-	RPCPort        int    `json:"rpc_port"`
-	RPCCache       bool   `json:"rpc_cache"`
-	WorkerBinary   string `json:"worker_binary"`
-	WorkerCacheDir string `json:"worker_cache_dir"`
+	ManagerURL       string `json:"manager_url"`
+	JoinToken        string `json:"join_token"`
+	NodeName         string `json:"node_name"`
+	CPU              int    `json:"cpu"`
+	MemoryGB         int    `json:"memory_gb"`
+	DiskGB           int    `json:"disk_gb"`
+	GPUEnabled       bool   `json:"gpu_enabled"`
+	VRAMGB           int    `json:"vram_gb"`
+	JobSlots         int    `json:"job_slots"`
+	Benchmark        bool   `json:"benchmark"`
+	RPCHost          string `json:"rpc_host"`
+	RPCAdvertiseHost string `json:"rpc_advertise_host"`
+	RPCPort          int    `json:"rpc_port"`
+	RPCCache         bool   `json:"rpc_cache"`
+	WorkerBinary     string `json:"worker_binary"`
+	WorkerCacheDir   string `json:"worker_cache_dir"`
 }
 
 type ProcessStatus struct {
@@ -448,7 +452,7 @@ func (s *Server) startLlamaCPPRPC() error {
 		}
 		return fmt.Errorf("llama.cpp runtime is not ready")
 	}
-	probe := runtimes.NewLlamaCPPRPCRuntime(runtimeStatus.BinaryPath, rpcEndpoint(cfg)).Probe(context.Background())
+	probe := runtimes.NewLlamaCPPRPCRuntime(runtimeStatus.BinaryPath, rpcBindEndpoint(cfg)).Probe(context.Background())
 	if !probe.Ready {
 		return fmt.Errorf("llama.cpp rpc runtime is not ready: %s", strings.Join(probe.Blockers, "; "))
 	}
@@ -470,16 +474,18 @@ func (s *Server) startLlamaCPPRPC() error {
 		return err
 	}
 	now := time.Now().UTC()
-	endpoint := rpcEndpoint(cfg)
+	endpoint := rpcAdvertiseEndpoint(cfg)
 	s.rpcCmd = cmd
 	s.rpcStartedAt = &now
 	s.rpcExitCode = nil
 	s.rpcLastError = ""
 	if err := resources.WriteLlamaCPPRPCState(cfg.WorkerCacheDir, resources.LlamaCPPRPCState{
-		Running:   true,
-		Endpoint:  endpoint,
-		PID:       cmd.Process.Pid,
-		StartedAt: now,
+		Running:           true,
+		Endpoint:          endpoint,
+		BindEndpoint:      rpcBindEndpoint(cfg),
+		AdvertiseEndpoint: endpoint,
+		PID:               cmd.Process.Pid,
+		StartedAt:         now,
 	}); err != nil {
 		_ = killWorkerProcess(cmd)
 		_ = cmd.Wait()
@@ -591,7 +597,7 @@ func (s *Server) status() Status {
 	defer s.mu.Unlock()
 	cfg := normalizeConfig(s.config)
 	runtimeStatus := runtimes.LlamaCPPStatus(cfg.WorkerCacheDir)
-	rpcRuntime := runtimes.NewLlamaCPPRPCRuntime(runtimeStatus.BinaryPath, rpcEndpoint(cfg)).Probe(context.Background())
+	rpcRuntime := runtimes.NewLlamaCPPRPCRuntime(runtimeStatus.BinaryPath, rpcBindEndpoint(cfg)).Probe(context.Background())
 	status := Status{
 		Running:   s.cmd != nil && s.cmd.Process != nil,
 		StartedAt: s.startedAt,
@@ -607,7 +613,7 @@ func (s *Server) status() Status {
 				LastError: s.rpcLastError,
 			},
 			Runtime:  rpcRuntime,
-			Endpoint: rpcEndpoint(cfg),
+			Endpoint: rpcAdvertiseEndpoint(cfg),
 		},
 		Models:     resources.DiscoverInstalledModels(cfg.WorkerCacheDir),
 		Config:     cfg,
@@ -663,7 +669,7 @@ func defaultConfig() Config {
 		VRAMGB:         0,
 		JobSlots:       1,
 		Benchmark:      true,
-		RPCHost:        "127.0.0.1",
+		RPCHost:        "0.0.0.0",
 		RPCPort:        50052,
 		RPCCache:       true,
 		WorkerCacheDir: defaultCacheDir(),
@@ -678,6 +684,7 @@ func normalizeConfig(cfg Config) Config {
 	cfg.WorkerBinary = strings.TrimSpace(cfg.WorkerBinary)
 	cfg.WorkerCacheDir = strings.TrimSpace(cfg.WorkerCacheDir)
 	cfg.RPCHost = strings.TrimSpace(cfg.RPCHost)
+	cfg.RPCAdvertiseHost = strings.TrimSpace(cfg.RPCAdvertiseHost)
 	if cfg.ManagerURL == "" {
 		cfg.ManagerURL = defaults.ManagerURL
 	}
@@ -698,6 +705,9 @@ func normalizeConfig(cfg Config) Config {
 	}
 	if cfg.RPCHost == "" {
 		cfg.RPCHost = defaults.RPCHost
+	}
+	if cfg.RPCAdvertiseHost == "" {
+		cfg.RPCAdvertiseHost = inferRPCAdvertiseHost(cfg.ManagerURL, cfg.RPCHost)
 	}
 	if cfg.RPCPort == 0 {
 		cfg.RPCPort = defaults.RPCPort
@@ -733,6 +743,9 @@ func validateConfig(cfg Config) error {
 func validateRPCConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.RPCHost) == "" {
 		return fmt.Errorf("rpc_host is required")
+	}
+	if strings.TrimSpace(cfg.RPCAdvertiseHost) == "" {
+		return fmt.Errorf("rpc_advertise_host is required")
 	}
 	if cfg.RPCPort <= 0 || cfg.RPCPort > 65535 {
 		return fmt.Errorf("rpc_port must be between 1 and 65535")
@@ -778,8 +791,67 @@ func llamaCPPRPCArgs(cfg Config) []string {
 	return args
 }
 
-func rpcEndpoint(cfg Config) string {
+func rpcBindEndpoint(cfg Config) string {
 	return net.JoinHostPort(cfg.RPCHost, strconv.Itoa(cfg.RPCPort))
+}
+
+func rpcAdvertiseEndpoint(cfg Config) string {
+	return net.JoinHostPort(cfg.RPCAdvertiseHost, strconv.Itoa(cfg.RPCPort))
+}
+
+func inferRPCAdvertiseHost(managerURL string, bindHost string) string {
+	cacheKey := strings.TrimSpace(managerURL) + "|" + strings.TrimSpace(bindHost)
+	if cached, ok := inferredRPCAdvertiseHosts.Load(cacheKey); ok {
+		if value, ok := cached.(string); ok && value != "" {
+			return value
+		}
+	}
+	inferred := inferRPCAdvertiseHostUncached(managerURL, bindHost)
+	inferredRPCAdvertiseHosts.Store(cacheKey, inferred)
+	return inferred
+}
+
+func inferRPCAdvertiseHostUncached(managerURL string, bindHost string) string {
+	bindHost = strings.TrimSpace(bindHost)
+	if bindHost != "" && bindHost != "0.0.0.0" && bindHost != "::" {
+		return bindHost
+	}
+	targetHost := "8.8.8.8"
+	targetPort := "80"
+	if parsed, err := url.Parse(strings.TrimSpace(managerURL)); err == nil && parsed.Host != "" {
+		host := parsed.Hostname()
+		port := parsed.Port()
+		if host != "" && !isLoopbackHost(host) {
+			targetHost = host
+			if port != "" {
+				targetPort = port
+			} else if parsed.Scheme == "https" {
+				targetPort = "443"
+			} else {
+				targetPort = "80"
+			}
+		}
+	}
+	conn, err := net.DialTimeout("udp", net.JoinHostPort(targetHost, targetPort), 500*time.Millisecond)
+	if err == nil {
+		defer conn.Close()
+		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok && addr.IP != nil && !addr.IP.IsUnspecified() {
+			return addr.IP.String()
+		}
+	}
+	if bindHost != "" && bindHost != "0.0.0.0" && bindHost != "::" {
+		return bindHost
+	}
+	return "127.0.0.1"
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func resolveWorkerBinary(configured string) (string, error) {

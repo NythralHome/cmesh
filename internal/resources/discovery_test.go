@@ -194,10 +194,12 @@ func TestLlamaCPPRPCStateRoundTrip(t *testing.T) {
 	cacheDir := t.TempDir()
 	startedAt := time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC)
 	if err := WriteLlamaCPPRPCState(cacheDir, LlamaCPPRPCState{
-		Running:   true,
-		Endpoint:  "127.0.0.1:50052",
-		PID:       1234,
-		StartedAt: startedAt,
+		Running:           true,
+		Endpoint:          "10.0.0.25:50052",
+		BindEndpoint:      "0.0.0.0:50052",
+		AdvertiseEndpoint: "10.0.0.25:50052",
+		PID:               1234,
+		StartedAt:         startedAt,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +207,7 @@ func TestLlamaCPPRPCStateRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("expected rpc state")
 	}
-	if state.Endpoint != "127.0.0.1:50052" || state.PID != 1234 || !state.StartedAt.Equal(startedAt) || state.UpdatedAt.IsZero() {
+	if state.Endpoint != "10.0.0.25:50052" || state.BindEndpoint != "0.0.0.0:50052" || state.AdvertiseEndpoint != "10.0.0.25:50052" || state.PID != 1234 || !state.StartedAt.Equal(startedAt) || state.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected rpc state: %#v", state)
 	}
 	if err := ClearLlamaCPPRPCState(cacheDir); err != nil {
