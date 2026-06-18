@@ -2138,6 +2138,55 @@ func TestRuntimeRPCPoolSmokeEndpoint(t *testing.T) {
 	}
 }
 
+func TestRuntimeRPCPoolRefreshEndpointRecordsHealthAndReturnsPool(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go acceptAndCloseConnections(listener)
+
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "rpc-refresh-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: listener.Addr().String(),
+			}},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/runtime/rpc-pool/refresh?timeout_ms=500", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload RuntimeRPCPoolRefreshReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Report.Checked != 1 || payload.Report.Ready != 1 || !payload.Report.RunnableNow {
+		t.Fatalf("unexpected refresh report: %#v", payload.Report)
+	}
+	if len(payload.Endpoints) != 1 || payload.Endpoints[0] != listener.Addr().String() || payload.LlamaCLIRPCArg != listener.Addr().String() {
+		t.Fatalf("unexpected refreshed endpoints: endpoints=%#v arg=%q", payload.Endpoints, payload.LlamaCLIRPCArg)
+	}
+	if payload.Summary.RPCReadyWorkers != 1 || len(payload.Workers) != 1 {
+		t.Fatalf("unexpected refreshed pool: summary=%#v workers=%#v", payload.Summary, payload.Workers)
+	}
+	if len(payload.Health) != 1 || payload.Health[0].Endpoint != listener.Addr().String() || !payload.Health[0].Ready || payload.Health[0].Successes != 1 {
+		t.Fatalf("expected refresh to return recorded rpc health, got %#v", payload.Health)
+	}
+}
+
 func TestRuntimeRPCPoolSmokeEndpointRequiresActiveEndpoints(t *testing.T) {
 	srv := NewServer(":0", NewState())
 	req := httptest.NewRequest(http.MethodPost, "/v1/runtime/rpc-pool/smoke", nil)

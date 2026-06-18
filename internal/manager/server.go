@@ -86,6 +86,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/dashboard/status", s.handleDashboardStatus)
 	mux.HandleFunc("/v1/runtime/stage-probes", s.handleRuntimeStageProbes)
 	mux.HandleFunc("/v1/runtime/rpc-pool", s.handleRuntimeRPCPool)
+	mux.HandleFunc("/v1/runtime/rpc-pool/refresh", s.handleRuntimeRPCPoolRefresh)
 	mux.HandleFunc("/v1/runtime/rpc-pool/smoke", s.handleRuntimeRPCPoolSmoke)
 	mux.HandleFunc("/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
@@ -653,6 +654,15 @@ type RuntimeRPCSmokeReport struct {
 	RunnableNow bool                    `json:"runnable_now"`
 }
 
+type RuntimeRPCPoolRefreshReport struct {
+	Report         RuntimeRPCSmokeReport  `json:"report"`
+	Summary        RuntimeRPCPoolSummary  `json:"summary"`
+	Workers        []RuntimeRPCPoolWorker `json:"workers"`
+	Endpoints      []string               `json:"endpoints"`
+	Health         []RPCHealthRecord      `json:"health"`
+	LlamaCLIRPCArg string                 `json:"llama_cli_rpc_arg"`
+}
+
 func (s *Server) handleRuntimeRPCPool(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperatorAuth(w, r, false) {
 		return
@@ -673,6 +683,32 @@ func (s *Server) handleRuntimeRPCPool(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleRuntimeRPCPoolRefresh(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	report := s.refreshRuntimeRPCHealth(r.Context(), intQuery(r, "timeout_ms", 1000))
+	summary, workers, endpoints := runtimeRPCPoolReport(s.state.Nodes())
+	health := s.state.RPCHealth()
+	rankedEndpoints := usableRPCEndpoints(endpoints, health, false)
+	status := http.StatusOK
+	if report.Checked == 0 {
+		status = http.StatusConflict
+	}
+	writeJSON(w, status, RuntimeRPCPoolRefreshReport{
+		Report:         report,
+		Summary:        summary,
+		Workers:        workers,
+		Endpoints:      rankedEndpoints,
+		Health:         health,
+		LlamaCLIRPCArg: strings.Join(rankedEndpoints, ","),
+	})
+}
+
 func (s *Server) handleRuntimeRPCPoolSmoke(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperatorAuth(w, r, false) {
 		return
@@ -681,7 +717,15 @@ func (s *Server) handleRuntimeRPCPoolSmoke(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	timeoutMS := intQuery(r, "timeout_ms", 1000)
+	report := s.refreshRuntimeRPCHealth(r.Context(), intQuery(r, "timeout_ms", 1000))
+	status := http.StatusOK
+	if report.Checked == 0 {
+		status = http.StatusConflict
+	}
+	writeJSON(w, status, report)
+}
+
+func (s *Server) refreshRuntimeRPCHealth(ctx context.Context, timeoutMS int) RuntimeRPCSmokeReport {
 	if timeoutMS < 100 {
 		timeoutMS = 100
 	}
@@ -689,14 +733,10 @@ func (s *Server) handleRuntimeRPCPoolSmoke(w http.ResponseWriter, r *http.Reques
 		timeoutMS = 5000
 	}
 	_, workers, endpoints := runtimeRPCPoolReport(s.state.Nodes())
-	report := smokeRuntimeRPCEndpoints(r.Context(), usableRPCEndpoints(endpoints, s.state.RPCHealth(), true), time.Duration(timeoutMS)*time.Millisecond)
+	report := smokeRuntimeRPCEndpoints(ctx, usableRPCEndpoints(endpoints, s.state.RPCHealth(), true), time.Duration(timeoutMS)*time.Millisecond)
 	s.recordRPCHealthReport(workers, report)
 	report.TimeoutMS = timeoutMS
-	status := http.StatusOK
-	if report.Checked == 0 {
-		status = http.StatusConflict
-	}
-	writeJSON(w, status, report)
+	return report
 }
 
 func (s *Server) recordRPCHealthReport(workers []RuntimeRPCPoolWorker, report RuntimeRPCSmokeReport) {
@@ -5897,6 +5937,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         <code>--rpc {{range $index, $endpoint := .RPCEndpoints}}{{if $index}},{{end}}{{$endpoint}}{{end}}</code>
       </div>
       <div class="actions">
+        <button class="button" type="button" id="rpc-health-refresh"><svg class="icon"><use href="#icon-refresh"></use></svg><span>Refresh RPC health</span></button>
         <button class="button primary" type="button" id="rpc-smoke-run"><svg class="icon"><use href="#icon-play"></use></svg><span>Run RPC smoke test</span></button>
       </div>
       <div class="runner-status" id="rpc-smoke-result">Smoke test checks TCP reachability for active RPC endpoints before distributed inference.</div>
@@ -6764,6 +6805,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       });
     });
     var rpcSmokeButton = document.getElementById("rpc-smoke-run");
+    var rpcHealthRefreshButton = document.getElementById("rpc-health-refresh");
     var rpcSmokeResult = document.getElementById("rpc-smoke-result");
     var rpcPromptSmokeForm = document.getElementById("rpc-prompt-smoke-form");
     var rpcPromptSmokeModel = document.getElementById("rpc-smoke-model");
@@ -6802,6 +6844,46 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         duration.textContent = "Total smoke duration " + report.duration_ms + " ms.";
         rpcSmokeResult.appendChild(duration);
       }
+    }
+    function fetchRPCPoolHealthRefresh() {
+      return fetch("/v1/runtime/rpc-pool/refresh?timeout_ms=1000", {
+        method: "POST"
+      }).then(function(response) {
+        return response.json().then(function(payload) {
+          if (!response.ok) {
+            var error = new Error(payload.error || response.statusText);
+            error.payload = payload;
+            throw error;
+          }
+          return payload;
+        });
+      });
+    }
+    if (rpcHealthRefreshButton) {
+      rpcHealthRefreshButton.addEventListener("click", function() {
+        rpcHealthRefreshButton.disabled = true;
+        setButtonText(rpcHealthRefreshButton, "Refreshing...");
+        if (rpcSmokeResult) rpcSmokeResult.textContent = "Refreshing RPC endpoint health...";
+        fetchRPCPoolHealthRefresh().then(function(payload) {
+          renderRPCSmokeReport(payload.report || payload);
+          if (rpcSmokeResult) {
+            var note = document.createElement("span");
+            note.className = "sub";
+            note.textContent = "Health refreshed. Ranked endpoints now available through /v1/runtime/rpc-pool.";
+            rpcSmokeResult.appendChild(note);
+          }
+        }).catch(function(error) {
+          var report = error.payload && (error.payload.report || error.payload);
+          if (report && report.results) {
+            renderRPCSmokeReport(report);
+          } else if (rpcSmokeResult) {
+            rpcSmokeResult.textContent = "RPC health refresh failed: " + error.message;
+          }
+        }).finally(function() {
+          rpcHealthRefreshButton.disabled = false;
+          setButtonText(rpcHealthRefreshButton, "Refresh RPC health");
+        });
+      });
     }
     if (rpcSmokeButton) {
       rpcSmokeButton.addEventListener("click", function() {
@@ -8452,38 +8534,40 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     function smokeRPCPoolForChat(modelID, nodeID) {
       return checkDistributedRPCReadiness(modelID, nodeID, modelStatus).then(function() {
         if (modelStatus) modelStatus.innerText = "Checking RPC pool network reachability...";
-        return fetch("/v1/runtime/rpc-pool/smoke?timeout_ms=1000", {
+        return fetch("/v1/runtime/rpc-pool/refresh?timeout_ms=1000", {
           method: "POST"
         });
       }).then(function(response) {
         return response.json().then(function(payload) {
-          if (!response.ok || !payload.runnable_now) {
-            var details = (payload.results || []).map(function(result) {
+          var report = payload.report || payload;
+          if (!response.ok || !report.runnable_now) {
+            var details = (report.results || []).map(function(result) {
               if (result.ready) return (result.endpoint || "endpoint") + " ready";
               return (result.endpoint || "endpoint") + " failed" + (result.error ? ": " + result.error : "");
             }).join("; ");
             throw new Error(details || "RPC pool is not reachable.");
           }
-          return payload;
+          return report;
         });
       });
     }
     function smokeRPCPoolForPromptSmoke(modelID, nodeID) {
       return checkDistributedRPCReadiness(modelID, nodeID, rpcPromptSmokeStatus).then(function() {
         if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Checking RPC pool network reachability...";
-        return fetch("/v1/runtime/rpc-pool/smoke?timeout_ms=1000", {
+        return fetch("/v1/runtime/rpc-pool/refresh?timeout_ms=1000", {
           method: "POST"
         });
       }).then(function(response) {
         return response.json().then(function(payload) {
-          if (!response.ok || !payload.runnable_now) {
-            var details = (payload.results || []).map(function(result) {
+          var report = payload.report || payload;
+          if (!response.ok || !report.runnable_now) {
+            var details = (report.results || []).map(function(result) {
               if (result.ready) return (result.endpoint || "endpoint") + " ready";
               return (result.endpoint || "endpoint") + " failed" + (result.error ? ": " + result.error : "");
             }).join("; ");
             throw new Error(details || "RPC pool is not reachable.");
           }
-          return payload;
+          return report;
         });
       });
     }
