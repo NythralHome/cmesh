@@ -408,6 +408,14 @@ func (s *State) UpdateCDIPStageState(jobID string, next cdip.StageState, detail 
 	job.Result = cdipStageResult(next, detail, now)
 	job.UpdatedAt = now
 	switch next {
+	case cdip.StagePreparing:
+		if job.Status == jobs.StatusQueued && strings.TrimSpace(job.AssignedTo) != "" {
+			job.Status = jobs.StatusScheduled
+			job.LastFailure = ""
+			if job.Attempts == 0 {
+				job.Attempts = 1
+			}
+		}
 	case cdip.StageCompleted:
 		job.Status = jobs.StatusSucceeded
 		job.FinishedAt = now

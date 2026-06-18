@@ -513,7 +513,16 @@ func (s *PostgresStore) UpdateCDIPStageState(jobID string, next cdip.StageState,
 	errorText := current.Error
 	lastFailure := current.LastFailure
 	finishedAt := current.FinishedAt
+	attempts := current.Attempts
 	switch next {
+	case cdip.StagePreparing:
+		if current.Status == jobs.StatusQueued && strings.TrimSpace(current.AssignedTo) != "" {
+			status = jobs.StatusScheduled
+			lastFailure = ""
+			if attempts == 0 {
+				attempts = 1
+			}
+		}
 	case cdip.StageCompleted:
 		status = jobs.StatusSucceeded
 		finishedAt = now
@@ -534,11 +543,12 @@ SET cdip_state = $2,
     result = $4,
     error = $5,
     last_failure = $6,
-    updated_at = $7,
-    finished_at = $8
-WHERE id = $1 AND type = $9
+    attempts = $7,
+    updated_at = $8,
+    finished_at = $9
+WHERE id = $1 AND type = $10
 RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
-`, jobID, string(next), string(status), cdipStageResult(next, detail, now), errorText, lastFailure, now, nullableTime(finishedAt), models.JobGenerateStage)
+`, jobID, string(next), string(status), cdipStageResult(next, detail, now), errorText, lastFailure, attempts, now, nullableTime(finishedAt), models.JobGenerateStage)
 	return scanJob(row)
 }
 

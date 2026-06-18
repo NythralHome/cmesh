@@ -312,9 +312,26 @@ func TestCDIPDistributedGenerateEndToEndControlPlane(t *testing.T) {
 	}
 
 	for _, stageJob := range prepared.StageJobs {
-		readyBody := strings.NewReader(`{"node_id":"` + stageJob.AssignedTo + `","result":"{\"kind\":\"cdip.stage_ready\"}"}`)
+		if stageJob.Status != jobs.StatusScheduled || stageJob.LastFailure != "" {
+			t.Fatalf("expected prepared stage to be scheduled for worker polling, got %#v", stageJob)
+		}
+		nextRec := httptest.NewRecorder()
+		srv.ServeHTTP(nextRec, httptest.NewRequest(http.MethodGet, "/v1/workers/"+stageJob.AssignedTo+"/jobs/next", nil))
+		if nextRec.Code != http.StatusOK {
+			t.Fatalf("expected worker next job 200, got %d: %s", nextRec.Code, nextRec.Body.String())
+		}
+		var nextPayload struct {
+			Job *jobs.Job `json:"job"`
+		}
+		if err := json.Unmarshal(nextRec.Body.Bytes(), &nextPayload); err != nil {
+			t.Fatal(err)
+		}
+		if nextPayload.Job == nil || nextPayload.Job.ID != stageJob.ID || nextPayload.Job.Status != jobs.StatusRunning {
+			t.Fatalf("expected worker to receive running stage job, got %#v", nextPayload.Job)
+		}
+		readyBody := strings.NewReader(`{"node_id":"` + nextPayload.Job.AssignedTo + `","result":"{\"kind\":\"cdip.stage_ready\"}"}`)
 		readyRec := httptest.NewRecorder()
-		srv.ServeHTTP(readyRec, httptest.NewRequest(http.MethodPost, "/v1/jobs/"+stageJob.ID+"/complete", readyBody))
+		srv.ServeHTTP(readyRec, httptest.NewRequest(http.MethodPost, "/v1/jobs/"+nextPayload.Job.ID+"/complete", readyBody))
 		if readyRec.Code != http.StatusOK {
 			t.Fatalf("expected stage ready 200, got %d: %s", readyRec.Code, readyRec.Body.String())
 		}
@@ -563,6 +580,9 @@ func TestCDIPPrepareEndpointBuildsStagePrepareMessages(t *testing.T) {
 		}
 		if prepared.StageJobs[i].CDIPState != cdip.StagePreparing {
 			t.Fatalf("expected stage %d preparing, got %#v", i, prepared.StageJobs[i])
+		}
+		if prepared.StageJobs[i].Status != jobs.StatusScheduled || prepared.StageJobs[i].LastFailure != "" {
+			t.Fatalf("expected stage %d scheduled for worker after prepare, got %#v", i, prepared.StageJobs[i])
 		}
 	}
 }
