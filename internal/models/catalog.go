@@ -10,6 +10,7 @@ const (
 	JobDelete              = "model.delete"
 	JobGenerate            = "model.generate"
 	JobGenerateDistributed = "model.generate.distributed"
+	JobGenerateStage       = "model.generate.distributed.stage"
 	JobRepair              = "model.repair"
 	JobCleanup             = "model.cleanup"
 )
@@ -91,6 +92,20 @@ type DistributedStageInput struct {
 	LayerStart int    `json:"layer_start"`
 	LayerEnd   int    `json:"layer_end"`
 	Layers     int    `json:"layers"`
+}
+
+type DistributedStageJobInput struct {
+	ParentJobID      string                `json:"parent_job_id"`
+	ModelID          string                `json:"model_id"`
+	ConversationID   string                `json:"conversation_id,omitempty"`
+	Stage            DistributedStageInput `json:"stage"`
+	UpstreamNodeID   string                `json:"upstream_node_id,omitempty"`
+	DownstreamNodeID string                `json:"downstream_node_id,omitempty"`
+	Prompt           string                `json:"prompt,omitempty"`
+	Messages         []ChatMessage         `json:"messages,omitempty"`
+	SystemPrompt     string                `json:"system_prompt,omitempty"`
+	MaxTokens        int                   `json:"max_tokens,omitempty"`
+	Temperature      string                `json:"temperature,omitempty"`
 }
 
 type ChatMessage struct {

@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/cmesh/cmesh/internal/cluster"
+	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
 )
 
@@ -306,4 +308,57 @@ func maxInt(left int, right int) int {
 		return left
 	}
 	return right
+}
+
+func distributedStageJobRequests(parent jobs.Job, input models.DistributedGenerateInput) ([]jobs.CreateRequest, error) {
+	if parent.ID == "" {
+		return nil, fmt.Errorf("parent job id is required")
+	}
+	if strings.TrimSpace(input.ModelID) == "" {
+		return nil, fmt.Errorf("model_id is required")
+	}
+	if len(input.Stages) < 2 {
+		return nil, fmt.Errorf("distributed generate requires at least 2 stages")
+	}
+	out := make([]jobs.CreateRequest, 0, len(input.Stages))
+	for index, stage := range input.Stages {
+		if strings.TrimSpace(stage.NodeID) == "" {
+			return nil, fmt.Errorf("stage %d node_id is required", index)
+		}
+		if stage.Index != index {
+			return nil, fmt.Errorf("stage index mismatch: got %d at position %d", stage.Index, index)
+		}
+		stageInput := models.DistributedStageJobInput{
+			ParentJobID:    parent.ID,
+			ModelID:        input.ModelID,
+			ConversationID: input.ConversationID,
+			Stage:          stage,
+			Prompt:         input.Prompt,
+			Messages:       input.Messages,
+			SystemPrompt:   input.SystemPrompt,
+			MaxTokens:      input.MaxTokens,
+			Temperature:    input.Temperature,
+		}
+		if index > 0 {
+			stageInput.UpstreamNodeID = input.Stages[index-1].NodeID
+		}
+		if index < len(input.Stages)-1 {
+			stageInput.DownstreamNodeID = input.Stages[index+1].NodeID
+		}
+		body, err := json.Marshal(stageInput)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, jobs.CreateRequest{
+			Type:        models.JobGenerateStage,
+			Input:       string(body),
+			RequestedBy: "distributed-coordinator:" + parent.ID,
+			AssignedTo:  stage.NodeID,
+			Requirements: jobs.Requirements{
+				CPUCores: 1,
+			},
+			MaxAttempts: 1,
+		})
+	}
+	return out, nil
 }

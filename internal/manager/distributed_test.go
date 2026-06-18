@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cmesh/cmesh/internal/cluster"
+	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
 )
 
@@ -175,5 +176,75 @@ func TestDistributedGenerateEndpointReturnsPlanConflictUntilRuntimeExists(t *tes
 	}
 	if len(state.Jobs()) != 0 {
 		t.Fatalf("distributed-generate must not create a dead job while protocol is unavailable, got %#v", state.Jobs())
+	}
+}
+
+func TestDistributedStageJobRequestsBuildPipelineTopology(t *testing.T) {
+	parent := jobs.Job{ID: "job-parent", Type: models.JobGenerateDistributed}
+	input := models.DistributedGenerateInput{
+		ModelID:        "qwen2.5-7b-instruct-q4-k-m",
+		Prompt:         "hello",
+		ConversationID: "conv-1",
+		SystemPrompt:   "system",
+		MaxTokens:      128,
+		Temperature:    "0.5",
+		Stages: []models.DistributedStageInput{
+			{Index: 0, NodeID: "node-a", NodeName: "A", LayerStart: 0, LayerEnd: 10, Layers: 11},
+			{Index: 1, NodeID: "node-b", NodeName: "B", LayerStart: 11, LayerEnd: 20, Layers: 10},
+			{Index: 2, NodeID: "node-c", NodeName: "C", LayerStart: 21, LayerEnd: 31, Layers: 11},
+		},
+	}
+
+	requests, err := distributedStageJobRequests(parent, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 3 {
+		t.Fatalf("expected three stage job requests, got %#v", requests)
+	}
+	for index, req := range requests {
+		if req.Type != models.JobGenerateStage || req.AssignedTo != input.Stages[index].NodeID {
+			t.Fatalf("unexpected stage request %d: %#v", index, req)
+		}
+		if req.RequestedBy != "distributed-coordinator:job-parent" {
+			t.Fatalf("expected coordinator requested_by, got %#v", req)
+		}
+		var stageInput models.DistributedStageJobInput
+		if err := json.Unmarshal([]byte(req.Input), &stageInput); err != nil {
+			t.Fatal(err)
+		}
+		if stageInput.ParentJobID != parent.ID || stageInput.ModelID != input.ModelID || stageInput.Stage.Index != index {
+			t.Fatalf("unexpected stage input %d: %#v", index, stageInput)
+		}
+		switch index {
+		case 0:
+			if stageInput.UpstreamNodeID != "" || stageInput.DownstreamNodeID != "node-b" {
+				t.Fatalf("unexpected first-stage links: %#v", stageInput)
+			}
+		case 1:
+			if stageInput.UpstreamNodeID != "node-a" || stageInput.DownstreamNodeID != "node-c" {
+				t.Fatalf("unexpected middle-stage links: %#v", stageInput)
+			}
+		case 2:
+			if stageInput.UpstreamNodeID != "node-b" || stageInput.DownstreamNodeID != "" {
+				t.Fatalf("unexpected final-stage links: %#v", stageInput)
+			}
+		}
+	}
+}
+
+func TestDistributedStageJobRequestsRejectsInvalidStageOrder(t *testing.T) {
+	_, err := distributedStageJobRequests(jobs.Job{ID: "job-parent"}, models.DistributedGenerateInput{
+		ModelID: "qwen2.5-7b-instruct-q4-k-m",
+		Stages: []models.DistributedStageInput{
+			{Index: 0, NodeID: "node-a"},
+			{Index: 3, NodeID: "node-b"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected invalid stage order error")
+	}
+	if !strings.Contains(err.Error(), "stage index mismatch") {
+		t.Fatalf("expected stage index mismatch error, got %v", err)
 	}
 }
