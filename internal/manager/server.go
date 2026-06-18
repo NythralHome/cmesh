@@ -674,6 +674,8 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 	}
 	action := parts[1]
 	switch action {
+	case "distributed-plan":
+		s.handleModelDistributedPlan(w, r, model)
 	case "placement":
 		s.handleModelPlacement(w, r, model)
 	case "install":
@@ -687,6 +689,16 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleModelDistributedPlan(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plan": distributedModelPlan(model, s.state.Nodes()),
+	})
 }
 
 func (s *Server) handleModelPlacement(w http.ResponseWriter, r *http.Request, model models.Model) {
