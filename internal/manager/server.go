@@ -102,6 +102,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/capacity/snapshots", s.handleCapacitySnapshots)
 	mux.HandleFunc("/v1/capacity", s.handleCapacity)
 	mux.HandleFunc("/v1/dashboard/status", s.handleDashboardStatus)
+	mux.HandleFunc("/v1/distributed-runs", s.handleDistributedRuns)
 	mux.HandleFunc("/v1/runtime/stage-probes", s.handleRuntimeStageProbes)
 	mux.HandleFunc("/v1/runtime/rpc-pool", s.handleRuntimeRPCPool)
 	mux.HandleFunc("/v1/runtime/rpc-pool/refresh", s.handleRuntimeRPCPoolRefresh)
@@ -1129,6 +1130,27 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleDistributedRuns(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := intQuery(r, "limit", 50)
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"runs":  distributedRunSummaries(s.state.Jobs(), limit),
+		"limit": limit,
+	})
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {

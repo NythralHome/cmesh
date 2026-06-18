@@ -2332,6 +2332,86 @@ func TestDistributedRunSummariesExtractPlanAndResult(t *testing.T) {
 	}
 }
 
+func TestDistributedRunsEndpoint(t *testing.T) {
+	plan := protocol.DistributedRPCExecutionPlan{
+		ID:                  "plan-api-123",
+		Protocol:            protocol.DistributedRPCProtocol,
+		ProtocolVersion:     protocol.DistributedRPCProtocolVersion,
+		PlanSchemaVersion:   protocol.DistributedRPCPlanSchemaVersion,
+		Mode:                "llama.cpp-rpc",
+		ModelID:             "qwen2.5-0.5b-instruct-q4-k-m",
+		CoordinatorNodeID:   "node-a",
+		CoordinatorNodeName: "worker-a",
+		RPCEndpoints:        []string{"10.0.0.10:50052"},
+	}
+	input, err := json.Marshal(models.DistributedRPCGenerateInput{
+		ModelID:       plan.ModelID,
+		Prompt:        "hello",
+		RPCEndpoints:  plan.RPCEndpoints,
+		ExecutionPlan: plan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := json.Marshal(map[string]any{
+		"output": "hello from rpc",
+		"execution_result": protocol.DistributedRPCExecutionResult{
+			Protocol:          protocol.DistributedRPCProtocol,
+			ProtocolVersion:   protocol.DistributedRPCProtocolVersion,
+			PlanSchemaVersion: protocol.DistributedRPCPlanSchemaVersion,
+			PlanID:            plan.ID,
+			Kind:              models.JobGenerateDistributedRPC,
+			ModelID:           plan.ModelID,
+			Output:            "hello from rpc",
+			Runtime:           "llama.cpp",
+			WorkerRuntime:     "linux/amd64",
+			RPCEndpoints:      plan.RPCEndpoints,
+			RPCEndpointCount:  1,
+			DurationMS:        88,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := NewState()
+	srv := NewServer(":0", state)
+	join := joinWorkerWithResourcesForTest(t, srv, "distributed-api-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 4, CoresAllowed: 2},
+		Memory:  cluster.MemoryResources{TotalBytes: 8 * gb, AllowedBytes: 4 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 64 * gb, AllowedBytes: 16 * gb, FreeBytes: 32 * gb},
+	})
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerateDistributedRPC,
+		Input:       string(input),
+		RequestedBy: "test",
+		AssignedTo:  join.NodeID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next, ok := state.NextJobForWorker(join.NodeID); !ok || next.ID != job.ID {
+		t.Fatalf("expected worker next job, got %#v", next)
+	}
+	if _, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{NodeID: join.NodeID, Result: string(result)}); !ok {
+		t.Fatal("expected job completion")
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/distributed-runs?limit=5", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Runs  []DistributedRunSummary `json:"runs"`
+		Limit int                     `json:"limit"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Limit != 5 || len(payload.Runs) != 1 || payload.Runs[0].PlanID != plan.ID || payload.Runs[0].DurationMS != 88 {
+		t.Fatalf("unexpected distributed runs payload: %#v", payload)
+	}
+}
+
 func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
