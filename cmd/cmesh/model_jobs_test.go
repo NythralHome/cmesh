@@ -86,6 +86,9 @@ func TestExecuteDistributedRPCGenerateAddsRPCArgument(t *testing.T) {
 	if result.Kind != models.JobGenerateDistributedRPC || result.Output != "hello from rpc" {
 		t.Fatalf("unexpected distributed rpc result: %#v", result)
 	}
+	if result.RPCEndpointCount != 2 || len(result.RPCEndpoints) != 2 || result.RPCEndpoints[0] != "10.0.0.10:50052" || result.RPCEndpoints[1] != "10.0.0.11:50052" {
+		t.Fatalf("unexpected distributed rpc trace: %#v", result)
+	}
 	argsBytes, err := os.ReadFile(argsPath)
 	if err != nil {
 		t.Fatal(err)

@@ -6493,6 +6493,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                   <div><span>Runtime ms</span><strong>{{jobMetric . "duration_ms"}}</strong></div>
                   <div><span>GFLOPS</span><strong>{{jobMetric . "gflops"}}</strong></div>
                   <div><span>Runtime</span><strong>{{jobMetric . "worker_runtime"}}</strong></div>
+                  <div><span>RPC endpoints</span><strong>{{jobMetric . "rpc_endpoint_count"}}</strong></div>
                   <div><span>Progress</span><strong>{{jobProgress .}}</strong></div>
                 </div>
               </td>

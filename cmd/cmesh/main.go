@@ -1115,13 +1115,15 @@ type modelCleanupResult struct {
 }
 
 type modelGenerateResult struct {
-	Kind           string `json:"kind"`
-	ModelID        string `json:"model_id"`
-	Output         string `json:"output"`
-	Tokens         int    `json:"tokens,omitempty"`
-	WorkerRuntime  string `json:"worker_runtime"`
-	ModelRuntime   string `json:"model_runtime"`
-	RuntimeVersion string `json:"runtime_version,omitempty"`
+	Kind             string   `json:"kind"`
+	ModelID          string   `json:"model_id"`
+	Output           string   `json:"output"`
+	Tokens           int      `json:"tokens,omitempty"`
+	WorkerRuntime    string   `json:"worker_runtime"`
+	ModelRuntime     string   `json:"model_runtime"`
+	RuntimeVersion   string   `json:"runtime_version,omitempty"`
+	RPCEndpoints     []string `json:"rpc_endpoints,omitempty"`
+	RPCEndpointCount int      `json:"rpc_endpoint_count,omitempty"`
 }
 
 func executeModelInstallJob(input string, cacheDir string, progress func(int64, int64)) (string, error) {
@@ -1511,7 +1513,8 @@ func executeModelGenerate(req models.GenerateInput, cacheDir string, rpcEndpoint
 	if strings.TrimSpace(req.Prompt) == "" {
 		return "", fmt.Errorf("prompt is required")
 	}
-	rpcArg := strings.Join(cleanStringList(rpcEndpoints), ",")
+	cleanRPCEndpoints := cleanStringList(rpcEndpoints)
+	rpcArg := strings.Join(cleanRPCEndpoints, ",")
 	model, err := models.MustFind(req.ModelID)
 	if err != nil {
 		return "", err
@@ -1584,12 +1587,14 @@ func executeModelGenerate(req models.GenerateInput, cacheDir string, rpcEndpoint
 		return "", fmt.Errorf("%s returned an empty response", model.Runtime)
 	}
 	result := modelGenerateResult{
-		Kind:           resultKind,
-		ModelID:        model.ID,
-		Output:         text,
-		WorkerRuntime:  runtime.GOOS + "/" + runtime.GOARCH,
-		ModelRuntime:   string(model.Runtime),
-		RuntimeVersion: runtimeStatus.Version,
+		Kind:             resultKind,
+		ModelID:          model.ID,
+		Output:           text,
+		WorkerRuntime:    runtime.GOOS + "/" + runtime.GOARCH,
+		ModelRuntime:     string(model.Runtime),
+		RuntimeVersion:   runtimeStatus.Version,
+		RPCEndpoints:     cleanRPCEndpoints,
+		RPCEndpointCount: len(cleanRPCEndpoints),
 	}
 	body, err := json.Marshal(result)
 	return string(body), err
