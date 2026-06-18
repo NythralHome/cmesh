@@ -15,6 +15,7 @@ type Store interface {
 	Benchmarks() []resources.BenchmarkResult
 	BenchmarkSummaryByNode() map[string]NodeBenchmarkSummary
 	CreateJob(req jobs.CreateRequest) (jobs.Job, error)
+	CreateJobsBatch(requests []jobs.CreateRequest) ([]jobs.Job, error)
 	Jobs() []jobs.Job
 	Job(id string) (jobs.Job, bool)
 	NextJobForWorker(nodeID string) (jobs.Job, bool)

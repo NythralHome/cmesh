@@ -357,7 +357,8 @@ func distributedStageJobRequests(parent jobs.Job, input models.DistributedGenera
 			Requirements: jobs.Requirements{
 				CPUCores: 1,
 			},
-			MaxAttempts: 1,
+			MaxAttempts:  1,
+			NoAutoAssign: true,
 		})
 	}
 	return out, nil

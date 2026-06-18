@@ -127,7 +127,7 @@ func TestModelDistributedPlanEndpoint(t *testing.T) {
 	}
 }
 
-func TestDistributedGenerateEndpointReturnsPlanConflictUntilRuntimeExists(t *testing.T) {
+func TestDistributedGenerateEndpointCreatesPlannedJobGraph(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
 	for _, name := range []string{"worker-a", "worker-b"} {
@@ -154,28 +154,33 @@ func TestDistributedGenerateEndpointReturnsPlanConflictUntilRuntimeExists(t *tes
 	req := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-7b-instruct-q4-k-m/distributed-generate", strings.NewReader(`{"prompt":"hello from distributed cluster"}`))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var conflict distributedGenerateConflictResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
+	var payload distributedGenerateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if conflict.Error != "distributed model generate is not executable" {
-		t.Fatalf("expected distributed generate conflict, got %#v", conflict)
+	if payload.Job.Type != models.JobGenerateDistributed || payload.Job.Status != jobs.StatusQueued || payload.Job.AssignedTo != "" {
+		t.Fatalf("expected queued unassigned coordinator job, got %#v", payload.Job)
 	}
-	if !conflict.Plan.Feasible || conflict.Plan.ExecutableNow {
-		t.Fatalf("expected feasible but non-executable plan, got %#v", conflict.Plan)
+	if !payload.Plan.Feasible || payload.Plan.ExecutableNow || payload.ExecutableNow {
+		t.Fatalf("expected feasible but non-executable plan, got %#v", payload)
 	}
-	if len(conflict.Plan.Stages) != 2 {
-		t.Fatalf("expected distributed stages in conflict payload, got %#v", conflict.Plan.Stages)
+	if len(payload.StageJobs) != 2 {
+		t.Fatalf("expected two planned stage jobs, got %#v", payload.StageJobs)
 	}
-	if !strings.Contains(conflict.Reason, "distributed runtime protocol") {
-		t.Fatalf("expected runtime protocol blocker, got %#v", conflict)
+	for _, stageJob := range payload.StageJobs {
+		if stageJob.Type != models.JobGenerateStage || stageJob.Status != jobs.StatusQueued || stageJob.AssignedTo == "" {
+			t.Fatalf("expected queued assigned stage job, got %#v", stageJob)
+		}
+		if stageJob.LastFailure != "waiting for coordinator" {
+			t.Fatalf("expected stage job to wait for coordinator, got %#v", stageJob)
+		}
 	}
-	if len(state.Jobs()) != 0 {
-		t.Fatalf("distributed-generate must not create a dead job while protocol is unavailable, got %#v", state.Jobs())
+	if len(state.Jobs()) != 3 {
+		t.Fatalf("expected parent plus two stage jobs, got %#v", state.Jobs())
 	}
 }
 
@@ -208,6 +213,9 @@ func TestDistributedStageJobRequestsBuildPipelineTopology(t *testing.T) {
 		}
 		if req.RequestedBy != "distributed-coordinator:job-parent" {
 			t.Fatalf("expected coordinator requested_by, got %#v", req)
+		}
+		if !req.NoAutoAssign {
+			t.Fatalf("stage request must not be auto-scheduled before distributed transport exists: %#v", req)
 		}
 		var stageInput models.DistributedStageJobInput
 		if err := json.Unmarshal([]byte(req.Input), &stageInput); err != nil {

@@ -77,6 +77,14 @@ func (s *FileStore) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 	return job, err
 }
 
+func (s *FileStore) CreateJobsBatch(requests []jobs.CreateRequest) ([]jobs.Job, error) {
+	created, err := s.State.CreateJobsBatch(requests)
+	if err == nil {
+		_ = s.save()
+	}
+	return created, err
+}
+
 func (s *FileStore) NextJobForWorker(nodeID string) (jobs.Job, bool) {
 	job, ok := s.State.NextJobForWorker(nodeID)
 	if ok {

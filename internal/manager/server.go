@@ -714,7 +714,7 @@ func (s *Server) handleModelDistributedGenerate(w http.ResponseWriter, r *http.R
 		return
 	}
 	plan := distributedModelPlan(model, s.state.Nodes())
-	if !plan.Feasible || !plan.ExecutableNow {
+	if !plan.Feasible {
 		reason := "distributed model execution is not ready"
 		if len(plan.Blockers) > 0 {
 			reason = strings.Join(plan.Blockers, " | ")
@@ -767,7 +767,7 @@ func (s *Server) handleModelDistributedGenerate(w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	job, err := s.state.CreateJob(jobs.CreateRequest{
+	parent, err := s.state.CreateJob(jobs.CreateRequest{
 		Type:        models.JobGenerateDistributed,
 		Input:       string(input),
 		RequestedBy: "dashboard-chat",
@@ -777,13 +777,39 @@ func (s *Server) handleModelDistributedGenerate(w http.ResponseWriter, r *http.R
 			DiskBytes:   model.DiskBytes,
 			VRAMBytes:   model.VRAMBytes,
 		},
-		MaxAttempts: 1,
+		MaxAttempts:  1,
+		NoAutoAssign: true,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusCreated, job)
+	stageRequests, err := distributedStageJobRequests(parent, models.DistributedGenerateInput{
+		ModelID:        model.ID,
+		Prompt:         req.Prompt,
+		Messages:       budgetedMessages,
+		SystemPrompt:   effectiveSystemPrompt,
+		ConversationID: conversation.ID,
+		MaxTokens:      maxTokens,
+		Temperature:    temperature,
+		Mode:           plan.Mode,
+		Stages:         distributedStageInputs(plan.Stages),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	stageJobs, err := s.state.CreateJobsBatch(stageRequests)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, distributedGenerateResponse{
+		Job:           parent,
+		StageJobs:     stageJobs,
+		Plan:          plan,
+		ExecutableNow: plan.ExecutableNow,
+	})
 }
 
 func (s *Server) handleModelDistributedPlan(w http.ResponseWriter, r *http.Request, model models.Model) {
@@ -1613,21 +1639,36 @@ func activeGenerateJobForConversation(in []jobs.Job, conversationID string) stri
 		return ""
 	}
 	for _, job := range in {
-		if job.Type != models.JobGenerate {
+		if job.Type != models.JobGenerate && job.Type != models.JobGenerateDistributed {
 			continue
 		}
 		if job.Status != jobs.StatusQueued && job.Status != jobs.StatusScheduled && job.Status != jobs.StatusRunning {
 			continue
 		}
-		var input models.GenerateInput
-		if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
-			continue
-		}
-		if input.ConversationID == conversationID {
+		if jobConversationID(job) == conversationID {
 			return job.ID
 		}
 	}
 	return ""
+}
+
+func jobConversationID(job jobs.Job) string {
+	switch job.Type {
+	case models.JobGenerate:
+		var input models.GenerateInput
+		if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
+			return ""
+		}
+		return input.ConversationID
+	case models.JobGenerateDistributed:
+		var input models.DistributedGenerateInput
+		if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
+			return ""
+		}
+		return input.ConversationID
+	default:
+		return ""
+	}
 }
 
 func activeModelJobForNode(in []jobs.Job, modelID string, nodeID string) string {
@@ -2267,7 +2308,7 @@ func schedulerJobs(in []jobs.Job) []jobs.Job {
 }
 
 func isModelJob(job jobs.Job) bool {
-	return job.Type == models.JobInstall || job.Type == models.JobDelete || job.Type == models.JobGenerate || job.Type == models.JobRepair || job.Type == models.JobCleanup
+	return job.Type == models.JobInstall || job.Type == models.JobDelete || job.Type == models.JobGenerate || job.Type == models.JobGenerateDistributed || job.Type == models.JobGenerateStage || job.Type == models.JobRepair || job.Type == models.JobCleanup
 }
 
 func modelJobCount(in []jobs.Job) int {
@@ -2393,6 +2434,13 @@ type distributedGenerateConflictResponse struct {
 	Error  string               `json:"error"`
 	Reason string               `json:"reason"`
 	Plan   DistributedModelPlan `json:"plan"`
+}
+
+type distributedGenerateResponse struct {
+	Job           jobs.Job             `json:"job"`
+	StageJobs     []jobs.Job           `json:"stage_jobs"`
+	Plan          DistributedModelPlan `json:"plan"`
+	ExecutableNow bool                 `json:"executable_now"`
 }
 
 func distributedStageInputs(stages []DistributedPlanStage) []models.DistributedStageInput {
@@ -2753,6 +2801,14 @@ func jobWorkload(job jobs.Job) string {
 				return "generate " + modelID + ": " + input.Prompt
 			}
 			return "generate " + modelID
+		case models.JobGenerateDistributed:
+			return "distributed generate " + modelID
+		case models.JobGenerateStage:
+			var input models.DistributedStageJobInput
+			if err := json.Unmarshal([]byte(job.Input), &input); err == nil {
+				return fmt.Sprintf("stage %d %s layers %d-%d", input.Stage.Index, modelID, input.Stage.LayerStart, input.Stage.LayerEnd)
+			}
+			return "distributed stage " + modelID
 		}
 	}
 	if job.Type == models.JobCleanup {

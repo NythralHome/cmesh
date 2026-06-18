@@ -292,7 +292,10 @@ func (s *PostgresStore) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	if req.AssignedTo != "" {
+	if req.NoAutoAssign {
+		job.AssignedTo = req.AssignedTo
+		job.LastFailure = "waiting for coordinator"
+	} else if req.AssignedTo != "" {
 		if s.workerCanAccept(req.AssignedTo, job.Requirements) {
 			job.AssignedTo = req.AssignedTo
 			job.Status = jobs.StatusScheduled
@@ -300,12 +303,14 @@ func (s *PostgresStore) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 		} else {
 			job.LastFailure = s.waitingReason(job.Requirements)
 		}
-	} else if workerID := s.pickWorker(job.Requirements); workerID != "" {
-		job.AssignedTo = workerID
-		job.Status = jobs.StatusScheduled
-		job.Attempts = 1
 	} else {
-		job.LastFailure = s.waitingReason(job.Requirements)
+		if workerID := s.pickWorker(job.Requirements); workerID != "" {
+			job.AssignedTo = workerID
+			job.Status = jobs.StatusScheduled
+			job.Attempts = 1
+		} else {
+			job.LastFailure = s.waitingReason(job.Requirements)
+		}
 	}
 
 	requirements, _ := json.Marshal(job.Requirements)
@@ -314,6 +319,63 @@ INSERT INTO jobs (id, type, status, requested_by, assigned_to, input, requiremen
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 `, job.ID, job.Type, string(job.Status), job.RequestedBy, job.AssignedTo, job.Input, requirements, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.CreatedAt, job.UpdatedAt)
 	return job, err
+}
+
+func (s *PostgresStore) CreateJobsBatch(requests []jobs.CreateRequest) ([]jobs.Job, error) {
+	now := time.Now().UTC()
+	tx, err := s.pool.Begin(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(context.Background())
+
+	created := make([]jobs.Job, 0, len(requests))
+	for _, req := range requests {
+		job := jobs.Job{
+			ID:           newJobID(),
+			Type:         req.Type,
+			Status:       jobs.StatusQueued,
+			RequestedBy:  req.RequestedBy,
+			Input:        req.Input,
+			Requirements: req.Requirements,
+			MaxAttempts:  normalizeMaxAttempts(req.MaxAttempts),
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if req.NoAutoAssign {
+			job.AssignedTo = req.AssignedTo
+			job.LastFailure = "waiting for coordinator"
+		} else if req.AssignedTo != "" {
+			if s.workerCanAccept(req.AssignedTo, job.Requirements) {
+				job.AssignedTo = req.AssignedTo
+				job.Status = jobs.StatusScheduled
+				job.Attempts = 1
+			} else {
+				job.LastFailure = s.waitingReason(job.Requirements)
+			}
+		} else {
+			if workerID := s.pickWorker(job.Requirements); workerID != "" {
+				job.AssignedTo = workerID
+				job.Status = jobs.StatusScheduled
+				job.Attempts = 1
+			} else {
+				job.LastFailure = s.waitingReason(job.Requirements)
+			}
+		}
+
+		requirements, _ := json.Marshal(job.Requirements)
+		if _, err := tx.Exec(context.Background(), `
+INSERT INTO jobs (id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+`, job.ID, job.Type, string(job.Status), job.RequestedBy, job.AssignedTo, job.Input, requirements, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.CreatedAt, job.UpdatedAt); err != nil {
+			return nil, err
+		}
+		created = append(created, job)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		return nil, err
+	}
+	return created, nil
 }
 
 func (s *PostgresStore) Jobs() []jobs.Job {

@@ -41,6 +41,7 @@ type CreateRequest struct {
 	AssignedTo   string       `json:"assigned_to,omitempty"`
 	Requirements Requirements `json:"requirements,omitempty"`
 	MaxAttempts  int          `json:"max_attempts,omitempty"`
+	NoAutoAssign bool         `json:"no_auto_assign,omitempty"`
 }
 
 type CompleteRequest struct {

@@ -224,7 +224,10 @@ func (s *State) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if req.AssignedTo != "" {
+	if req.NoAutoAssign {
+		job.AssignedTo = req.AssignedTo
+		job.LastFailure = "waiting for coordinator"
+	} else if req.AssignedTo != "" {
 		if node, ok := s.nodes[req.AssignedTo]; ok && s.nodeCanAcceptJobLocked(node, job.Requirements, now) {
 			job.AssignedTo = req.AssignedTo
 			job.Status = jobs.StatusScheduled
@@ -232,16 +235,63 @@ func (s *State) CreateJob(req jobs.CreateRequest) (jobs.Job, error) {
 		} else {
 			job.LastFailure = s.waitingReasonLocked(job.Requirements, now)
 		}
-	} else if workerID := s.pickWorkerLocked(job.Requirements); workerID != "" {
-		job.AssignedTo = workerID
-		job.Status = jobs.StatusScheduled
-		job.Attempts = 1
 	} else {
-		job.LastFailure = s.waitingReasonLocked(job.Requirements, now)
+		if workerID := s.pickWorkerLocked(job.Requirements); workerID != "" {
+			job.AssignedTo = workerID
+			job.Status = jobs.StatusScheduled
+			job.Attempts = 1
+		} else {
+			job.LastFailure = s.waitingReasonLocked(job.Requirements, now)
+		}
 	}
 
 	s.jobs[job.ID] = job
 	return job, nil
+}
+
+func (s *State) CreateJobsBatch(requests []jobs.CreateRequest) ([]jobs.Job, error) {
+	now := time.Now().UTC()
+	created := make([]jobs.Job, 0, len(requests))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, req := range requests {
+		job := jobs.Job{
+			ID:           newJobID(),
+			Type:         req.Type,
+			Status:       jobs.StatusQueued,
+			RequestedBy:  req.RequestedBy,
+			Input:        req.Input,
+			Requirements: req.Requirements,
+			MaxAttempts:  normalizeMaxAttempts(req.MaxAttempts),
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if req.NoAutoAssign {
+			job.AssignedTo = req.AssignedTo
+			job.LastFailure = "waiting for coordinator"
+		} else if req.AssignedTo != "" {
+			if node, ok := s.nodes[req.AssignedTo]; ok && s.nodeCanAcceptJobLocked(node, job.Requirements, now) {
+				job.AssignedTo = req.AssignedTo
+				job.Status = jobs.StatusScheduled
+				job.Attempts = 1
+			} else {
+				job.LastFailure = s.waitingReasonLocked(job.Requirements, now)
+			}
+		} else {
+			if workerID := s.pickWorkerLocked(job.Requirements); workerID != "" {
+				job.AssignedTo = workerID
+				job.Status = jobs.StatusScheduled
+				job.Attempts = 1
+			} else {
+				job.LastFailure = s.waitingReasonLocked(job.Requirements, now)
+			}
+		}
+		s.jobs[job.ID] = job
+		created = append(created, job)
+	}
+	return created, nil
 }
 
 func (s *State) Jobs() []jobs.Job {
