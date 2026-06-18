@@ -8,6 +8,7 @@ CDIP v0.1 is intentionally narrow. It does not claim production-grade cross-mach
 
 - capability negotiation
 - model placement planning
+- shard manifest exchange
 - stage graph creation
 - stage lifecycle messages
 - activation transport frame envelopes
@@ -109,6 +110,7 @@ Future runtime features:
 - `pipeline-prefill`
 - `pipeline-decode`
 - `activation-stream-v1`
+- `physical-shard-materialization`
 
 ## Planning Modes
 
@@ -170,6 +172,81 @@ Example:
 ```
 
 Stage ranges MUST be contiguous and non-overlapping. Stage index order is execution order.
+
+## Shard Manifest
+
+A shard manifest turns a placement plan into the concrete model split contract that workers can prepare.
+
+CDIP v0.1 starts with `logical_layers` materialization:
+
+- the model is split by contiguous layer ranges
+- each shard maps to exactly one stage
+- the source artifact can still be the original model file
+- the worker/runtime is responsible for loading only the assigned layer range when the runtime supports it
+
+CDIP v0.1 does not yet implement physical GGUF file slicing. A future implementation can use `physical_artifact` materialization when the manager or an offline build step creates standalone shard artifacts.
+
+Example:
+
+```json
+{
+  "protocol": "cdip",
+  "version": "0.1",
+  "type": "shard.manifest",
+  "model": {
+    "model_id": "qwen2.5-14b-instruct-q4-k-m",
+    "runtime": "llama.cpp",
+    "repository": "Qwen/Qwen2.5-14B-Instruct-GGUF",
+    "file": "qwen2.5-14b-instruct-q4_k_m.gguf",
+    "quant": "Q4_K_M",
+    "parameters": "14B"
+  },
+  "mode": "pipeline_layers",
+  "total_layers": 48,
+  "materialization": "logical_layers",
+  "shards": [
+    {
+      "stage": {
+        "index": 0,
+        "node_id": "node-a",
+        "layer_start": 0,
+        "layer_end": 23
+      },
+      "runtime": "llama.cpp",
+      "source_artifact": "https://huggingface.co/.../qwen.gguf",
+      "target_artifact": "qwen2.5-14b-instruct-q4-k-m.stage-0.layers-0-23",
+      "materialization": "logical_layers",
+      "capabilities": ["pipeline-stage-prepare", "pipeline-prefill", "pipeline-decode", "activation-stream-v1"]
+    },
+    {
+      "stage": {
+        "index": 1,
+        "node_id": "node-b",
+        "layer_start": 24,
+        "layer_end": 47
+      },
+      "runtime": "llama.cpp",
+      "source_artifact": "https://huggingface.co/.../qwen.gguf",
+      "target_artifact": "qwen2.5-14b-instruct-q4-k-m.stage-1.layers-24-47",
+      "materialization": "logical_layers",
+      "capabilities": ["pipeline-stage-prepare", "pipeline-prefill", "pipeline-decode", "activation-stream-v1"]
+    }
+  ],
+  "warnings": [
+    "logical layer split only; physical GGUF shard materialization is not implemented yet"
+  ]
+}
+```
+
+Shard manifest validation rules:
+
+- `model.model_id`, `model.runtime`, `mode`, and `materialization` are required.
+- `total_layers` MUST be positive.
+- every shard MUST have a runtime and materialization mode.
+- shard stages MUST be ordered by `stage.index`.
+- shard layer ranges MUST be contiguous and non-overlapping.
+- the first shard MUST start at layer `0`.
+- the final shard MUST end at `total_layers - 1`.
 
 ## Job Graph
 
@@ -322,4 +399,3 @@ A CDIP implementation should pass tests for:
 - activation frame envelope validation
 
 The reference implementation lives in `internal/cdip`.
-

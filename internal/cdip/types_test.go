@@ -58,6 +58,77 @@ func TestPlanProposalValidatesContiguousStageChain(t *testing.T) {
 	}
 }
 
+func TestShardManifestValidation(t *testing.T) {
+	msg := ShardManifest{
+		Envelope: NewEnvelope(MessageShardManifest),
+		Model: ModelArtifact{
+			ModelID:    "qwen",
+			Runtime:    "llama.cpp",
+			Repository: "Qwen/Qwen2.5-7B-Instruct-GGUF",
+			File:       "qwen.gguf",
+			Quant:      "Q4_K_M",
+			Bytes:      4 * 1024 * 1024 * 1024,
+		},
+		Mode:            "pipeline_layers",
+		TotalLayers:     28,
+		Materialization: ShardLogicalLayers,
+		Shards: []ModelShard{
+			{
+				Stage:           Stage{Index: 0, NodeID: "node-a", LayerStart: 0, LayerEnd: 13},
+				Runtime:         "llama.cpp",
+				Materialization: ShardLogicalLayers,
+				Capabilities:    []string{"pipeline-stage-prepare", "activation-stream-v1"},
+			},
+			{
+				Stage:           Stage{Index: 1, NodeID: "node-b", LayerStart: 14, LayerEnd: 27},
+				Runtime:         "llama.cpp",
+				Materialization: ShardLogicalLayers,
+				Capabilities:    []string{"pipeline-stage-prepare", "activation-stream-v1"},
+			},
+		},
+	}
+	if err := msg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	msg.Shards[1].Stage.LayerEnd = 26
+	if err := msg.Validate(); err == nil || !strings.Contains(err.Error(), "last shard") {
+		t.Fatalf("expected final layer coverage error, got %v", err)
+	}
+}
+
+func TestShardManifestRejectsBrokenStageChain(t *testing.T) {
+	msg := ShardManifest{
+		Envelope:        NewEnvelope(MessageShardManifest),
+		Model:           ModelArtifact{ModelID: "qwen", Runtime: "llama.cpp"},
+		Mode:            "pipeline_layers",
+		TotalLayers:     10,
+		Materialization: ShardLogicalLayers,
+		Shards: []ModelShard{
+			{Stage: Stage{Index: 0, NodeID: "node-a", LayerStart: 0, LayerEnd: 4}, Runtime: "llama.cpp", Materialization: ShardLogicalLayers},
+			{Stage: Stage{Index: 1, NodeID: "node-b", LayerStart: 6, LayerEnd: 9}, Runtime: "llama.cpp", Materialization: ShardLogicalLayers},
+		},
+	}
+	if err := msg.Validate(); err == nil || !strings.Contains(err.Error(), "expected 5") {
+		t.Fatalf("expected contiguous range error, got %v", err)
+	}
+}
+
+func TestShardManifestRejectsMissingRuntime(t *testing.T) {
+	msg := ShardManifest{
+		Envelope:        NewEnvelope(MessageShardManifest),
+		Model:           ModelArtifact{ModelID: "qwen", Runtime: "llama.cpp"},
+		Mode:            "pipeline_layers",
+		TotalLayers:     10,
+		Materialization: ShardLogicalLayers,
+		Shards: []ModelShard{
+			{Stage: Stage{Index: 0, NodeID: "node-a", LayerStart: 0, LayerEnd: 9}, Materialization: ShardLogicalLayers},
+		},
+	}
+	if err := msg.Validate(); err == nil || !strings.Contains(err.Error(), "runtime") {
+		t.Fatalf("expected runtime error, got %v", err)
+	}
+}
+
 func TestStagePrepareValidation(t *testing.T) {
 	msg := StagePrepare{
 		Envelope:    NewEnvelope(MessageStagePrepare),

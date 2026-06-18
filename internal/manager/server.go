@@ -822,8 +822,9 @@ func (s *Server) handleModelDistributedPlan(w http.ResponseWriter, r *http.Reque
 	}
 	plan := distributedModelPlan(model, s.state.Nodes())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"plan":          plan,
-		"cdip_proposal": cdipPlanProposal(plan),
+		"plan":                plan,
+		"cdip_proposal":       cdipPlanProposal(plan),
+		"cdip_shard_manifest": cdipShardManifest(model, plan),
 	})
 }
 

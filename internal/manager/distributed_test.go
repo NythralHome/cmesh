@@ -128,6 +128,30 @@ func TestModelDistributedPlanEndpoint(t *testing.T) {
 				LayerEnd   int    `json:"layer_end"`
 			} `json:"stages"`
 		} `json:"cdip_proposal"`
+		CDIPShardManifest struct {
+			Protocol        string `json:"protocol"`
+			Version         string `json:"version"`
+			Type            string `json:"type"`
+			Mode            string `json:"mode"`
+			TotalLayers     int    `json:"total_layers"`
+			Materialization string `json:"materialization"`
+			Model           struct {
+				ModelID string `json:"model_id"`
+				Runtime string `json:"runtime"`
+			} `json:"model"`
+			Shards []struct {
+				Runtime         string `json:"runtime"`
+				SourceArtifact  string `json:"source_artifact"`
+				TargetArtifact  string `json:"target_artifact"`
+				Materialization string `json:"materialization"`
+				Stage           struct {
+					Index      int    `json:"index"`
+					NodeID     string `json:"node_id"`
+					LayerStart int    `json:"layer_start"`
+					LayerEnd   int    `json:"layer_end"`
+				} `json:"stage"`
+			} `json:"shards"`
+		} `json:"cdip_shard_manifest"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
@@ -143,6 +167,27 @@ func TestModelDistributedPlanEndpoint(t *testing.T) {
 	}
 	if payload.CDIPProposal.ModelID != payload.Plan.ModelID || len(payload.CDIPProposal.Stages) != len(payload.Plan.Stages) {
 		t.Fatalf("expected cdip proposal to mirror plan, got %#v", payload.CDIPProposal)
+	}
+	if payload.CDIPShardManifest.Protocol != "cdip" || payload.CDIPShardManifest.Version != "0.1" || payload.CDIPShardManifest.Type != "shard.manifest" {
+		t.Fatalf("expected cdip shard manifest, got %#v", payload.CDIPShardManifest)
+	}
+	if payload.CDIPShardManifest.Model.ModelID != payload.Plan.ModelID || payload.CDIPShardManifest.Model.Runtime != payload.Plan.Runtime {
+		t.Fatalf("expected shard manifest model to mirror plan, got %#v", payload.CDIPShardManifest.Model)
+	}
+	if payload.CDIPShardManifest.Mode != payload.Plan.Mode || payload.CDIPShardManifest.TotalLayers != payload.Plan.TotalLayers {
+		t.Fatalf("expected shard manifest placement metadata to mirror plan, got %#v", payload.CDIPShardManifest)
+	}
+	if payload.CDIPShardManifest.Materialization != "logical_layers" || len(payload.CDIPShardManifest.Shards) != len(payload.Plan.Stages) {
+		t.Fatalf("expected logical shards for every plan stage, got %#v", payload.CDIPShardManifest)
+	}
+	for i, shard := range payload.CDIPShardManifest.Shards {
+		stage := payload.Plan.Stages[i]
+		if shard.Stage.Index != stage.Index || shard.Stage.NodeID != stage.NodeID || shard.Stage.LayerStart != stage.LayerStart || shard.Stage.LayerEnd != stage.LayerEnd {
+			t.Fatalf("expected shard %d to mirror plan stage, got %#v vs %#v", i, shard.Stage, stage)
+		}
+		if shard.Runtime == "" || shard.SourceArtifact == "" || shard.TargetArtifact == "" {
+			t.Fatalf("expected shard %d runtime and artifacts, got %#v", i, shard)
+		}
 	}
 }
 

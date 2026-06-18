@@ -16,6 +16,7 @@ type MessageType string
 const (
 	MessageNodeHello       MessageType = "node.hello"
 	MessagePlanProposal    MessageType = "plan.proposal"
+	MessageShardManifest   MessageType = "shard.manifest"
 	MessageStagePrepare    MessageType = "stage.prepare"
 	MessageStageReady      MessageType = "stage.ready"
 	MessageStagePrefill    MessageType = "stage.prefill"
@@ -55,7 +56,7 @@ func (e Envelope) Validate() error {
 
 func KnownMessageType(messageType MessageType) bool {
 	switch messageType {
-	case MessageNodeHello, MessagePlanProposal, MessageStagePrepare, MessageStageReady, MessageStagePrefill, MessageStageDecode, MessageStageComplete, MessageStageAbort, MessageActivationChunk, MessageError:
+	case MessageNodeHello, MessagePlanProposal, MessageShardManifest, MessageStagePrepare, MessageStageReady, MessageStagePrefill, MessageStageDecode, MessageStageComplete, MessageStageAbort, MessageActivationChunk, MessageError:
 		return true
 	default:
 		return false
@@ -143,6 +144,105 @@ func (m PlanProposal) Validate() error {
 		return errors.New("mode is required")
 	}
 	return ValidateStageChain(m.Stages)
+}
+
+type ShardMaterialization string
+
+const (
+	ShardLogicalLayers    ShardMaterialization = "logical_layers"
+	ShardPhysicalArtifact ShardMaterialization = "physical_artifact"
+)
+
+type ModelArtifact struct {
+	ModelID    string `json:"model_id"`
+	Runtime    string `json:"runtime"`
+	Repository string `json:"repository,omitempty"`
+	File       string `json:"file,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Quant      string `json:"quant,omitempty"`
+	Parameters string `json:"parameters,omitempty"`
+	Checksum   string `json:"checksum,omitempty"`
+	Bytes      uint64 `json:"bytes,omitempty"`
+}
+
+type ModelShard struct {
+	Stage               Stage                `json:"stage"`
+	Runtime             string               `json:"runtime"`
+	RequiredMemoryBytes uint64               `json:"required_memory_bytes,omitempty"`
+	RequiredDiskBytes   uint64               `json:"required_disk_bytes,omitempty"`
+	SourceArtifact      string               `json:"source_artifact,omitempty"`
+	TargetArtifact      string               `json:"target_artifact,omitempty"`
+	Materialization     ShardMaterialization `json:"materialization"`
+	Capabilities        []string             `json:"capabilities,omitempty"`
+}
+
+type ShardManifest struct {
+	Envelope
+	Model           ModelArtifact        `json:"model"`
+	Mode            string               `json:"mode"`
+	TotalLayers     int                  `json:"total_layers"`
+	Materialization ShardMaterialization `json:"materialization"`
+	Shards          []ModelShard         `json:"shards"`
+	Warnings        []string             `json:"warnings,omitempty"`
+}
+
+func (m ShardManifest) Validate() error {
+	if err := m.Envelope.Validate(); err != nil {
+		return err
+	}
+	if m.Type != MessageShardManifest {
+		return fmt.Errorf("expected %s message, got %s", MessageShardManifest, m.Type)
+	}
+	if strings.TrimSpace(m.Model.ModelID) == "" {
+		return errors.New("model.model_id is required")
+	}
+	if strings.TrimSpace(m.Model.Runtime) == "" {
+		return errors.New("model.runtime is required")
+	}
+	if strings.TrimSpace(m.Mode) == "" {
+		return errors.New("mode is required")
+	}
+	if m.TotalLayers <= 0 {
+		return errors.New("total_layers must be positive")
+	}
+	if !KnownShardMaterialization(m.Materialization) {
+		return fmt.Errorf("unknown shard materialization %q", m.Materialization)
+	}
+	if len(m.Shards) == 0 {
+		return errors.New("at least one shard is required")
+	}
+	stages := make([]Stage, 0, len(m.Shards))
+	for i, shard := range m.Shards {
+		if strings.TrimSpace(shard.Runtime) == "" {
+			return fmt.Errorf("shard %d runtime is required", i)
+		}
+		if !KnownShardMaterialization(shard.Materialization) {
+			return fmt.Errorf("shard %d materialization %q is invalid", i, shard.Materialization)
+		}
+		if shard.Stage.LayerEnd >= m.TotalLayers {
+			return fmt.Errorf("shard %d layer_end %d exceeds total_layers %d", i, shard.Stage.LayerEnd, m.TotalLayers)
+		}
+		stages = append(stages, shard.Stage)
+	}
+	if err := ValidateStageChain(stages); err != nil {
+		return err
+	}
+	if stages[0].LayerStart != 0 {
+		return fmt.Errorf("first shard must start at layer 0, got %d", stages[0].LayerStart)
+	}
+	if last := stages[len(stages)-1]; last.LayerEnd != m.TotalLayers-1 {
+		return fmt.Errorf("last shard must end at layer %d, got %d", m.TotalLayers-1, last.LayerEnd)
+	}
+	return nil
+}
+
+func KnownShardMaterialization(materialization ShardMaterialization) bool {
+	switch materialization {
+	case ShardLogicalLayers, ShardPhysicalArtifact:
+		return true
+	default:
+		return false
+	}
 }
 
 type StagePrepare struct {
