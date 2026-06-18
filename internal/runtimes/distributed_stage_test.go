@@ -7,6 +7,7 @@ import (
 
 	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/transport"
 )
 
 func TestLogicalStageRuntimePrepareStage(t *testing.T) {
@@ -48,5 +49,39 @@ func TestLogicalStageRuntimeRejectsMismatchedShard(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("expected mismatched shard error, got %v", err)
+	}
+}
+
+func TestLogicalStageRuntimeDecodeSendsActivationFrame(t *testing.T) {
+	ctx := context.Background()
+	stream := transport.StreamID{ParentJobID: "job-parent", StageJobID: "job-stage-0"}
+	bus := transport.NewMemoryActivationTransport(1)
+	reader, err := bus.OpenReader(ctx, stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewLogicalStageRuntime(LlamaCPPName)
+	result, err := runtime.DecodeStage(ctx, StageCommandRequest{
+		ParentJobID:         stream.ParentJobID,
+		StageJobID:          stream.StageJobID,
+		StageIndex:          0,
+		Step:                3,
+		ActivationTransport: bus,
+		DownstreamNodeID:    "node-b",
+		ActivationPayload:   []byte{3, 9},
+		ActivationChecksum:  "mock:3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Kind != "cdip.stage_decode" || result.ActivationFrame == nil || result.ActivationBytes != 2 {
+		t.Fatalf("unexpected decode result: %#v", result)
+	}
+	frame, err := reader.Receive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Header.Sequence != 3 || frame.Header.Checksum != "mock:3" || string(frame.Payload) != string([]byte{3, 9}) {
+		t.Fatalf("unexpected activation frame: %#v", frame)
 	}
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/transport"
 )
 
 const ActivationStreamV1 = "activation-stream-v1"
@@ -38,18 +39,27 @@ type StagePrepareResult struct {
 }
 
 type StageCommandRequest struct {
-	ParentJobID string
-	StageJobID  string
-	StageIndex  int
-	Step        uint64
+	ParentJobID         string
+	StageJobID          string
+	StageIndex          int
+	Step                uint64
+	ActivationTransport transport.ActivationTransport
+	DownstreamNodeID    string
+	ActivationPayload   []byte
+	ActivationEncoding  string
+	ActivationShape     []int
+	ActivationDType     string
+	ActivationChecksum  string
 }
 
 type StageCommandResult struct {
-	Kind        string
-	ParentJobID string
-	StageJobID  string
-	StageIndex  int
-	Step        uint64
+	Kind            string                `json:"kind"`
+	ParentJobID     string                `json:"parent_job_id"`
+	StageJobID      string                `json:"stage_job_id"`
+	StageIndex      int                   `json:"stage_index"`
+	Step            uint64                `json:"step"`
+	ActivationFrame *cdip.ActivationChunk `json:"activation_frame,omitempty"`
+	ActivationBytes int                   `json:"activation_bytes,omitempty"`
 }
 
 type DistributedStageRuntime interface {
@@ -124,7 +134,53 @@ func (r LogicalStageRuntime) PrefillStage(ctx context.Context, req StageCommandR
 }
 
 func (r LogicalStageRuntime) DecodeStage(ctx context.Context, req StageCommandRequest) (StageCommandResult, error) {
-	return stageCommandResult(ctx, "cdip.stage_decode", req)
+	result, err := stageCommandResult(ctx, "cdip.stage_decode", req)
+	if err != nil {
+		return StageCommandResult{}, err
+	}
+	if req.ActivationTransport == nil || strings.TrimSpace(req.DownstreamNodeID) == "" {
+		return result, nil
+	}
+	if len(req.ActivationPayload) == 0 {
+		return StageCommandResult{}, fmt.Errorf("activation payload is required when downstream node is set")
+	}
+	encoding := strings.TrimSpace(req.ActivationEncoding)
+	if encoding == "" {
+		encoding = "mock"
+	}
+	dtype := strings.TrimSpace(req.ActivationDType)
+	if dtype == "" {
+		dtype = "u8"
+	}
+	shape := req.ActivationShape
+	if len(shape) == 0 {
+		shape = []int{1, 1, len(req.ActivationPayload)}
+	}
+	frame := transport.ActivationFrame{
+		Header: cdip.ActivationChunk{
+			Envelope:     cdip.NewEnvelope(cdip.MessageActivationChunk),
+			ParentJobID:  req.ParentJobID,
+			StageJobID:   req.StageJobID,
+			Sequence:     req.Step,
+			ContentType:  "application/vnd.cmesh.activation+binary",
+			Encoding:     encoding,
+			Shape:        shape,
+			DType:        dtype,
+			PayloadBytes: uint64(len(req.ActivationPayload)),
+			Checksum:     req.ActivationChecksum,
+		},
+		Payload: req.ActivationPayload,
+	}
+	writer, err := req.ActivationTransport.OpenWriter(ctx, transport.StreamID{ParentJobID: req.ParentJobID, StageJobID: req.StageJobID}, req.DownstreamNodeID)
+	if err != nil {
+		return StageCommandResult{}, err
+	}
+	if err := writer.Send(ctx, frame); err != nil {
+		return StageCommandResult{}, err
+	}
+	result.ActivationFrame = &frame.Header
+	result.ActivationBytes = len(frame.Payload)
+	return result, nil
 }
 
 func (r LogicalStageRuntime) CompleteStage(ctx context.Context, req StageCommandRequest) (StageCommandResult, error) {

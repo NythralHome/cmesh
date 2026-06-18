@@ -13,6 +13,7 @@ import (
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/runtimes"
 	"github.com/cmesh/cmesh/internal/transport"
 )
 
@@ -315,27 +316,22 @@ func startCDIPDecode(store Store, bus transport.ActivationTransport, parentJobID
 		if err != nil {
 			return CDIPCommandResult{}, err
 		}
-		writer, err := bus.OpenWriter(ctx, stream, downstream.AssignedTo)
-		if err != nil {
-			return CDIPCommandResult{}, err
-		}
 		payload := []byte{byte(i), byte(step)}
-		frame := transport.ActivationFrame{
-			Header: cdip.ActivationChunk{
-				Envelope:     cdip.NewEnvelope(cdip.MessageActivationChunk),
-				ParentJobID:  parent.ID,
-				StageJobID:   upstream.ID,
-				Sequence:     step,
-				ContentType:  "application/vnd.cmesh.activation+binary",
-				Encoding:     "mock",
-				Shape:        []int{1, 1, len(payload)},
-				DType:        "u8",
-				PayloadBytes: uint64(len(payload)),
-				Checksum:     fmt.Sprintf("mock:%d:%d:%s:%s", step, i, upstream.ID, downstream.ID),
-			},
-			Payload: payload,
-		}
-		if err := writer.Send(ctx, frame); err != nil {
+		stageRuntime := runtimes.NewLogicalStageRuntime(string(models.RuntimeLlamaCPP))
+		result, err := stageRuntime.DecodeStage(ctx, runtimes.StageCommandRequest{
+			ParentJobID:         parent.ID,
+			StageJobID:          upstream.ID,
+			StageIndex:          upstream.CDIPStageIndex,
+			Step:                step,
+			ActivationTransport: bus,
+			DownstreamNodeID:    downstream.AssignedTo,
+			ActivationPayload:   payload,
+			ActivationEncoding:  "mock",
+			ActivationShape:     []int{1, 1, len(payload)},
+			ActivationDType:     "u8",
+			ActivationChecksum:  fmt.Sprintf("mock:%d:%d:%s:%s", step, i, upstream.ID, downstream.ID),
+		})
+		if err != nil {
 			return CDIPCommandResult{}, err
 		}
 		received, err := reader.Receive(ctx)
@@ -344,6 +340,9 @@ func startCDIPDecode(store Store, bus transport.ActivationTransport, parentJobID
 		}
 		if err := received.Validate(); err != nil {
 			return CDIPCommandResult{}, err
+		}
+		if result.ActivationFrame == nil || received.Header.Checksum != result.ActivationFrame.Checksum {
+			return CDIPCommandResult{}, fmt.Errorf("activation frame relay mismatch for stage %s", upstream.ID)
 		}
 		frames = append(frames, received.Header)
 	}
