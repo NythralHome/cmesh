@@ -43,6 +43,8 @@ llama.cpp also ships an RPC backend. In CMesh terms, that gives us a near-term d
 
 This does not replace CDIP layer-stage execution. It is a runtime adapter strategy that can deliver real distributed llama.cpp execution sooner while the protocol-native activation-stage runtime remains under development.
 
+Source: [llama.cpp RPC backend README](https://github.com/ggml-org/llama.cpp/blob/master/tools/rpc/README.md).
+
 ## What CMesh Needs
 
 CMesh workers are separate machines or independent processes. A normal `llama-cli` invocation runs the whole model inside one runtime process and does not expose a stable external API for:

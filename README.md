@@ -89,6 +89,15 @@ make worker-desktop-run
 
 The local control API supports `X-CMesh-Control-Token` for `/v1/*` routes. The desktop app generates and passes this token automatically when it starts the bundled control process.
 
+The control API also manages the experimental `llama.cpp` RPC backend:
+
+- `GET /v1/runtime/llama.cpp/rpc/status`
+- `POST /v1/runtime/llama.cpp/rpc/start`
+- `POST /v1/runtime/llama.cpp/rpc/stop`
+- `POST /v1/runtime/llama.cpp/rpc/restart`
+
+By default the RPC backend binds to `127.0.0.1:50052`. This is intentional: upstream `llama.cpp` documents the RPC backend as fragile and insecure for open networks, so CMesh must explicitly mediate any public or cross-machine exposure.
+
 Worker invite links use the `cmesh://join` protocol. Release builds register that protocol through the macOS app bundle and through per-user registration on Windows/Linux when the app starts.
 
 Tagged releases publish early desktop bundles alongside CLI binaries:

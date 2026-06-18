@@ -171,6 +171,9 @@ func TestEnsureRuntimeRejectsWrongMethod(t *testing.T) {
 	for _, path := range []string{
 		"/v1/runtime/llama.cpp/ensure",
 		"/v1/runtime/llama.cpp/repair",
+		"/v1/runtime/llama.cpp/rpc/start",
+		"/v1/runtime/llama.cpp/rpc/stop",
+		"/v1/runtime/llama.cpp/rpc/restart",
 	} {
 		req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
 		if err != nil {
@@ -184,6 +187,24 @@ func TestEnsureRuntimeRejectsWrongMethod(t *testing.T) {
 		if resp.StatusCode != http.StatusMethodNotAllowed {
 			t.Fatalf("expected 405 for %s, got %s", path, resp.Status)
 		}
+	}
+}
+
+func TestLlamaCPPRPCStatusRejectsWrongMethod(t *testing.T) {
+	_, baseURL, stop := startTestServer(t)
+	defer stop()
+
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/runtime/llama.cpp/rpc/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %s", resp.Status)
 	}
 }
 
@@ -244,6 +265,24 @@ func TestWorkerArgs(t *testing.T) {
 	}
 }
 
+func TestLlamaCPPRPCArgs(t *testing.T) {
+	args := llamaCPPRPCArgs(Config{
+		RPCHost:  "127.0.0.1",
+		RPCPort:  50052,
+		RPCCache: true,
+	})
+	got := stringsJoin(args)
+	for _, want := range []string{
+		"--host 127.0.0.1",
+		"--port 50052",
+		"-c",
+	} {
+		if !bytes.Contains([]byte(got), []byte(want)) {
+			t.Fatalf("expected args to contain %q, got %q", want, got)
+		}
+	}
+}
+
 func TestStopWorkerStopsProcess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-based process signal test is unix-only")
@@ -281,6 +320,57 @@ func TestStopWorkerStopsProcess(t *testing.T) {
 	}
 	if status := server.status(); status.Running {
 		t.Fatalf("expected worker to stop, got %+v", status)
+	}
+}
+
+func TestStartStopLlamaCPPRPCServer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based process signal test is unix-only")
+	}
+
+	dir := t.TempDir()
+	cli := filepath.Join(dir, "llama-cli")
+	rpcServer := filepath.Join(dir, "rpc-server")
+	if err := os.WriteFile(cli, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := []byte("#!/bin/sh\ntrap 'exit 0' INT TERM\nprintf 'rpc ready %s\\n' \"$*\"\nwhile :; do sleep 1; done\n")
+	if err := os.WriteFile(rpcServer, script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	server, err := NewServerWithToken("127.0.0.1:0", filepath.Join(dir, "worker-control.json"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.config = Config{
+		ManagerURL:     "https://cmesh.example.com",
+		NodeName:       "test-worker",
+		CPU:            1,
+		MemoryGB:       1,
+		DiskGB:         1,
+		RPCHost:        "127.0.0.1",
+		RPCPort:        50123,
+		RPCCache:       true,
+		WorkerCacheDir: filepath.Join(dir, "cache"),
+	}
+
+	if err := server.startLlamaCPPRPC(); err != nil {
+		t.Fatal(err)
+	}
+	status := server.status()
+	if !status.RPC.Running || status.RPC.PID == 0 {
+		t.Fatalf("expected rpc server running, got %+v", status.RPC)
+	}
+	if status.RPC.Endpoint != "127.0.0.1:50123" {
+		t.Fatalf("expected rpc endpoint, got %+v", status.RPC)
+	}
+	if err := server.stopLlamaCPPRPC(); err != nil {
+		t.Fatal(err)
+	}
+	if status := server.status(); status.RPC.Running {
+		t.Fatalf("expected rpc server stopped, got %+v", status.RPC)
 	}
 }
 

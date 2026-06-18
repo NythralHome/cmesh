@@ -34,8 +34,25 @@ type Config struct {
 	VRAMGB         int    `json:"vram_gb"`
 	JobSlots       int    `json:"job_slots"`
 	Benchmark      bool   `json:"benchmark"`
+	RPCHost        string `json:"rpc_host"`
+	RPCPort        int    `json:"rpc_port"`
+	RPCCache       bool   `json:"rpc_cache"`
 	WorkerBinary   string `json:"worker_binary"`
 	WorkerCacheDir string `json:"worker_cache_dir"`
+}
+
+type ProcessStatus struct {
+	Running   bool       `json:"running"`
+	PID       int        `json:"pid,omitempty"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	ExitCode  *int       `json:"exit_code,omitempty"`
+	LastError string     `json:"last_error,omitempty"`
+}
+
+type RPCRuntimeStatus struct {
+	ProcessStatus
+	Runtime  runtimes.RPCRuntimeProbe `json:"runtime"`
+	Endpoint string                   `json:"endpoint"`
 }
 
 type Status struct {
@@ -47,6 +64,7 @@ type Status struct {
 	LogTail    string                  `json:"log_tail"`
 	JobStatus  *workerstatus.JobStatus `json:"job_status,omitempty"`
 	Runtime    runtimes.RuntimeStatus  `json:"runtime_status"`
+	RPC        RPCRuntimeStatus        `json:"rpc_status"`
 	Models     []cluster.ModelResource `json:"models,omitempty"`
 	Config     Config                  `json:"config"`
 	ConfigPath string                  `json:"config_path"`
@@ -57,13 +75,17 @@ type Server struct {
 	configPath string
 	token      string
 
-	mu        sync.Mutex
-	config    Config
-	cmd       *exec.Cmd
-	startedAt *time.Time
-	exitCode  *int
-	lastError string
-	logTail   *tailBuffer
+	mu           sync.Mutex
+	config       Config
+	cmd          *exec.Cmd
+	startedAt    *time.Time
+	exitCode     *int
+	lastError    string
+	rpcCmd       *exec.Cmd
+	rpcStartedAt *time.Time
+	rpcExitCode  *int
+	rpcLastError string
+	logTail      *tailBuffer
 }
 
 func NewServer(addr string, configPath string) (*Server, error) {
@@ -101,6 +123,10 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/v1/disconnect", s.handleDisconnect)
 	mux.HandleFunc("/v1/runtime/llama.cpp/ensure", s.handleEnsureLlamaCPP)
 	mux.HandleFunc("/v1/runtime/llama.cpp/repair", s.handleEnsureLlamaCPP)
+	mux.HandleFunc("/v1/runtime/llama.cpp/rpc/status", s.handleLlamaCPPRPCStatus)
+	mux.HandleFunc("/v1/runtime/llama.cpp/rpc/start", s.handleStartLlamaCPPRPC)
+	mux.HandleFunc("/v1/runtime/llama.cpp/rpc/stop", s.handleStopLlamaCPPRPC)
+	mux.HandleFunc("/v1/runtime/llama.cpp/rpc/restart", s.handleRestartLlamaCPPRPC)
 
 	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -240,6 +266,63 @@ func (s *Server) handleEnsureLlamaCPP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.status())
 }
 
+func (s *Server) handleLlamaCPPRPCStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.status().RPC)
+}
+
+func (s *Server) handleStartLlamaCPPRPC(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.startLlamaCPPRPC(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.status().RPC)
+}
+
+func (s *Server) handleStopLlamaCPPRPC(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.stopLlamaCPPRPC(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.status().RPC)
+}
+
+func (s *Server) handleRestartLlamaCPPRPC(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	_ = s.stopLlamaCPPRPC()
+	if err := s.startLlamaCPPRPC(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.status().RPC)
+}
+
 func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r) {
 		return
@@ -252,6 +335,7 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	_ = s.stopLlamaCPPRPC()
 
 	s.mu.Lock()
 	cfg := s.config
@@ -347,6 +431,82 @@ func (s *Server) stopWorker() error {
 	}
 }
 
+func (s *Server) startLlamaCPPRPC() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rpcCmd != nil && s.rpcCmd.Process != nil {
+		return fmt.Errorf("llama.cpp rpc-server is already running")
+	}
+	cfg := normalizeConfig(s.config)
+	if err := validateRPCConfig(cfg); err != nil {
+		return err
+	}
+	runtimeStatus := runtimes.LlamaCPPStatus(cfg.WorkerCacheDir)
+	if !runtimeStatus.Ready {
+		if runtimeStatus.Error != "" {
+			return fmt.Errorf("llama.cpp runtime is not ready: %s", runtimeStatus.Error)
+		}
+		return fmt.Errorf("llama.cpp runtime is not ready")
+	}
+	probe := runtimes.NewLlamaCPPRPCRuntime(runtimeStatus.BinaryPath, rpcEndpoint(cfg)).Probe(context.Background())
+	if !probe.Ready {
+		return fmt.Errorf("llama.cpp rpc runtime is not ready: %s", strings.Join(probe.Blockers, "; "))
+	}
+	args := llamaCPPRPCArgs(cfg)
+	cmd := exec.Command(probe.ServerPath, args...)
+	configureWorkerCommand(cmd)
+	if cfg.RPCCache {
+		cmd.Env = append(os.Environ(), "LLAMA_CACHE="+filepath.Join(cfg.WorkerCacheDir, "runtimes", "llama.cpp-rpc-cache"))
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	s.rpcCmd = cmd
+	s.rpcStartedAt = &now
+	s.rpcExitCode = nil
+	s.rpcLastError = ""
+	s.logTail.WriteString(fmt.Sprintf("started llama.cpp rpc-server pid=%d endpoint=%s\n", cmd.Process.Pid, rpcEndpoint(cfg)))
+	go s.copyOutput(stdout)
+	go s.copyOutput(stderr)
+	go s.waitLlamaCPPRPC(cmd)
+	return nil
+}
+
+func (s *Server) stopLlamaCPPRPC() error {
+	s.mu.Lock()
+	cmd := s.rpcCmd
+	s.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	if err := interruptWorkerProcess(cmd); err != nil {
+		_ = killWorkerProcess(cmd)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		running := s.rpcCmd == cmd
+		s.mu.Unlock()
+		if !running {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			_ = killWorkerProcess(cmd)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func (s *Server) waitWorker(cmd *exec.Cmd) {
 	err := cmd.Wait()
 	exitCode := 0
@@ -370,6 +530,29 @@ func (s *Server) waitWorker(cmd *exec.Cmd) {
 	}
 }
 
+func (s *Server) waitLlamaCPPRPC(cmd *exec.Cmd) {
+	err := cmd.Wait()
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rpcCmd == cmd {
+		s.rpcCmd = nil
+		s.rpcStartedAt = nil
+		s.rpcExitCode = &exitCode
+		if err != nil {
+			s.rpcLastError = err.Error()
+		}
+		s.logTail.WriteString(fmt.Sprintf("llama.cpp rpc-server exited code=%d\n", exitCode))
+	}
+}
+
 func (s *Server) copyOutput(reader io.Reader) {
 	buf := make([]byte, 4096)
 	for {
@@ -388,22 +571,38 @@ func (s *Server) copyOutput(reader io.Reader) {
 func (s *Server) status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	cfg := normalizeConfig(s.config)
+	runtimeStatus := runtimes.LlamaCPPStatus(cfg.WorkerCacheDir)
+	rpcRuntime := runtimes.NewLlamaCPPRPCRuntime(runtimeStatus.BinaryPath, rpcEndpoint(cfg)).Probe(context.Background())
 	status := Status{
-		Running:    s.cmd != nil && s.cmd.Process != nil,
-		StartedAt:  s.startedAt,
-		ExitCode:   s.exitCode,
-		LastError:  s.lastError,
-		LogTail:    s.logTail.String(),
-		Runtime:    runtimes.LlamaCPPStatus(s.config.WorkerCacheDir),
-		Models:     resources.DiscoverInstalledModels(s.config.WorkerCacheDir),
-		Config:     s.config,
+		Running:   s.cmd != nil && s.cmd.Process != nil,
+		StartedAt: s.startedAt,
+		ExitCode:  s.exitCode,
+		LastError: s.lastError,
+		LogTail:   s.logTail.String(),
+		Runtime:   runtimeStatus,
+		RPC: RPCRuntimeStatus{
+			ProcessStatus: ProcessStatus{
+				Running:   s.rpcCmd != nil && s.rpcCmd.Process != nil,
+				StartedAt: s.rpcStartedAt,
+				ExitCode:  s.rpcExitCode,
+				LastError: s.rpcLastError,
+			},
+			Runtime:  rpcRuntime,
+			Endpoint: rpcEndpoint(cfg),
+		},
+		Models:     resources.DiscoverInstalledModels(cfg.WorkerCacheDir),
+		Config:     cfg,
 		ConfigPath: s.configPath,
 	}
-	if jobStatus, ok := workerstatus.Read(s.config.WorkerCacheDir); ok {
+	if jobStatus, ok := workerstatus.Read(cfg.WorkerCacheDir); ok {
 		status.JobStatus = &jobStatus
 	}
 	if status.Running {
 		status.PID = s.cmd.Process.Pid
+	}
+	if status.RPC.Running {
+		status.RPC.PID = s.rpcCmd.Process.Pid
 	}
 	return status
 }
@@ -446,6 +645,9 @@ func defaultConfig() Config {
 		VRAMGB:         0,
 		JobSlots:       1,
 		Benchmark:      true,
+		RPCHost:        "127.0.0.1",
+		RPCPort:        50052,
+		RPCCache:       true,
 		WorkerCacheDir: defaultCacheDir(),
 	}
 }
@@ -457,6 +659,7 @@ func normalizeConfig(cfg Config) Config {
 	cfg.NodeName = strings.TrimSpace(cfg.NodeName)
 	cfg.WorkerBinary = strings.TrimSpace(cfg.WorkerBinary)
 	cfg.WorkerCacheDir = strings.TrimSpace(cfg.WorkerCacheDir)
+	cfg.RPCHost = strings.TrimSpace(cfg.RPCHost)
 	if cfg.ManagerURL == "" {
 		cfg.ManagerURL = defaults.ManagerURL
 	}
@@ -474,6 +677,12 @@ func normalizeConfig(cfg Config) Config {
 	}
 	if cfg.JobSlots == 0 {
 		cfg.JobSlots = defaults.JobSlots
+	}
+	if cfg.RPCHost == "" {
+		cfg.RPCHost = defaults.RPCHost
+	}
+	if cfg.RPCPort == 0 {
+		cfg.RPCPort = defaults.RPCPort
 	}
 	if cfg.WorkerCacheDir == "" {
 		cfg.WorkerCacheDir = defaults.WorkerCacheDir
@@ -499,6 +708,16 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.JobSlots <= 0 {
 		return fmt.Errorf("job_slots must be greater than zero")
+	}
+	return validateRPCConfig(cfg)
+}
+
+func validateRPCConfig(cfg Config) error {
+	if strings.TrimSpace(cfg.RPCHost) == "" {
+		return fmt.Errorf("rpc_host is required")
+	}
+	if cfg.RPCPort <= 0 || cfg.RPCPort > 65535 {
+		return fmt.Errorf("rpc_port must be between 1 and 65535")
 	}
 	return nil
 }
@@ -528,6 +747,21 @@ func workerArgs(cfg Config) []string {
 		args = append(args, "--benchmark")
 	}
 	return args
+}
+
+func llamaCPPRPCArgs(cfg Config) []string {
+	args := []string{
+		"--host", cfg.RPCHost,
+		"--port", strconv.Itoa(cfg.RPCPort),
+	}
+	if cfg.RPCCache {
+		args = append(args, "-c")
+	}
+	return args
+}
+
+func rpcEndpoint(cfg Config) string {
+	return net.JoinHostPort(cfg.RPCHost, strconv.Itoa(cfg.RPCPort))
 }
 
 func resolveWorkerBinary(configured string) (string, error) {
