@@ -1786,6 +1786,44 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 	return plan
 }
 
+func distributedRPCExecutionPlanForJob(plan ModelDistributedRPCPlan) models.DistributedRPCExecutionPlan {
+	backends := make([]models.DistributedRPCBackend, 0, len(plan.Backends))
+	for _, backend := range plan.Backends {
+		if !rpcPlanContainsEndpoint(plan.RPCEndpoints, backend.Endpoint) {
+			continue
+		}
+		backends = append(backends, models.DistributedRPCBackend{
+			NodeID:       backend.NodeID,
+			NodeName:     backend.NodeName,
+			Runtime:      backend.Runtime,
+			Endpoint:     backend.Endpoint,
+			HealthStatus: backend.HealthStatus,
+			LatencyMS:    backend.LatencyMS,
+			Error:        backend.Error,
+		})
+	}
+	return models.DistributedRPCExecutionPlan{
+		ID:                  newJobID(),
+		Mode:                plan.Mode,
+		ModelID:             plan.ModelID,
+		CoordinatorNodeID:   plan.CoordinatorNodeID,
+		CoordinatorNodeName: plan.CoordinatorNodeName,
+		RPCEndpoints:        append([]string(nil), plan.RPCEndpoints...),
+		Backends:            backends,
+		HealthChecked:       plan.HealthChecked,
+		PlannedAt:           time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+func rpcPlanContainsEndpoint(endpoints []string, endpoint string) bool {
+	for _, candidate := range endpoints {
+		if candidate == endpoint {
+			return true
+		}
+	}
+	return false
+}
+
 func rpcWorkersByEndpoint(workers []RuntimeRPCPoolWorker) map[string]RuntimeRPCPoolWorker {
 	out := make(map[string]RuntimeRPCPoolWorker, len(workers))
 	for _, worker := range workers {
@@ -1860,6 +1898,7 @@ func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *htt
 	})
 	effectiveSystemPrompt := systemPromptWithMemory(systemPrompt, model.ID, s.state)
 	budgetedMessages := budgetConversationMessages(model, effectiveSystemPrompt, conversation.Messages, maxTokens)
+	executionPlan := distributedRPCExecutionPlanForJob(plan)
 	input, err := json.Marshal(models.DistributedRPCGenerateInput{
 		ModelID:        model.ID,
 		Prompt:         req.Prompt,
@@ -1869,6 +1908,7 @@ func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *htt
 		MaxTokens:      maxTokens,
 		Temperature:    temperature,
 		RPCEndpoints:   plan.RPCEndpoints,
+		ExecutionPlan:  executionPlan,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

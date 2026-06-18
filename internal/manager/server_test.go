@@ -2294,6 +2294,15 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 	if input.ModelID != "qwen2.5-0.5b-instruct-q4-k-m" || input.Prompt != "hello" || len(input.RPCEndpoints) != 1 || input.RPCEndpoints[0] != listener.Addr().String() {
 		t.Fatalf("unexpected distributed rpc input: %#v", input)
 	}
+	if input.ExecutionPlan.Mode != "llama.cpp-rpc" || input.ExecutionPlan.ModelID != input.ModelID || input.ExecutionPlan.CoordinatorNodeID != job.AssignedTo {
+		t.Fatalf("unexpected distributed rpc execution plan: %#v", input.ExecutionPlan)
+	}
+	if !input.ExecutionPlan.HealthChecked || len(input.ExecutionPlan.RPCEndpoints) != 1 || input.ExecutionPlan.RPCEndpoints[0] != listener.Addr().String() {
+		t.Fatalf("expected health-checked execution endpoints, got %#v", input.ExecutionPlan)
+	}
+	if len(input.ExecutionPlan.Backends) != 1 || input.ExecutionPlan.Backends[0].Endpoint != listener.Addr().String() || input.ExecutionPlan.Backends[0].HealthStatus != "ready" {
+		t.Fatalf("unexpected distributed rpc execution backends: %#v", input.ExecutionPlan.Backends)
+	}
 }
 
 func TestModelDistributedRPCPlanHealthCheckExcludesFailedEndpoints(t *testing.T) {
