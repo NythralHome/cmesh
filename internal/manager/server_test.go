@@ -3,6 +3,7 @@ package manager
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -2086,6 +2087,67 @@ func TestRuntimeRPCPoolEndpointReportsReadyEndpoints(t *testing.T) {
 	}
 	if len(payload.Endpoints) != 1 || payload.Endpoints[0] != "10.0.0.10:50052" || payload.LlamaCLIRPCArg != "10.0.0.10:50052" {
 		t.Fatalf("unexpected rpc endpoints: endpoints=%#v arg=%q", payload.Endpoints, payload.LlamaCLIRPCArg)
+	}
+}
+
+func TestRuntimeRPCPoolSmokeEndpoint(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "rpc-smoke-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: listener.Addr().String(),
+			}},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/runtime/rpc-pool/smoke?timeout_ms=500", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload RuntimeRPCSmokeReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Checked != 1 || payload.Ready != 1 || payload.Failed != 0 || !payload.RunnableNow {
+		t.Fatalf("unexpected smoke report: %#v", payload)
+	}
+	if len(payload.Results) != 1 || !payload.Results[0].Ready || payload.Results[0].Endpoint != listener.Addr().String() {
+		t.Fatalf("unexpected smoke results: %#v", payload.Results)
+	}
+}
+
+func TestRuntimeRPCPoolSmokeEndpointRequiresActiveEndpoints(t *testing.T) {
+	srv := NewServer(":0", NewState())
+	req := httptest.NewRequest(http.MethodPost, "/v1/runtime/rpc-pool/smoke", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

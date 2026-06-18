@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -83,6 +84,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/dashboard/status", s.handleDashboardStatus)
 	mux.HandleFunc("/v1/runtime/stage-probes", s.handleRuntimeStageProbes)
 	mux.HandleFunc("/v1/runtime/rpc-pool", s.handleRuntimeRPCPool)
+	mux.HandleFunc("/v1/runtime/rpc-pool/smoke", s.handleRuntimeRPCPoolSmoke)
 	mux.HandleFunc("/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/v1/cluster-benchmarks", s.handleClusterBenchmarks)
@@ -628,6 +630,23 @@ type RuntimeRPCPoolWorker struct {
 	Capabilities []string                   `json:"capabilities,omitempty"`
 }
 
+type RuntimeRPCSmokeResult struct {
+	Endpoint  string `json:"endpoint"`
+	Ready     bool   `json:"ready"`
+	LatencyMS int64  `json:"latency_ms,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type RuntimeRPCSmokeReport struct {
+	Checked     int                     `json:"checked"`
+	Ready       int                     `json:"ready"`
+	Failed      int                     `json:"failed"`
+	TimeoutMS   int                     `json:"timeout_ms"`
+	DurationMS  int64                   `json:"duration_ms"`
+	Results     []RuntimeRPCSmokeResult `json:"results"`
+	RunnableNow bool                    `json:"runnable_now"`
+}
+
 func (s *Server) handleRuntimeRPCPool(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperatorAuth(w, r, false) {
 		return
@@ -643,6 +662,72 @@ func (s *Server) handleRuntimeRPCPool(w http.ResponseWriter, r *http.Request) {
 		"endpoints":         endpoints,
 		"llama_cli_rpc_arg": strings.Join(endpoints, ","),
 	})
+}
+
+func (s *Server) handleRuntimeRPCPoolSmoke(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	timeoutMS := intQuery(r, "timeout_ms", 1000)
+	if timeoutMS < 100 {
+		timeoutMS = 100
+	}
+	if timeoutMS > 5000 {
+		timeoutMS = 5000
+	}
+	_, _, endpoints := runtimeRPCPoolReport(s.state.Nodes())
+	report := smokeRuntimeRPCEndpoints(r.Context(), endpoints, time.Duration(timeoutMS)*time.Millisecond)
+	report.TimeoutMS = timeoutMS
+	status := http.StatusOK
+	if report.Checked == 0 {
+		status = http.StatusConflict
+	}
+	writeJSON(w, status, report)
+}
+
+func smokeRuntimeRPCEndpoints(ctx context.Context, endpoints []string, timeout time.Duration) RuntimeRPCSmokeReport {
+	started := time.Now()
+	report := RuntimeRPCSmokeReport{
+		Checked: len(endpoints),
+		Results: make([]RuntimeRPCSmokeResult, 0, len(endpoints)),
+	}
+	for _, endpoint := range endpoints {
+		result := smokeRuntimeRPCEndpoint(ctx, endpoint, timeout)
+		if result.Ready {
+			report.Ready++
+		} else {
+			report.Failed++
+		}
+		report.Results = append(report.Results, result)
+	}
+	report.DurationMS = time.Since(started).Milliseconds()
+	report.RunnableNow = report.Checked > 0 && report.Failed == 0
+	return report
+}
+
+func smokeRuntimeRPCEndpoint(ctx context.Context, endpoint string, timeout time.Duration) RuntimeRPCSmokeResult {
+	endpoint = strings.TrimSpace(endpoint)
+	result := RuntimeRPCSmokeResult{Endpoint: endpoint}
+	if endpoint == "" {
+		result.Error = "empty endpoint"
+		return result
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	started := time.Now()
+	conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", endpoint)
+	result.LatencyMS = time.Since(started).Milliseconds()
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	_ = conn.Close()
+	result.Ready = true
+	return result
 }
 
 func runtimeRPCPoolReport(nodes []cluster.Node) (RuntimeRPCPoolSummary, []RuntimeRPCPoolWorker, []string) {
@@ -5495,6 +5580,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         <strong>llama-cli RPC argument</strong><br>
         <code>--rpc {{range $index, $endpoint := .RPCEndpoints}}{{if $index}},{{end}}{{$endpoint}}{{end}}</code>
       </div>
+      <div class="actions">
+        <button class="button primary" type="button" id="rpc-smoke-run"><svg class="icon"><use href="#icon-play"></use></svg><span>Run RPC smoke test</span></button>
+      </div>
+      <div class="runner-status" id="rpc-smoke-result">Smoke test checks TCP reachability for active RPC endpoints before distributed inference.</div>
       {{else}}
       <div class="empty">No RPC backend is active yet. Open Worker Desktop on a runtime-ready machine and start RPC backend from the AI runtime tab.</div>
       {{end}}
@@ -6291,6 +6380,70 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         activateTab(button.dataset.tabShortcut, true);
       });
     });
+    var rpcSmokeButton = document.getElementById("rpc-smoke-run");
+    var rpcSmokeResult = document.getElementById("rpc-smoke-result");
+    function renderRPCSmokeReport(report) {
+      if (!rpcSmokeResult) return;
+      rpcSmokeResult.innerHTML = "";
+      var summary = document.createElement("strong");
+      summary.textContent = "Checked " + (report.checked || 0) + " endpoint(s): " + (report.ready || 0) + " ready, " + (report.failed || 0) + " failed.";
+      rpcSmokeResult.appendChild(summary);
+      var list = document.createElement("div");
+      list.className = "result-grid";
+      (report.results || []).forEach(function(result) {
+        var item = document.createElement("div");
+        var label = document.createElement("span");
+        label.textContent = result.endpoint || "endpoint";
+        var value = document.createElement("strong");
+        value.textContent = result.ready ? "ready · " + (result.latency_ms || 0) + " ms" : "failed";
+        item.appendChild(label);
+        item.appendChild(value);
+        if (result.error) {
+          var detail = document.createElement("span");
+          detail.className = "sub";
+          detail.textContent = result.error;
+          item.appendChild(detail);
+        }
+        list.appendChild(item);
+      });
+      rpcSmokeResult.appendChild(list);
+      if (report.duration_ms !== undefined) {
+        var duration = document.createElement("span");
+        duration.className = "sub";
+        duration.textContent = "Total smoke duration " + report.duration_ms + " ms.";
+        rpcSmokeResult.appendChild(duration);
+      }
+    }
+    if (rpcSmokeButton) {
+      rpcSmokeButton.addEventListener("click", function() {
+        rpcSmokeButton.disabled = true;
+        setButtonText(rpcSmokeButton, "Testing...");
+        if (rpcSmokeResult) rpcSmokeResult.textContent = "Checking active RPC endpoints...";
+        fetch("/v1/runtime/rpc-pool/smoke?timeout_ms=1000", {
+          method: "POST"
+        }).then(function(response) {
+          return response.json().then(function(payload) {
+            if (!response.ok) {
+              var error = new Error(payload.error || response.statusText);
+              error.payload = payload;
+              throw error;
+            }
+            return payload;
+          });
+        }).then(function(payload) {
+          renderRPCSmokeReport(payload);
+        }).catch(function(error) {
+          if (error.payload && error.payload.results) {
+            renderRPCSmokeReport(error.payload);
+          } else if (rpcSmokeResult) {
+            rpcSmokeResult.textContent = "RPC smoke test failed: " + error.message;
+          }
+        }).finally(function() {
+          rpcSmokeButton.disabled = false;
+          setButtonText(rpcSmokeButton, "Run RPC smoke test");
+        });
+      });
+    }
     function initialDashboardTab() {
       var fromHash = (window.location.hash || "").replace("#", "").split("?")[0];
       if (fromHash) return fromHash;
