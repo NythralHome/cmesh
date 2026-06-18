@@ -2273,6 +2273,65 @@ func TestJobDetailShowsDistributedRPCExecutionTrace(t *testing.T) {
 	}
 }
 
+func TestDistributedRunSummariesExtractPlanAndResult(t *testing.T) {
+	plan := protocol.DistributedRPCExecutionPlan{
+		ID:                  "plan-abc123",
+		Protocol:            protocol.DistributedRPCProtocol,
+		ProtocolVersion:     protocol.DistributedRPCProtocolVersion,
+		PlanSchemaVersion:   protocol.DistributedRPCPlanSchemaVersion,
+		Mode:                "llama.cpp-rpc",
+		ModelID:             "qwen2.5-0.5b-instruct-q4-k-m",
+		CoordinatorNodeID:   "node-a",
+		CoordinatorNodeName: "worker-a",
+		RPCEndpoints:        []string{"10.0.0.10:50052"},
+	}
+	input, err := json.Marshal(models.DistributedRPCGenerateInput{
+		ModelID:       plan.ModelID,
+		Prompt:        "hello",
+		RPCEndpoints:  plan.RPCEndpoints,
+		ExecutionPlan: plan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := json.Marshal(map[string]any{
+		"output": "hello from rpc",
+		"execution_result": protocol.DistributedRPCExecutionResult{
+			Protocol:          protocol.DistributedRPCProtocol,
+			ProtocolVersion:   protocol.DistributedRPCProtocolVersion,
+			PlanSchemaVersion: protocol.DistributedRPCPlanSchemaVersion,
+			PlanID:            plan.ID,
+			Kind:              models.JobGenerateDistributedRPC,
+			ModelID:           plan.ModelID,
+			Output:            "hello from rpc",
+			Runtime:           "llama.cpp",
+			WorkerRuntime:     "linux/amd64",
+			RPCEndpoints:      plan.RPCEndpoints,
+			RPCEndpointCount:  1,
+			DurationMS:        88,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := distributedRunSummaries([]jobs.Job{{
+		ID:         "job-run-1",
+		Type:       models.JobGenerateDistributedRPC,
+		Status:     jobs.StatusSucceeded,
+		Input:      string(input),
+		Result:     string(result),
+		CreatedAt:  time.Now().UTC(),
+		FinishedAt: time.Now().UTC(),
+	}}, 10)
+	if len(runs) != 1 {
+		t.Fatalf("expected one distributed run, got %#v", runs)
+	}
+	run := runs[0]
+	if run.PlanID != plan.ID || run.ModelID != plan.ModelID || run.CoordinatorNodeName != "worker-a" || run.DurationMS != 88 || run.EndpointCount != 1 || run.Output != "hello from rpc" {
+		t.Fatalf("unexpected distributed run summary: %#v", run)
+	}
+}
+
 func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

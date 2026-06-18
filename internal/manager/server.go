@@ -236,6 +236,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		WorkerActiveJobs   map[string]int
 		MaxClusterGFLOPS   float64
 		Jobs               []jobs.Job
+		DistributedRuns    []DistributedRunSummary
 		ChatJobs           []jobs.Job
 		Conversations      []Conversation
 		Memories           []Memory
@@ -257,6 +258,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		WorkerActiveJobs:   activeJobsByWorker(allJobs),
 		MaxClusterGFLOPS:   maxClusterBenchmarkGFLOPS(clusterBenchmarks),
 		Jobs:               recentJobs(allJobs, 12),
+		DistributedRuns:    distributedRunSummaries(allJobs, 20),
 		ChatJobs:           recentChatJobs(allJobs, 6),
 		Conversations:      recentConversations(s.state, 12),
 		Memories:           recentMemories(s.state, 12),
@@ -2782,6 +2784,86 @@ func recentChatJobs(in []jobs.Job, limit int) []jobs.Job {
 	return recentJobs(out, limit)
 }
 
+type DistributedRunSummary struct {
+	JobID               string
+	Status              jobs.Status
+	ModelID             string
+	PlanID              string
+	Mode                string
+	CoordinatorNodeID   string
+	CoordinatorNodeName string
+	Protocol            string
+	ProtocolVersion     int
+	SchemaVersion       int
+	Runtime             string
+	RuntimeVersion      string
+	WorkerRuntime       string
+	Endpoints           []string
+	EndpointCount       int
+	DurationMS          int64
+	Output              string
+	Error               string
+	CreatedAt           time.Time
+	FinishedAt          time.Time
+}
+
+func distributedRunSummaries(in []jobs.Job, limit int) []DistributedRunSummary {
+	out := make([]DistributedRunSummary, 0)
+	for _, job := range in {
+		if job.Type != models.JobGenerateDistributedRPC {
+			continue
+		}
+		summary := DistributedRunSummary{
+			JobID:      job.ID,
+			Status:     job.Status,
+			Error:      firstNonEmptyString(job.Error, job.LastFailure),
+			CreatedAt:  job.CreatedAt,
+			FinishedAt: job.FinishedAt,
+		}
+		var input models.DistributedRPCGenerateInput
+		if err := json.Unmarshal([]byte(job.Input), &input); err == nil {
+			summary.ModelID = input.ModelID
+			summary.PlanID = input.ExecutionPlan.ID
+			summary.Mode = input.ExecutionPlan.Mode
+			summary.CoordinatorNodeID = input.ExecutionPlan.CoordinatorNodeID
+			summary.CoordinatorNodeName = input.ExecutionPlan.CoordinatorNodeName
+			summary.Protocol = input.ExecutionPlan.Protocol
+			summary.ProtocolVersion = input.ExecutionPlan.ProtocolVersion
+			summary.SchemaVersion = input.ExecutionPlan.PlanSchemaVersion
+			summary.Endpoints = append([]string(nil), input.ExecutionPlan.RPCEndpoints...)
+			summary.EndpointCount = len(input.ExecutionPlan.RPCEndpoints)
+		}
+		if result, ok := distributedRPCExecutionResult(job); ok {
+			summary.PlanID = firstNonEmptyString(result.PlanID, summary.PlanID)
+			summary.Protocol = firstNonEmptyString(result.Protocol, summary.Protocol)
+			if result.ProtocolVersion != 0 {
+				summary.ProtocolVersion = result.ProtocolVersion
+			}
+			if result.PlanSchemaVersion != 0 {
+				summary.SchemaVersion = result.PlanSchemaVersion
+			}
+			summary.Runtime = result.Runtime
+			summary.RuntimeVersion = result.RuntimeVersion
+			summary.WorkerRuntime = result.WorkerRuntime
+			summary.Endpoints = append([]string(nil), result.RPCEndpoints...)
+			summary.EndpointCount = result.RPCEndpointCount
+			if summary.EndpointCount == 0 {
+				summary.EndpointCount = len(result.RPCEndpoints)
+			}
+			summary.DurationMS = result.DurationMS
+			summary.Output = result.Output
+		}
+		out = append(out, summary)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
 func activeGenerateJobForConversation(in []jobs.Job, conversationID string) string {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
@@ -4267,6 +4349,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 			return ""
 		}
 		return strings.Join(result.RPCEndpoints, ", ")
+	},
+	"joinStrings": func(values []string, sep string) string {
+		return strings.Join(values, sep)
 	},
 }).Parse(`<!doctype html>
 <html lang="en">
@@ -5763,6 +5848,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <button class="tab-button" type="button" data-tab-target="readiness"><svg class="icon"><use href="#icon-chart"></use></svg><span>Readiness</span><strong class="nav-badge {{.Readiness.Status}}" data-nav-badge="readiness">{{.Readiness.Status}}</strong></button>
               <button class="tab-button" type="button" data-tab-target="workers"><svg class="icon"><use href="#icon-workers"></use></svg><span>Workers</span><strong class="nav-badge" data-nav-badge="workers">{{.Summary.WorkersOnline}}/{{.Summary.WorkersTotal}}</strong></button>
               <button class="tab-button" type="button" data-tab-target="rpc-pool"><svg class="icon"><use href="#icon-chart"></use></svg><span>RPC Pool</span><strong class="nav-badge {{if gt .RPCPool.Endpoints 0}}ready{{else}}blocked{{end}}">{{.RPCPool.Endpoints}}</strong></button>
+              <button class="tab-button" type="button" data-tab-target="distributed-runs"><svg class="icon"><use href="#icon-terminal"></use></svg><span>Distributed Runs</span><strong class="nav-badge">{{len .DistributedRuns}}</strong></button>
               <button class="tab-button" type="button" data-tab-target="benchmarks"><svg class="icon"><use href="#icon-chart"></use></svg><span>Benchmarks</span></button>
             </div>
             <div class="nav-group" aria-label="AI workspace">
@@ -6189,6 +6275,48 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
       {{else}}
       <div class="empty">No RPC health history yet. Run a plan check, smoke test, or distributed prompt.</div>
+      {{end}}
+    </section>
+    </div>
+    <div class="tab-panel" id="tab-distributed-runs" hidden>
+    <section>
+      <div class="section-head">
+        <h2>Distributed Runs</h2>
+        <code>{{len .DistributedRuns}} protocol run{{if ne (len .DistributedRuns) 1}}s{{end}}</code>
+      </div>
+      {{if .DistributedRuns}}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Status</th>
+              <th>Model</th>
+              <th>Coordinator</th>
+              <th>Protocol</th>
+              <th>Runtime</th>
+              <th>Endpoints</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody>
+          {{range .DistributedRuns}}
+            <tr>
+              <td><code>{{shortID .JobID}}</code>{{if .PlanID}}<br><span class="sub">plan {{shortID .PlanID}}</span>{{end}}<br><span class="sub">{{formatClock .CreatedAt}}</span></td>
+              <td><span class="{{jobPillClass .Status}}">{{.Status}}</span>{{if .FinishedAt.IsZero}}{{else}}<br><span class="sub">finished {{formatClock .FinishedAt}}</span>{{end}}</td>
+              <td><code>{{if .ModelID}}{{.ModelID}}{{else}}-{{end}}</code></td>
+              <td>{{if .CoordinatorNodeName}}<code>{{.CoordinatorNodeName}}</code>{{else if .CoordinatorNodeID}}<code>{{shortID .CoordinatorNodeID}}</code>{{else}}<span class="sub">-</span>{{end}}{{if and .CoordinatorNodeName .CoordinatorNodeID}}<br><span class="sub">{{shortID .CoordinatorNodeID}}</span>{{end}}</td>
+              <td><code>{{if .Protocol}}{{.Protocol}}{{else}}-{{end}}</code><br><span class="sub">v{{.ProtocolVersion}} schema {{.SchemaVersion}}</span>{{if .Mode}}<br><span class="sub">{{.Mode}}</span>{{end}}</td>
+              <td>{{if .Runtime}}<code>{{.Runtime}}</code>{{else}}<span class="sub">pending</span>{{end}}{{if .RuntimeVersion}}<br><span class="sub">{{.RuntimeVersion}}</span>{{end}}{{if .WorkerRuntime}}<br><span class="sub">{{.WorkerRuntime}}</span>{{end}}</td>
+              <td>{{if .EndpointCount}}{{.EndpointCount}} endpoint{{if ne .EndpointCount 1}}s{{end}}{{else}}-{{end}}{{if .Endpoints}}<br><span class="sub">{{clip (joinStrings .Endpoints ", ") 140}}</span>{{end}}</td>
+              <td>{{if .DurationMS}}{{.DurationMS}} ms{{else}}-{{end}}{{if .Output}}<br><span class="sub">{{clip .Output 140}}</span>{{end}}{{if .Error}}<br><span class="sub">{{clip .Error 140}}</span>{{end}}</td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="empty">No distributed RPC runs yet. Start an RPC backend, install a model, then run a distributed prompt from RPC Pool.</div>
       {{end}}
     </section>
     </div>
