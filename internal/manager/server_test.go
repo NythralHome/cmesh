@@ -2422,7 +2422,7 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 
 	state := NewState()
 	srv := NewServer(":0", state)
-	joinWorkerWithResourcesForTest(t, srv, "rpc-worker", cluster.ResourceSnapshot{
+	joinWorkerWithResourcesForTest(t, srv, "rpc-coordinator-worker", cluster.ResourceSnapshot{
 		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
 		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
 		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
@@ -2433,6 +2433,15 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 			Path:    "/tmp/qwen.gguf",
 			Ready:   true,
 		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+		}},
+	})
+	joinWorkerWithResourcesForTest(t, srv, "rpc-backend-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
 		Runtimes: []cluster.RuntimeResource{{
 			Name:  "llama.cpp",
 			Ready: true,
@@ -2503,6 +2512,15 @@ func TestModelDistributedRPCPlanHealthCheckExcludesFailedEndpoints(t *testing.T)
 		Runtimes: []cluster.RuntimeResource{{
 			Name:  "llama.cpp",
 			Ready: true,
+		}},
+	})
+	joinWorkerWithResourcesForTest(t, srv, "rpc-health-worker-b", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
 			RPCRuntimes: []cluster.RPCRuntimeResource{{
 				Name:     "llama.cpp-rpc",
 				Ready:    true,
@@ -2510,7 +2528,7 @@ func TestModelDistributedRPCPlanHealthCheckExcludesFailedEndpoints(t *testing.T)
 			}},
 		}},
 	})
-	joinWorkerWithResourcesForTest(t, srv, "rpc-health-worker-b", cluster.ResourceSnapshot{
+	joinWorkerWithResourcesForTest(t, srv, "rpc-health-worker-c", cluster.ResourceSnapshot{
 		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
 		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
 		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
@@ -2612,6 +2630,26 @@ func TestUsableRPCEndpointsExcludesQuarantined(t *testing.T) {
 	}
 }
 
+func TestScheduleDistributedRPCEndpointsExcludesCoordinatorAndBusyWorkers(t *testing.T) {
+	endpoints, warnings := scheduleDistributedRPCEndpoints(
+		[]string{"10.0.0.10:50052", "10.0.0.20:50052", "10.0.0.30:50052"},
+		[]RuntimeRPCPoolWorker{
+			{NodeID: "coordinator", RPC: cluster.RPCRuntimeResource{Endpoint: "10.0.0.10:50052"}},
+			{NodeID: "busy", RPC: cluster.RPCRuntimeResource{Endpoint: "10.0.0.20:50052"}},
+			{NodeID: "idle", RPC: cluster.RPCRuntimeResource{Endpoint: "10.0.0.30:50052"}},
+		},
+		map[string]int{"busy": 1},
+		"coordinator",
+		8,
+	)
+	if !reflect.DeepEqual(endpoints, []string{"10.0.0.30:50052"}) {
+		t.Fatalf("unexpected scheduled endpoints: %#v", endpoints)
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("expected coordinator and busy warnings, got %#v", warnings)
+	}
+}
+
 func TestModelDistributedRPCPlanExcludesQuarantinedEndpoints(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
@@ -2629,6 +2667,15 @@ func TestModelDistributedRPCPlanExcludesQuarantinedEndpoints(t *testing.T) {
 		Runtimes: []cluster.RuntimeResource{{
 			Name:  "llama.cpp",
 			Ready: true,
+		}},
+	})
+	joinWorkerWithResourcesForTest(t, srv, "rpc-plan-worker-b", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
 			RPCRuntimes: []cluster.RPCRuntimeResource{{
 				Name:     "llama.cpp-rpc",
 				Ready:    true,
@@ -2636,7 +2683,7 @@ func TestModelDistributedRPCPlanExcludesQuarantinedEndpoints(t *testing.T) {
 			}},
 		}},
 	})
-	joinWorkerWithResourcesForTest(t, srv, "rpc-plan-worker-b", cluster.ResourceSnapshot{
+	joinWorkerWithResourcesForTest(t, srv, "rpc-plan-worker-c", cluster.ResourceSnapshot{
 		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
 		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
 		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
@@ -2688,7 +2735,7 @@ func TestModelDistributedRPCPlanExcludesQuarantinedEndpoints(t *testing.T) {
 func TestModelDistributedRPCPlanEndpoint(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
-	join := joinWorkerWithResourcesForTest(t, srv, "rpc-plan-worker", cluster.ResourceSnapshot{
+	join := joinWorkerWithResourcesForTest(t, srv, "rpc-plan-coordinator", cluster.ResourceSnapshot{
 		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
 		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
 		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
@@ -2699,6 +2746,15 @@ func TestModelDistributedRPCPlanEndpoint(t *testing.T) {
 			Path:    "/tmp/qwen.gguf",
 			Ready:   true,
 		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+		}},
+	})
+	backend := joinWorkerWithResourcesForTest(t, srv, "rpc-plan-backend", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
 		Runtimes: []cluster.RuntimeResource{{
 			Name:  "llama.cpp",
 			Ready: true,
@@ -2726,7 +2782,7 @@ func TestModelDistributedRPCPlanEndpoint(t *testing.T) {
 	if len(plan.RPCEndpoints) != 1 || plan.RPCEndpoints[0] != "10.0.0.10:50052" {
 		t.Fatalf("unexpected rpc endpoints: %#v", plan.RPCEndpoints)
 	}
-	if len(plan.Backends) != 1 || plan.Backends[0].NodeID != join.NodeID || plan.Backends[0].Endpoint != "10.0.0.10:50052" {
+	if len(plan.Backends) != 1 || plan.Backends[0].NodeID != backend.NodeID || plan.Backends[0].Endpoint != "10.0.0.10:50052" {
 		t.Fatalf("unexpected backends: %#v", plan.Backends)
 	}
 }
@@ -2734,7 +2790,7 @@ func TestModelDistributedRPCPlanEndpoint(t *testing.T) {
 func TestModelDistributedRPCReadinessEndpoint(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
-	joinWorkerWithResourcesForTest(t, srv, "rpc-ready-worker", cluster.ResourceSnapshot{
+	joinWorkerWithResourcesForTest(t, srv, "rpc-ready-coordinator", cluster.ResourceSnapshot{
 		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
 		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
 		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
@@ -2745,6 +2801,15 @@ func TestModelDistributedRPCReadinessEndpoint(t *testing.T) {
 			Path:    "/tmp/qwen.gguf",
 			Ready:   true,
 		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+		}},
+	})
+	joinWorkerWithResourcesForTest(t, srv, "rpc-ready-backend", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
 		Runtimes: []cluster.RuntimeResource{{
 			Name:  "llama.cpp",
 			Ready: true,

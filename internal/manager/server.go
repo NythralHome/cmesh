@@ -48,6 +48,7 @@ type Server struct {
 }
 
 const rpcEndpointQuarantineConsecutiveFailures = 3
+const distributedRPCMaxScheduledEndpoints = 8
 
 type ServerOptions struct {
 	Addr                  string
@@ -1807,8 +1808,45 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 			plan.Blockers = append(plan.Blockers, "selected worker cannot generate this model")
 		}
 	}
+	scheduledEndpoints, schedulingWarnings := scheduleDistributedRPCEndpoints(plan.RPCEndpoints, workers, activeJobsByWorker(s.state.Jobs()), plan.CoordinatorNodeID, distributedRPCMaxScheduledEndpoints)
+	plan.RPCEndpoints = scheduledEndpoints
+	plan.Warnings = append(plan.Warnings, schedulingWarnings...)
+	if len(plan.RPCEndpoints) == 0 {
+		plan.Blockers = append(plan.Blockers, "no schedulable llama.cpp rpc endpoints are available")
+	}
 	plan.ExecutableNow = len(plan.Blockers) == 0
 	return plan
+}
+
+func scheduleDistributedRPCEndpoints(endpoints []string, workers []RuntimeRPCPoolWorker, activeJobs map[string]int, coordinatorNodeID string, maxEndpoints int) ([]string, []string) {
+	endpointWorkers := rpcWorkersByEndpoint(workers)
+	out := make([]string, 0, len(endpoints))
+	warnings := make([]string, 0)
+	excludedCoordinator := 0
+	excludedBusy := 0
+	for _, endpoint := range cleanEndpointList(endpoints) {
+		worker := endpointWorkers[endpoint]
+		if coordinatorNodeID != "" && worker.NodeID == coordinatorNodeID {
+			excludedCoordinator++
+			continue
+		}
+		if worker.NodeID != "" && activeJobs[worker.NodeID] > 0 {
+			excludedBusy++
+			continue
+		}
+		out = append(out, endpoint)
+	}
+	if maxEndpoints > 0 && len(out) > maxEndpoints {
+		warnings = append(warnings, fmt.Sprintf("distributed rpc fanout capped at %d endpoint(s)", maxEndpoints))
+		out = out[:maxEndpoints]
+	}
+	if excludedCoordinator > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d rpc endpoint(s) on the coordinator worker were excluded", excludedCoordinator))
+	}
+	if excludedBusy > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d rpc endpoint(s) on busy workers were excluded", excludedBusy))
+	}
+	return out, warnings
 }
 
 func distributedRPCExecutionPlanForJob(plan ModelDistributedRPCPlan) protocol.DistributedRPCExecutionPlan {
