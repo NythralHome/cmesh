@@ -79,6 +79,9 @@ class WorkerConfig {
     required this.vramGb,
     required this.benchmark,
     required this.installService,
+    this.rpcHost = '0.0.0.0',
+    this.rpcAdvertiseHost = '',
+    this.rpcPort = 50052,
   });
 
   final String managerUrl;
@@ -91,6 +94,9 @@ class WorkerConfig {
   final int vramGb;
   final bool benchmark;
   final bool installService;
+  final String rpcHost;
+  final String rpcAdvertiseHost;
+  final int rpcPort;
 
   factory WorkerConfig.empty() {
     return WorkerConfig(
@@ -105,6 +111,9 @@ class WorkerConfig {
       benchmark: true,
       installService:
           Platform.isLinux || Platform.isMacOS || Platform.isWindows,
+      rpcHost: '0.0.0.0',
+      rpcAdvertiseHost: '',
+      rpcPort: 50052,
     );
   }
 
@@ -123,6 +132,15 @@ class WorkerConfig {
       vramGb: json['vramGb'] as int? ?? json['vram_gb'] as int? ?? 0,
       benchmark: json['benchmark'] as bool? ?? true,
       installService: json['installService'] as bool? ?? true,
+      rpcHost:
+          json['rpcHost'] as String? ??
+          json['rpc_host'] as String? ??
+          '0.0.0.0',
+      rpcAdvertiseHost:
+          json['rpcAdvertiseHost'] as String? ??
+          json['rpc_advertise_host'] as String? ??
+          '',
+      rpcPort: json['rpcPort'] as int? ?? json['rpc_port'] as int? ?? 50052,
     );
   }
 
@@ -138,6 +156,9 @@ class WorkerConfig {
       'vramGb': vramGb,
       'benchmark': benchmark,
       'installService': installService,
+      'rpcHost': rpcHost,
+      'rpcAdvertiseHost': rpcAdvertiseHost,
+      'rpcPort': rpcPort,
     };
   }
 
@@ -153,6 +174,9 @@ class WorkerConfig {
       'gpu_enabled': gpuEnabled,
       'vram_gb': vramGb,
       'benchmark': benchmark,
+      'rpc_host': rpcHost,
+      'rpc_advertise_host': rpcAdvertiseHost,
+      'rpc_port': rpcPort,
     };
   }
 
@@ -167,6 +191,9 @@ class WorkerConfig {
     int? vramGb,
     bool? benchmark,
     bool? installService,
+    String? rpcHost,
+    String? rpcAdvertiseHost,
+    int? rpcPort,
   }) {
     return WorkerConfig(
       managerUrl: managerUrl ?? this.managerUrl,
@@ -179,6 +206,9 @@ class WorkerConfig {
       vramGb: vramGb ?? this.vramGb,
       benchmark: benchmark ?? this.benchmark,
       installService: installService ?? this.installService,
+      rpcHost: rpcHost ?? this.rpcHost,
+      rpcAdvertiseHost: rpcAdvertiseHost ?? this.rpcAdvertiseHost,
+      rpcPort: rpcPort ?? this.rpcPort,
     );
   }
 }
@@ -1336,6 +1366,9 @@ class _WorkerHomePageState extends State<WorkerHomePage>
   final _diskGb = TextEditingController();
   final _jobSlots = TextEditingController();
   final _vramGb = TextEditingController();
+  final _rpcHost = TextEditingController();
+  final _rpcAdvertiseHost = TextEditingController();
+  final _rpcPort = TextEditingController();
 
   bool _gpuEnabled = true;
   bool _benchmark = true;
@@ -1384,6 +1417,9 @@ class _WorkerHomePageState extends State<WorkerHomePage>
     _diskGb.dispose();
     _jobSlots.dispose();
     _vramGb.dispose();
+    _rpcHost.dispose();
+    _rpcAdvertiseHost.dispose();
+    _rpcPort.dispose();
     super.dispose();
   }
 
@@ -1497,6 +1533,9 @@ class _WorkerHomePageState extends State<WorkerHomePage>
     _diskGb,
     _jobSlots,
     _vramGb,
+    _rpcHost,
+    _rpcAdvertiseHost,
+    _rpcPort,
   ];
 
   void _formStateChanged() {
@@ -1518,6 +1557,9 @@ class _WorkerHomePageState extends State<WorkerHomePage>
       _diskGb.text = '${config.diskGb}';
       _jobSlots.text = '${config.jobSlots}';
       _vramGb.text = '${config.vramGb}';
+      _rpcHost.text = config.rpcHost;
+      _rpcAdvertiseHost.text = config.rpcAdvertiseHost;
+      _rpcPort.text = '${config.rpcPort}';
       _gpuEnabled = config.gpuEnabled;
       _benchmark = config.benchmark;
       _installService = config.installService;
@@ -1591,6 +1633,9 @@ class _WorkerHomePageState extends State<WorkerHomePage>
       vramGb: int.parse(_vramGb.text),
       benchmark: _benchmark,
       installService: _installService,
+      rpcHost: _rpcHost.text.trim().isEmpty ? '0.0.0.0' : _rpcHost.text.trim(),
+      rpcAdvertiseHost: _rpcAdvertiseHost.text.trim(),
+      rpcPort: int.parse(_rpcPort.text),
     );
   }
 
@@ -1849,6 +1894,13 @@ class _WorkerHomePageState extends State<WorkerHomePage>
     if (_nonNegativeInt(_vramGb.text) != null) {
       return 'VRAM must be 0 GB or more.';
     }
+    if (_positiveInt(_rpcPort.text) != null) {
+      return 'RPC port must be 1 or more.';
+    }
+    final parsedRPCPort = int.tryParse(_rpcPort.text);
+    if (parsedRPCPort != null && parsedRPCPort > 65535) {
+      return 'RPC port must be 65535 or less.';
+    }
     return null;
   }
 
@@ -1924,6 +1976,9 @@ class _WorkerHomePageState extends State<WorkerHomePage>
         diskGb: _diskGb,
         jobSlots: _jobSlots,
         vramGb: _vramGb,
+        rpcHost: _rpcHost,
+        rpcAdvertiseHost: _rpcAdvertiseHost,
+        rpcPort: _rpcPort,
         gpuEnabled: _gpuEnabled,
         benchmark: _benchmark,
         installService: _installService,
@@ -2385,6 +2440,9 @@ class _ConnectionPanel extends StatelessWidget {
     required this.diskGb,
     required this.jobSlots,
     required this.vramGb,
+    required this.rpcHost,
+    required this.rpcAdvertiseHost,
+    required this.rpcPort,
     required this.gpuEnabled,
     required this.benchmark,
     required this.installService,
@@ -2402,6 +2460,9 @@ class _ConnectionPanel extends StatelessWidget {
   final TextEditingController diskGb;
   final TextEditingController jobSlots;
   final TextEditingController vramGb;
+  final TextEditingController rpcHost;
+  final TextEditingController rpcAdvertiseHost;
+  final TextEditingController rpcPort;
   final bool gpuEnabled;
   final bool benchmark;
   final bool installService;
@@ -2435,6 +2496,45 @@ class _ConnectionPanel extends StatelessWidget {
             ),
             obscureText: true,
             validator: _required,
+          ),
+          const SizedBox(height: 18),
+          _SectionLabel('RPC network'),
+          const SizedBox(height: 10),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final columns = constraints.maxWidth > 720 ? 3 : 1;
+              return _FieldGrid(
+                columns: columns,
+                children: [
+                  TextFormField(
+                    controller: rpcHost,
+                    decoration: const InputDecoration(
+                      labelText: 'Bind host',
+                      prefixIcon: Icon(Icons.settings_input_antenna),
+                      hintText: '0.0.0.0',
+                    ),
+                  ),
+                  TextFormField(
+                    controller: rpcAdvertiseHost,
+                    decoration: const InputDecoration(
+                      labelText: 'Advertise host',
+                      prefixIcon: Icon(Icons.hub_outlined),
+                      hintText: 'Auto-detect',
+                    ),
+                  ),
+                  _NumberField(
+                    controller: rpcPort,
+                    label: 'RPC port',
+                    icon: Icons.settings_ethernet,
+                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Bind host controls where rpc-server listens. Advertise host is the address other workers use; leave it empty for auto-detect.',
+            style: TextStyle(fontSize: 13),
           ),
           const SizedBox(height: 18),
           _SectionLabel('Resource limits'),

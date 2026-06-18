@@ -119,6 +119,29 @@ void main() {
     );
   });
 
+  test('serializes worker rpc network settings', () {
+    final config = WorkerConfig.fromJson({
+      'manager_url': 'https://alpha.cmesh.nythral.com',
+      'join_token': 'token',
+      'cpu': 2,
+      'memory_gb': 4,
+      'disk_gb': 10,
+      'job_slots': 1,
+      'gpu_enabled': true,
+      'vram_gb': 0,
+      'benchmark': true,
+      'rpc_host': '0.0.0.0',
+      'rpc_advertise_host': '10.0.0.25',
+      'rpc_port': 50123,
+    });
+
+    final control = config.toControlJson();
+
+    expect(control['rpc_host'], '0.0.0.0');
+    expect(control['rpc_advertise_host'], '10.0.0.25');
+    expect(control['rpc_port'], 50123);
+  });
+
   test('parses worker job activity from log tail', () {
     final status = WorkerRuntimeStatus.fromJson({
       'running': true,
