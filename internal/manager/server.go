@@ -978,6 +978,8 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "distributed-plan":
 		s.handleModelDistributedPlan(w, r, model)
+	case "distributed-rpc-plan":
+		s.handleModelDistributedRPCPlan(w, r, model)
 	case "distributed-rpc-readiness":
 		s.handleModelDistributedRPCReadiness(w, r, model)
 	case "distributed-rpc-generate":
@@ -1399,12 +1401,41 @@ func (s *Server) handleModelGenerate(w http.ResponseWriter, r *http.Request, mod
 }
 
 type ModelDistributedRPCReadiness struct {
-	Ready        bool                  `json:"ready"`
-	ModelID      string                `json:"model_id"`
-	NodeID       string                `json:"node_id,omitempty"`
-	Blockers     []string              `json:"blockers,omitempty"`
-	RPCEndpoints []string              `json:"rpc_endpoints,omitempty"`
-	RPCPool      RuntimeRPCPoolSummary `json:"rpc_pool"`
+	Ready        bool                    `json:"ready"`
+	ModelID      string                  `json:"model_id"`
+	NodeID       string                  `json:"node_id,omitempty"`
+	Blockers     []string                `json:"blockers,omitempty"`
+	RPCEndpoints []string                `json:"rpc_endpoints,omitempty"`
+	RPCPool      RuntimeRPCPoolSummary   `json:"rpc_pool"`
+	Plan         ModelDistributedRPCPlan `json:"plan"`
+}
+
+type ModelDistributedRPCBackend struct {
+	NodeID   string `json:"node_id"`
+	NodeName string `json:"node_name"`
+	Runtime  string `json:"runtime"`
+	Endpoint string `json:"endpoint"`
+}
+
+type ModelDistributedRPCPlan struct {
+	ModelID             string                       `json:"model_id"`
+	Mode                string                       `json:"mode"`
+	CoordinatorNodeID   string                       `json:"coordinator_node_id,omitempty"`
+	CoordinatorNodeName string                       `json:"coordinator_node_name,omitempty"`
+	ExecutableNow       bool                         `json:"executable_now"`
+	Blockers            []string                     `json:"blockers,omitempty"`
+	RPCEndpoints        []string                     `json:"rpc_endpoints,omitempty"`
+	Backends            []ModelDistributedRPCBackend `json:"backends,omitempty"`
+	RPCPool             RuntimeRPCPoolSummary        `json:"rpc_pool"`
+}
+
+func (s *Server) handleModelDistributedRPCPlan(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	writeJSON(w, http.StatusOK, s.modelDistributedRPCPlan(model, nodeID))
 }
 
 func (s *Server) handleModelDistributedRPCReadiness(w http.ResponseWriter, r *http.Request, model models.Model) {
@@ -1418,43 +1449,79 @@ func (s *Server) handleModelDistributedRPCReadiness(w http.ResponseWriter, r *ht
 }
 
 func (s *Server) modelDistributedRPCReadiness(model models.Model, nodeID string) ModelDistributedRPCReadiness {
+	plan := s.modelDistributedRPCPlan(model, nodeID)
 	readiness := ModelDistributedRPCReadiness{
-		ModelID: model.ID,
-		NodeID:  strings.TrimSpace(nodeID),
+		Ready:        plan.ExecutableNow,
+		ModelID:      plan.ModelID,
+		NodeID:       plan.CoordinatorNodeID,
+		Blockers:     append([]string(nil), plan.Blockers...),
+		RPCEndpoints: append([]string(nil), plan.RPCEndpoints...),
+		RPCPool:      plan.RPCPool,
+		Plan:         plan,
 	}
-	summary, _, endpoints := runtimeRPCPoolReport(s.state.Nodes())
-	readiness.RPCPool = summary
-	readiness.RPCEndpoints = endpoints
-	if len(endpoints) == 0 {
-		readiness.Blockers = append(readiness.Blockers, "no active llama.cpp rpc endpoints are available")
+	return readiness
+}
+
+func (s *Server) modelDistributedRPCPlan(model models.Model, nodeID string) ModelDistributedRPCPlan {
+	nodes := s.state.Nodes()
+	summary, workers, endpoints := runtimeRPCPoolReport(nodes)
+	plan := ModelDistributedRPCPlan{
+		ModelID:      model.ID,
+		Mode:         "llama.cpp-rpc",
+		RPCPool:      summary,
+		RPCEndpoints: append([]string(nil), endpoints...),
+	}
+	for _, worker := range workers {
+		endpoint := strings.TrimSpace(worker.RPC.Endpoint)
+		if !worker.RuntimeReady || !worker.RPC.Ready || endpoint == "" {
+			continue
+		}
+		plan.Backends = append(plan.Backends, ModelDistributedRPCBackend{
+			NodeID:   worker.NodeID,
+			NodeName: worker.NodeName,
+			Runtime:  worker.Runtime,
+			Endpoint: endpoint,
+		})
+	}
+	if len(plan.RPCEndpoints) == 0 {
+		plan.Blockers = append(plan.Blockers, "no active llama.cpp rpc endpoints are available")
 	}
 	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
 	if len(summaries) == 0 {
-		readiness.Blockers = append(readiness.Blockers, "model is not available")
-		return readiness
+		plan.Blockers = append(plan.Blockers, "model is not available")
+		return plan
 	}
 	modelSummary := summaries[0]
-	if readiness.NodeID == "" {
+	plan.CoordinatorNodeID = strings.TrimSpace(nodeID)
+	if plan.CoordinatorNodeID == "" {
 		for _, install := range modelSummary.Installed {
 			if install.GenerateReady {
-				readiness.NodeID = install.NodeID
+				plan.CoordinatorNodeID = install.NodeID
 				break
 			}
 		}
 	}
-	if readiness.NodeID == "" {
-		readiness.Blockers = append(readiness.Blockers, "select a worker with this model installed")
-	} else if !modelInstalledOn(modelSummary, readiness.NodeID) {
-		readiness.Blockers = append(readiness.Blockers, "model is not installed on the selected worker")
-	} else if !modelGeneratableOn(modelSummary, readiness.NodeID) {
-		if reason := modelGenerateBlockedReason(modelSummary, readiness.NodeID); reason != "" {
-			readiness.Blockers = append(readiness.Blockers, reason)
-		} else {
-			readiness.Blockers = append(readiness.Blockers, "selected worker cannot generate this model")
+	if plan.CoordinatorNodeID != "" {
+		for _, node := range nodes {
+			if node.ID == plan.CoordinatorNodeID {
+				plan.CoordinatorNodeName = nodeDisplayName(node)
+				break
+			}
 		}
 	}
-	readiness.Ready = len(readiness.Blockers) == 0
-	return readiness
+	if plan.CoordinatorNodeID == "" {
+		plan.Blockers = append(plan.Blockers, "select a worker with this model installed")
+	} else if !modelInstalledOn(modelSummary, plan.CoordinatorNodeID) {
+		plan.Blockers = append(plan.Blockers, "model is not installed on the selected worker")
+	} else if !modelGeneratableOn(modelSummary, plan.CoordinatorNodeID) {
+		if reason := modelGenerateBlockedReason(modelSummary, plan.CoordinatorNodeID); reason != "" {
+			plan.Blockers = append(plan.Blockers, reason)
+		} else {
+			plan.Blockers = append(plan.Blockers, "selected worker cannot generate this model")
+		}
+	}
+	plan.ExecutableNow = len(plan.Blockers) == 0
+	return plan
 }
 
 func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *http.Request, model models.Model) {
@@ -1478,31 +1545,17 @@ func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *htt
 		http.Error(w, "prompt is required", http.StatusBadRequest)
 		return
 	}
-	_, _, rpcEndpoints := runtimeRPCPoolReport(s.state.Nodes())
-	if len(rpcEndpoints) == 0 {
-		http.Error(w, "no active llama.cpp rpc endpoints are available", http.StatusConflict)
-		return
-	}
-	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
-	if len(summaries) == 0 {
-		http.Error(w, "model is not available", http.StatusConflict)
-		return
-	}
-	nodeID := strings.TrimSpace(req.NodeID)
-	if nodeID == "" {
-		for _, install := range summaries[0].Installed {
-			if install.GenerateReady {
-				nodeID = install.NodeID
-				break
-			}
+	plan := s.modelDistributedRPCPlan(model, req.NodeID)
+	if !plan.ExecutableNow {
+		reason := "distributed RPC model generate is not executable"
+		if len(plan.Blockers) > 0 {
+			reason = strings.Join(plan.Blockers, " | ")
 		}
-	}
-	if nodeID == "" || !modelInstalledOn(summaries[0], nodeID) {
-		http.Error(w, "model is not installed on a selected worker", http.StatusConflict)
-		return
-	}
-	if !modelGeneratableOn(summaries[0], nodeID) {
-		http.Error(w, modelGenerateBlockedReason(summaries[0], nodeID), http.StatusConflict)
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":  "distributed RPC model generate is not executable",
+			"reason": reason,
+			"plan":   plan,
+		})
 		return
 	}
 	conversationID := strings.TrimSpace(req.ConversationID)
@@ -1525,7 +1578,7 @@ func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *htt
 	if temperature == "" {
 		temperature = models.QualityPresetFor(model).Temperature
 	}
-	conversation := appendConversationMessage(s.state, conversationID, model.ID, nodeID, systemPrompt, models.ChatMessage{
+	conversation := appendConversationMessage(s.state, conversationID, model.ID, plan.CoordinatorNodeID, systemPrompt, models.ChatMessage{
 		Role:    "user",
 		Content: req.Prompt,
 	})
@@ -1539,7 +1592,7 @@ func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *htt
 		ConversationID: conversation.ID,
 		MaxTokens:      maxTokens,
 		Temperature:    temperature,
-		RPCEndpoints:   rpcEndpoints,
+		RPCEndpoints:   plan.RPCEndpoints,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1549,7 +1602,7 @@ func (s *Server) handleModelDistributedRPCGenerate(w http.ResponseWriter, r *htt
 		Type:        models.JobGenerateDistributedRPC,
 		Input:       string(input),
 		RequestedBy: "dashboard-chat-rpc",
-		AssignedTo:  nodeID,
+		AssignedTo:  plan.CoordinatorNodeID,
 		Requirements: jobs.Requirements{
 			CPUCores:    1,
 			MemoryBytes: model.MemoryBytes,

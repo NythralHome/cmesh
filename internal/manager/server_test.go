@@ -2199,6 +2199,52 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 	}
 }
 
+func TestModelDistributedRPCPlanEndpoint(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	join := joinWorkerWithResourcesForTest(t, srv, "rpc-plan-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Models: []cluster.ModelResource{{
+			ID:      "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:    "Qwen2.5 0.5B Instruct",
+			Runtime: "llama.cpp",
+			Path:    "/tmp/qwen.gguf",
+			Ready:   true,
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: "10.0.0.10:50052",
+			}},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/distributed-rpc-plan?node_id="+join.NodeID, nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var plan ModelDistributedRPCPlan
+	if err := json.Unmarshal(rec.Body.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !plan.ExecutableNow || plan.Mode != "llama.cpp-rpc" || plan.CoordinatorNodeID != join.NodeID {
+		t.Fatalf("unexpected plan: %#v", plan)
+	}
+	if len(plan.RPCEndpoints) != 1 || plan.RPCEndpoints[0] != "10.0.0.10:50052" {
+		t.Fatalf("unexpected rpc endpoints: %#v", plan.RPCEndpoints)
+	}
+	if len(plan.Backends) != 1 || plan.Backends[0].NodeID != join.NodeID || plan.Backends[0].Endpoint != "10.0.0.10:50052" {
+		t.Fatalf("unexpected backends: %#v", plan.Backends)
+	}
+}
+
 func TestModelDistributedRPCReadinessEndpoint(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
