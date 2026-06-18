@@ -116,6 +116,8 @@ Future runtime features:
 
 The manager currently treats normal runtime readiness and distributed stage runtime readiness as separate checks. A worker can be `llama.cpp` ready for full-model generation while still lacking stage capability. `logical-stage-runtime` means the worker can validate stage contracts and exchange mock activation frames through CDIP. `llama.cpp-stage-runtime` is reserved for the first real layer-stage prototype.
 
+Worker heartbeats may also include `stage_runtimes` diagnostics. These diagnostics are not scheduling capability by themselves. For example, `llama.cpp-stage-experimental` can report that `llama-cli` exists while still returning `ready: false` because the public CLI does not expose CDIP layer-stage activation hooks yet.
+
 ## Planning Modes
 
 CDIP v0.1 defines these placement modes:

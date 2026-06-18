@@ -3,6 +3,7 @@ package resources
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -156,14 +157,15 @@ func directorySize(path string) uint64 {
 func DiscoverRuntimes(cacheDir string) []cluster.RuntimeResource {
 	status := runtimes.LlamaCPPStatus(cacheDir)
 	return []cluster.RuntimeResource{{
-		Name:         status.Name,
-		Ready:        status.Ready,
-		Version:      status.Version,
-		Platform:     status.Platform,
-		BinaryPath:   status.BinaryPath,
-		Source:       status.Source,
-		Capabilities: runtimeCapabilities(status),
-		Error:        status.Error,
+		Name:          status.Name,
+		Ready:         status.Ready,
+		Version:       status.Version,
+		Platform:      status.Platform,
+		BinaryPath:    status.BinaryPath,
+		Source:        status.Source,
+		Capabilities:  runtimeCapabilities(status),
+		StageRuntimes: runtimeStageRuntimes(status),
+		Error:         status.Error,
 	}}
 }
 
@@ -175,6 +177,21 @@ func runtimeCapabilities(status runtimes.RuntimeStatus) []string {
 		return runtimes.LogicalStageCapabilities()
 	}
 	return nil
+}
+
+func runtimeStageRuntimes(status runtimes.RuntimeStatus) []cluster.StageRuntimeResource {
+	if status.Name != runtimes.LlamaCPPName {
+		return nil
+	}
+	probe := runtimes.NewLlamaCPPStageRuntime(status.BinaryPath).Probe(context.Background())
+	return []cluster.StageRuntimeResource{{
+		Name:          probe.Name,
+		Ready:         probe.Ready,
+		CLIReady:      probe.CLIReady,
+		BinaryPath:    probe.BinaryPath,
+		RequiredHooks: append([]string(nil), probe.RequiredHooks...),
+		Blockers:      append([]string(nil), probe.Blockers...),
+	}}
 }
 
 func DiscoverInstalledModels(cacheDir string) []cluster.ModelResource {

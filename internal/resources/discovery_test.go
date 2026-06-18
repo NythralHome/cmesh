@@ -9,6 +9,7 @@ import (
 
 	"github.com/cmesh/cmesh/internal/config"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/runtimes"
 )
 
 func TestDiscoverLocalAppliesLimits(t *testing.T) {
@@ -159,5 +160,25 @@ func TestDiscoverCMeshStorageUsageReportsPartialAndOrphanModels(t *testing.T) {
 	}
 	if usage.OrphanModelDirs != 1 || usage.OrphanModelBytes != uint64(len("orphan")) {
 		t.Fatalf("expected orphan model usage, got %#v", usage)
+	}
+}
+
+func TestDiscoverRuntimesIncludesLlamaCPPStageProbe(t *testing.T) {
+	items := DiscoverRuntimes(t.TempDir())
+	if len(items) != 1 {
+		t.Fatalf("expected one runtime, got %#v", items)
+	}
+	if items[0].Name != runtimes.LlamaCPPName {
+		t.Fatalf("expected llama.cpp runtime, got %#v", items[0])
+	}
+	if len(items[0].StageRuntimes) != 1 {
+		t.Fatalf("expected stage runtime probe, got %#v", items[0])
+	}
+	probe := items[0].StageRuntimes[0]
+	if probe.Name != runtimes.LlamaCPPStageRuntimeName {
+		t.Fatalf("expected llama.cpp stage probe, got %#v", probe)
+	}
+	if probe.Ready {
+		t.Fatalf("llama.cpp stage runtime should remain blocked until hooks exist: %#v", probe)
 	}
 }

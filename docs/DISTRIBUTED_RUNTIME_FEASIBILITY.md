@@ -63,7 +63,7 @@ The adapter can initially run behind one implementation:
 
 - `logical-stage`, which validates CDIP stage contracts and reports stage readiness without real tensor execution.
 - `logical-stage` decode can emit mock activation frames through `transport.ActivationTransport`, so coordinator tests exercise the same relay boundary that a real stage runtime will use.
-- `llama.cpp-stage-experimental`, which should become the first real layer-stage prototype.
+- `llama.cpp-stage-experimental`, which probes the installed `llama-cli` and reports the missing CDIP stage hooks. It intentionally remains `ready: false` until real layer-stage activation hooks exist.
 
 If llama.cpp cannot expose the needed hooks cleanly, the adapter boundary lets us test another runtime without replacing CDIP.
 
