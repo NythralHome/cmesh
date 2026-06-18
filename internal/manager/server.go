@@ -5729,6 +5729,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <textarea id="rpc-smoke-prompt" name="prompt" placeholder="Ask a short test question through the RPC pool">Reply with one sentence: what runtime path handled this request?</textarea>
         </div>
       </form>
+      <div class="runner-status" id="rpc-execution-plan">Select a model and coordinator to inspect the distributed RPC execution plan.</div>
       <div class="runner-status" id="rpc-prompt-smoke-status">{{if eq .RPCPool.Endpoints 0}}Start at least one RPC backend before running a distributed prompt.{{else if eq (generatableCount .Models) 0}}Install a model before running a distributed prompt.{{else}}Ready to run a distributed prompt smoke test.{{end}}</div>
       {{if .RPCWorkers}}
       <div class="table-wrap">
@@ -6528,6 +6529,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var rpcPromptSmokeForm = document.getElementById("rpc-prompt-smoke-form");
     var rpcPromptSmokeModel = document.getElementById("rpc-smoke-model");
     var rpcPromptSmokeNode = document.getElementById("rpc-smoke-node");
+    var rpcExecutionPlan = document.getElementById("rpc-execution-plan");
     var rpcPromptSmokeStatus = document.getElementById("rpc-prompt-smoke-status");
     var rpcPromptSmokeSubmitting = false;
     function renderRPCSmokeReport(report) {
@@ -6603,6 +6605,62 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         if (matches && !firstVisible) firstVisible = option.value;
       });
       if (firstVisible) rpcPromptSmokeNode.value = firstVisible;
+    }
+    function renderRPCExecutionPlan(plan) {
+      if (!rpcExecutionPlan) return;
+      rpcExecutionPlan.innerHTML = "";
+      var title = document.createElement("strong");
+      title.textContent = plan.executable_now ? "Distributed RPC plan is executable" : "Distributed RPC plan is blocked";
+      rpcExecutionPlan.appendChild(title);
+      var details = document.createElement("div");
+      details.className = "result-grid";
+      var coordinator = document.createElement("div");
+      coordinator.innerHTML = "<span>Coordinator</span><strong></strong>";
+      coordinator.querySelector("strong").textContent = plan.coordinator_node_name || plan.coordinator_node_id || "not selected";
+      details.appendChild(coordinator);
+      var mode = document.createElement("div");
+      mode.innerHTML = "<span>Mode</span><strong></strong>";
+      mode.querySelector("strong").textContent = plan.mode || "llama.cpp-rpc";
+      details.appendChild(mode);
+      var endpoints = document.createElement("div");
+      endpoints.innerHTML = "<span>RPC endpoints</span><strong></strong>";
+      endpoints.querySelector("strong").textContent = String((plan.rpc_endpoints || []).length);
+      details.appendChild(endpoints);
+      rpcExecutionPlan.appendChild(details);
+      if ((plan.backends || []).length > 0) {
+        var backendList = document.createElement("div");
+        backendList.className = "sub";
+        backendList.textContent = "Backends: " + plan.backends.map(function(backend) {
+          return (backend.node_name || backend.node_id || "worker") + " -> " + backend.endpoint;
+        }).join("; ");
+        rpcExecutionPlan.appendChild(backendList);
+      }
+      if ((plan.blockers || []).length > 0) {
+        var blockers = document.createElement("div");
+        blockers.className = "sub";
+        blockers.textContent = "Blockers: " + plan.blockers.join("; ");
+        rpcExecutionPlan.appendChild(blockers);
+      }
+    }
+    function refreshRPCExecutionPlan() {
+      if (!rpcExecutionPlan || !rpcPromptSmokeModel || !rpcPromptSmokeNode) return;
+      var modelID = String(rpcPromptSmokeModel.value || "").trim();
+      var nodeID = String(rpcPromptSmokeNode.value || "").trim();
+      if (!modelID) {
+        rpcExecutionPlan.textContent = "Install a model to inspect the distributed RPC execution plan.";
+        return;
+      }
+      var params = new URLSearchParams();
+      if (nodeID) params.set("node_id", nodeID);
+      rpcExecutionPlan.textContent = "Loading distributed RPC execution plan...";
+      fetch("/v1/models/" + encodeURIComponent(modelID) + "/distributed-rpc-plan?" + params.toString()).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(renderRPCExecutionPlan).catch(function(error) {
+        rpcExecutionPlan.textContent = "Could not load distributed RPC plan: " + error.message;
+      });
     }
     function setRPCPromptSmokeSubmitting(isSubmitting) {
       rpcPromptSmokeSubmitting = isSubmitting;
@@ -8230,8 +8288,15 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       });
     }
     if (rpcPromptSmokeModel) {
-      rpcPromptSmokeModel.addEventListener("change", syncRPCPromptSmokeNodes);
+      rpcPromptSmokeModel.addEventListener("change", function() {
+        syncRPCPromptSmokeNodes();
+        refreshRPCExecutionPlan();
+      });
       syncRPCPromptSmokeNodes();
+      refreshRPCExecutionPlan();
+    }
+    if (rpcPromptSmokeNode) {
+      rpcPromptSmokeNode.addEventListener("change", refreshRPCExecutionPlan);
     }
     if (rpcPromptSmokeForm) {
       rpcPromptSmokeForm.addEventListener("submit", function(event) {
