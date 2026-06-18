@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/config"
 	"github.com/cmesh/cmesh/internal/jobs"
@@ -830,7 +831,7 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapsh
 }
 
 func isModelJobType(jobType string) bool {
-	return jobType == models.JobInstall || jobType == models.JobDelete || jobType == models.JobGenerate || jobType == models.JobGenerateDistributed || jobType == models.JobRepair || jobType == models.JobCleanup
+	return jobType == models.JobInstall || jobType == models.JobDelete || jobType == models.JobGenerate || jobType == models.JobGenerateDistributed || jobType == models.JobGenerateStage || jobType == models.JobRepair || jobType == models.JobCleanup
 }
 
 func executeJob(job jobs.Job) (string, error) {
@@ -866,9 +867,104 @@ func executeWorkerJob(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir 
 		return executeModelGenerateJob(job.Input, cacheDir)
 	case models.JobGenerateDistributed:
 		return "", fmt.Errorf("distributed model generate requires the manager distributed runtime protocol")
+	case models.JobGenerateStage:
+		return executeDistributedStageJob(job.Input, snapshot)
 	default:
 		return "", fmt.Errorf("unsupported job type %q", job.Type)
 	}
+}
+
+type distributedStageResult struct {
+	Kind               string `json:"kind"`
+	ParentJobID        string `json:"parent_job_id"`
+	StageIndex         int    `json:"stage_index"`
+	ModelID            string `json:"model_id"`
+	Runtime            string `json:"runtime"`
+	LayerStart         int    `json:"layer_start"`
+	LayerEnd           int    `json:"layer_end"`
+	UpstreamNodeID     string `json:"upstream_node_id,omitempty"`
+	DownstreamNodeID   string `json:"downstream_node_id,omitempty"`
+	Materialization    string `json:"materialization"`
+	SourceArtifact     string `json:"source_artifact,omitempty"`
+	TargetArtifact     string `json:"target_artifact,omitempty"`
+	ActivationProtocol string `json:"activation_protocol"`
+}
+
+func executeDistributedStageJob(input string, snapshot cluster.ResourceSnapshot) (string, error) {
+	var req models.DistributedStageJobInput
+	if err := json.Unmarshal([]byte(input), &req); err != nil {
+		return "", fmt.Errorf("invalid distributed stage input: %w", err)
+	}
+	if strings.TrimSpace(req.ParentJobID) == "" {
+		return "", fmt.Errorf("parent_job_id is required")
+	}
+	if strings.TrimSpace(req.ModelID) == "" {
+		return "", fmt.Errorf("model_id is required")
+	}
+	if req.Shard.Stage.Index != req.Stage.Index || req.Shard.Stage.NodeID != req.Stage.NodeID || req.Shard.Stage.LayerStart != req.Stage.LayerStart || req.Shard.Stage.LayerEnd != req.Stage.LayerEnd {
+		return "", fmt.Errorf("distributed stage shard does not match stage assignment")
+	}
+	if req.Shard.Materialization != cdip.ShardLogicalLayers {
+		return "", fmt.Errorf("unsupported distributed shard materialization %q", req.Shard.Materialization)
+	}
+	if strings.TrimSpace(req.Shard.Runtime) == "" {
+		return "", fmt.Errorf("distributed stage runtime is required")
+	}
+	if !workerRuntimeReady(snapshot, req.Shard.Runtime) {
+		return "", fmt.Errorf("distributed stage runtime %s is not ready on this worker", req.Shard.Runtime)
+	}
+	if !workerModelReady(snapshot, req.ModelID) {
+		return "", fmt.Errorf("distributed stage model %s is not installed on this worker", req.ModelID)
+	}
+	msg := cdip.StagePrepare{
+		Envelope:         cdip.NewEnvelope(cdip.MessageStagePrepare),
+		ParentJobID:      req.ParentJobID,
+		StageJobID:       "worker-local-stage-prepare",
+		ModelID:          req.ModelID,
+		Stage:            req.Shard.Stage,
+		UpstreamNodeID:   req.UpstreamNodeID,
+		DownstreamNodeID: req.DownstreamNodeID,
+	}
+	if err := msg.Validate(); err != nil {
+		return "", fmt.Errorf("invalid distributed stage prepare contract: %w", err)
+	}
+	result, err := json.Marshal(distributedStageResult{
+		Kind:               "cdip.stage_ready",
+		ParentJobID:        req.ParentJobID,
+		StageIndex:         req.Stage.Index,
+		ModelID:            req.ModelID,
+		Runtime:            req.Shard.Runtime,
+		LayerStart:         req.Shard.Stage.LayerStart,
+		LayerEnd:           req.Shard.Stage.LayerEnd,
+		UpstreamNodeID:     req.UpstreamNodeID,
+		DownstreamNodeID:   req.DownstreamNodeID,
+		Materialization:    string(req.Shard.Materialization),
+		SourceArtifact:     req.Shard.SourceArtifact,
+		TargetArtifact:     req.Shard.TargetArtifact,
+		ActivationProtocol: "activation-stream-v1",
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(result), nil
+}
+
+func workerRuntimeReady(snapshot cluster.ResourceSnapshot, runtimeName string) bool {
+	for _, runtime := range snapshot.Runtimes {
+		if runtime.Name == runtimeName && runtime.Ready {
+			return true
+		}
+	}
+	return false
+}
+
+func workerModelReady(snapshot cluster.ResourceSnapshot, modelID string) bool {
+	for _, model := range snapshot.Models {
+		if model.ID == modelID && model.Ready {
+			return true
+		}
+	}
+	return false
 }
 
 func modelInstallProgressWriter(managerURL string, cacheDir string, nodeID string, job jobs.Job, startedAt time.Time) func(int64, int64) {

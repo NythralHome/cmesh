@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
@@ -30,6 +31,81 @@ func TestDistributedGenerateJobTypeIsKnownButNotExecutableYet(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "distributed runtime protocol") {
 		t.Fatalf("expected distributed protocol error, got %v", err)
+	}
+}
+
+func TestExecuteDistributedStageJobReturnsReadyResult(t *testing.T) {
+	input, err := json.Marshal(models.DistributedStageJobInput{
+		ParentJobID: "job-parent",
+		ModelID:     "qwen2.5-7b-instruct-q4-k-m",
+		Stage: models.DistributedStageInput{
+			Index:      0,
+			NodeID:     "node-a",
+			LayerStart: 0,
+			LayerEnd:   13,
+			Layers:     14,
+		},
+		Shard: cdip.ModelShard{
+			Stage:           cdip.Stage{Index: 0, NodeID: "node-a", LayerStart: 0, LayerEnd: 13},
+			Runtime:         string(models.RuntimeLlamaCPP),
+			SourceArtifact:  "https://example.test/model.gguf",
+			TargetArtifact:  "qwen.stage-0.layers-0-13",
+			Materialization: cdip.ShardLogicalLayers,
+		},
+		DownstreamNodeID: "node-b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultBody, err := executeWorkerJob(jobs.Job{
+		Type:  models.JobGenerateStage,
+		Input: string(input),
+	}, cluster.ResourceSnapshot{
+		Models: []cluster.ModelResource{{
+			ID:      "qwen2.5-7b-instruct-q4-k-m",
+			Runtime: string(models.RuntimeLlamaCPP),
+			Ready:   true,
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  string(models.RuntimeLlamaCPP),
+			Ready: true,
+		}},
+	}, t.TempDir(), "node-a", time.Now().UTC(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result distributedStageResult
+	if err := json.Unmarshal([]byte(resultBody), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Kind != "cdip.stage_ready" || result.StageIndex != 0 || result.ActivationProtocol != "activation-stream-v1" {
+		t.Fatalf("unexpected distributed stage result: %#v", result)
+	}
+}
+
+func TestExecuteDistributedStageJobRequiresRuntimeAndModel(t *testing.T) {
+	input, err := json.Marshal(models.DistributedStageJobInput{
+		ParentJobID: "job-parent",
+		ModelID:     "qwen2.5-7b-instruct-q4-k-m",
+		Stage:       models.DistributedStageInput{Index: 0, NodeID: "node-a", LayerStart: 0, LayerEnd: 13},
+		Shard: cdip.ModelShard{
+			Stage:           cdip.Stage{Index: 0, NodeID: "node-a", LayerStart: 0, LayerEnd: 13},
+			Runtime:         string(models.RuntimeLlamaCPP),
+			Materialization: cdip.ShardLogicalLayers,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = executeWorkerJob(jobs.Job{Type: models.JobGenerateStage, Input: string(input)}, cluster.ResourceSnapshot{}, t.TempDir(), "node-a", time.Now().UTC(), "")
+	if err == nil || !strings.Contains(err.Error(), "runtime") {
+		t.Fatalf("expected runtime readiness error, got %v", err)
+	}
+	_, err = executeWorkerJob(jobs.Job{Type: models.JobGenerateStage, Input: string(input)}, cluster.ResourceSnapshot{
+		Runtimes: []cluster.RuntimeResource{{Name: string(models.RuntimeLlamaCPP), Ready: true}},
+	}, t.TempDir(), "node-a", time.Now().UTC(), "")
+	if err == nil || !strings.Contains(err.Error(), "not installed") {
+		t.Fatalf("expected model readiness error, got %v", err)
 	}
 }
 

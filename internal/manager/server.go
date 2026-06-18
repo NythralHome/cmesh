@@ -1380,12 +1380,41 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request, jobID
 		return
 	}
 
+	if job, handled, ok := s.handleCDIPStageComplete(req, jobID); handled && ok {
+		writeJSON(w, http.StatusOK, job)
+		return
+	} else if handled {
+		http.Error(w, "invalid CDIP stage transition", http.StatusConflict)
+		return
+	}
+
 	job, ok := s.state.CompleteJob(jobID, req)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+type cdipStageWorkerResult struct {
+	Kind string `json:"kind"`
+}
+
+func (s *Server) handleCDIPStageComplete(req jobs.CompleteRequest, jobID string) (jobs.Job, bool, bool) {
+	job, ok := s.state.Job(jobID)
+	if !ok || job.Type != models.JobGenerateStage || job.AssignedTo != req.NodeID {
+		return jobs.Job{}, false, false
+	}
+	if strings.TrimSpace(req.Error) != "" {
+		updated, ok := s.state.UpdateCDIPStageState(jobID, cdip.StageFailed, req.Error)
+		return updated, true, ok
+	}
+	var result cdipStageWorkerResult
+	if err := json.Unmarshal([]byte(req.Result), &result); err != nil || result.Kind != "cdip.stage_ready" {
+		return jobs.Job{}, false, false
+	}
+	updated, ok := s.state.UpdateCDIPStageState(jobID, cdip.StageReady, "worker reported cdip.stage_ready")
+	return updated, true, ok
 }
 
 func (s *Server) handleJobProgress(w http.ResponseWriter, r *http.Request, jobID string) {

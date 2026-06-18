@@ -449,6 +449,41 @@ func TestCDIPPrepareEndpointBuildsStagePrepareMessages(t *testing.T) {
 	}
 }
 
+func TestCDIPStageReadyCompletionUpdatesLifecycle(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	stageJob, err := state.CreateJob(jobs.CreateRequest{
+		Type:            models.JobGenerateStage,
+		Input:           `{"model_id":"qwen2.5-7b-instruct-q4-k-m"}`,
+		RequestedBy:     "distributed-coordinator:job-parent",
+		AssignedTo:      "node-a",
+		CDIPState:       cdip.StagePreparing,
+		CDIPParentJobID: "job-parent",
+		CDIPStageIndex:  0,
+		NoAutoAssign:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs/"+stageJob.ID+"/complete", strings.NewReader(`{"node_id":"node-a","result":"{\"kind\":\"cdip.stage_ready\"}"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var updated jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.CDIPState != cdip.StageReady {
+		t.Fatalf("expected CDIP stage ready, got %#v", updated)
+	}
+	if updated.Status == jobs.StatusSucceeded {
+		t.Fatalf("stage ready must not complete the stage job before prefill/decode: %#v", updated)
+	}
+}
+
 func TestDistributedStageJobRequestsBuildPipelineTopology(t *testing.T) {
 	parent := jobs.Job{ID: "job-parent", Type: models.JobGenerateDistributed}
 	input := models.DistributedGenerateInput{
