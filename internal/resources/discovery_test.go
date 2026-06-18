@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/cmesh/cmesh/internal/config"
+	"github.com/cmesh/cmesh/internal/models"
 )
 
 func TestDiscoverLocalAppliesLimits(t *testing.T) {
@@ -53,5 +55,109 @@ func TestDiscoverInstalledModelsScansCache(t *testing.T) {
 	}
 	if installed[0].Bytes != 5 {
 		t.Fatalf("unexpected model size %d", installed[0].Bytes)
+	}
+	if !installed[0].Ready {
+		t.Fatalf("expected fallback scanned model to be ready")
+	}
+	if installed[0].Error != "manifest missing" {
+		t.Fatalf("expected manifest warning, got %q", installed[0].Error)
+	}
+}
+
+func TestDiscoverInstalledModelsReadsManifestMetadata(t *testing.T) {
+	cacheDir := t.TempDir()
+	model, err := models.MustFind("qwen2.5-0.5b-instruct-q4-k-m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelPath := ModelFilePath(cacheDir, model)
+	if err := os.MkdirAll(filepath.Dir(modelPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(modelPath, []byte("model"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installedAt := time.Date(2026, 6, 17, 12, 30, 0, 0, time.UTC)
+	if err := WriteModelManifest(cacheDir, model, modelPath, 5, installedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	installed := DiscoverInstalledModels(cacheDir)
+	if len(installed) != 1 {
+		t.Fatalf("expected one installed model, got %#v", installed)
+	}
+	if installed[0].Runtime != string(model.Runtime) || installed[0].Family != model.Family {
+		t.Fatalf("expected manifest metadata, got %#v", installed[0])
+	}
+	if !installed[0].Ready || installed[0].Error != "" {
+		t.Fatalf("expected clean ready inventory, got %#v", installed[0])
+	}
+	if installed[0].Bytes != 5 {
+		t.Fatalf("expected manifest bytes, got %d", installed[0].Bytes)
+	}
+	if !installed[0].InstalledAt.Equal(installedAt) {
+		t.Fatalf("expected installed_at %s, got %s", installedAt, installed[0].InstalledAt)
+	}
+}
+
+func TestDiscoverInstalledModelsReportsManifestSizeMismatch(t *testing.T) {
+	cacheDir := t.TempDir()
+	model, err := models.MustFind("qwen2.5-0.5b-instruct-q4-k-m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelPath := ModelFilePath(cacheDir, model)
+	if err := os.MkdirAll(filepath.Dir(modelPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(modelPath, []byte("model"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteModelManifest(cacheDir, model, modelPath, 123, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	installed := DiscoverInstalledModels(cacheDir)
+	if len(installed) != 1 {
+		t.Fatalf("expected one installed model, got %#v", installed)
+	}
+	if !installed[0].Ready {
+		t.Fatalf("expected model file to remain ready, got %#v", installed[0])
+	}
+	if installed[0].Bytes != 5 {
+		t.Fatalf("expected actual file size to win, got %d", installed[0].Bytes)
+	}
+	if installed[0].Error != "manifest size does not match model file" {
+		t.Fatalf("expected manifest mismatch warning, got %q", installed[0].Error)
+	}
+}
+
+func TestDiscoverCMeshStorageUsageReportsPartialAndOrphanModels(t *testing.T) {
+	cacheDir := t.TempDir()
+	model, err := models.MustFind("qwen2.5-0.5b-instruct-q4-k-m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelDir := filepath.Join(cacheDir, "models", model.ID)
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, model.File+".tmp"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orphanDir := filepath.Join(cacheDir, "models", "unknown-model")
+	if err := os.MkdirAll(orphanDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanDir, "unknown.gguf"), []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	usage := discoverCMeshStorageUsage(cacheDir)
+	if usage.PartialModelFiles != 1 || usage.PartialModelBytes != uint64(len("partial")) {
+		t.Fatalf("expected partial model usage, got %#v", usage)
+	}
+	if usage.OrphanModelDirs != 1 || usage.OrphanModelBytes != uint64(len("orphan")) {
+		t.Fatalf("expected orphan model usage, got %#v", usage)
 	}
 }

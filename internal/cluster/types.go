@@ -40,10 +40,15 @@ type ResourceSnapshot struct {
 }
 
 type ModelResource struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Path  string `json:"path"`
-	Bytes uint64 `json:"bytes"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Family      string    `json:"family,omitempty"`
+	Runtime     string    `json:"runtime,omitempty"`
+	Path        string    `json:"path"`
+	Bytes       uint64    `json:"bytes"`
+	Ready       bool      `json:"ready"`
+	Error       string    `json:"error,omitempty"`
+	InstalledAt time.Time `json:"installed_at,omitempty"`
 }
 
 type RuntimeResource struct {
@@ -81,4 +86,8 @@ type StorageResources struct {
 	UsedByModelsBytes   uint64 `json:"used_by_models_bytes,omitempty"`
 	UsedByRuntimesBytes uint64 `json:"used_by_runtimes_bytes,omitempty"`
 	UsedByCacheBytes    uint64 `json:"used_by_cache_bytes,omitempty"`
+	PartialModelBytes   uint64 `json:"partial_model_bytes,omitempty"`
+	PartialModelFiles   int    `json:"partial_model_files,omitempty"`
+	OrphanModelBytes    uint64 `json:"orphan_model_bytes,omitempty"`
+	OrphanModelDirs     int    `json:"orphan_model_dirs,omitempty"`
 }

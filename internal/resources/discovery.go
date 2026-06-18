@@ -3,12 +3,14 @@ package resources
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/config"
@@ -47,6 +49,10 @@ func DiscoverLocal(options DiscoveryOptions) cluster.ResourceSnapshot {
 			UsedByModelsBytes:   storageUsage.ModelsBytes,
 			UsedByRuntimesBytes: storageUsage.RuntimesBytes,
 			UsedByCacheBytes:    storageUsage.TotalBytes,
+			PartialModelBytes:   storageUsage.PartialModelBytes,
+			PartialModelFiles:   storageUsage.PartialModelFiles,
+			OrphanModelBytes:    storageUsage.OrphanModelBytes,
+			OrphanModelDirs:     storageUsage.OrphanModelDirs,
 		},
 		JobSlots: allowedInt(options.Limits.JobSlots, 1),
 		Models:   DiscoverInstalledModels(options.CacheDir),
@@ -55,9 +61,13 @@ func DiscoverLocal(options DiscoveryOptions) cluster.ResourceSnapshot {
 }
 
 type CMeshStorageUsage struct {
-	ModelsBytes   uint64
-	RuntimesBytes uint64
-	TotalBytes    uint64
+	ModelsBytes       uint64
+	RuntimesBytes     uint64
+	TotalBytes        uint64
+	PartialModelBytes uint64
+	PartialModelFiles int
+	OrphanModelBytes  uint64
+	OrphanModelDirs   int
 }
 
 func discoverCMeshStorageUsage(cacheDir string) CMeshStorageUsage {
@@ -68,11 +78,57 @@ func discoverCMeshStorageUsage(cacheDir string) CMeshStorageUsage {
 	modelsBytes := directorySize(filepath.Join(cacheDir, "models"))
 	runtimesBytes := directorySize(filepath.Join(cacheDir, "runtimes"))
 	totalBytes := directorySize(cacheDir)
+	partialBytes, partialFiles := discoverPartialModelDownloads(filepath.Join(cacheDir, "models"))
+	orphanBytes, orphanDirs := discoverOrphanModelDirs(filepath.Join(cacheDir, "models"))
 	return CMeshStorageUsage{
-		ModelsBytes:   modelsBytes,
-		RuntimesBytes: runtimesBytes,
-		TotalBytes:    totalBytes,
+		ModelsBytes:       modelsBytes,
+		RuntimesBytes:     runtimesBytes,
+		TotalBytes:        totalBytes,
+		PartialModelBytes: partialBytes,
+		PartialModelFiles: partialFiles,
+		OrphanModelBytes:  orphanBytes,
+		OrphanModelDirs:   orphanDirs,
 	}
+}
+
+func discoverPartialModelDownloads(modelsDir string) (uint64, int) {
+	var total uint64
+	count := 0
+	_ = filepath.WalkDir(modelsDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tmp") {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() <= 0 {
+			return nil
+		}
+		total += uint64(info.Size())
+		count++
+		_ = path
+		return nil
+	})
+	return total, count
+}
+
+func discoverOrphanModelDirs(modelsDir string) (uint64, int) {
+	entries, err := os.ReadDir(modelsDir)
+	if err != nil {
+		return 0, 0
+	}
+	catalogIDs := map[string]bool{}
+	for _, model := range models.Catalog() {
+		catalogIDs[model.ID] = true
+	}
+	var total uint64
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || catalogIDs[entry.Name()] {
+			continue
+		}
+		count++
+		total += directorySize(filepath.Join(modelsDir, entry.Name()))
+	}
+	return total, count
 }
 
 func directorySize(path string) uint64 {
@@ -116,19 +172,127 @@ func DiscoverInstalledModels(cacheDir string) []cluster.ModelResource {
 	}
 	out := make([]cluster.ModelResource, 0)
 	for _, model := range models.Catalog() {
-		path := filepath.Join(cacheDir, "models", model.ID, model.File)
+		path := ModelFilePath(cacheDir, model)
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() || info.Size() <= 0 {
 			continue
 		}
+		resource := cluster.ModelResource{
+			ID:      model.ID,
+			Name:    model.Name,
+			Family:  model.Family,
+			Runtime: string(model.Runtime),
+			Path:    path,
+			Bytes:   uint64(info.Size()),
+			Ready:   true,
+		}
+		if manifest, ok := readModelManifest(cacheDir, model.ID); ok {
+			if strings.TrimSpace(manifest.ID) == model.ID {
+				resource.Name = firstNonEmpty(manifest.Name, resource.Name)
+				resource.Family = firstNonEmpty(manifest.Family, resource.Family)
+				resource.Runtime = firstNonEmpty(manifest.Runtime, resource.Runtime)
+				resource.InstalledAt = manifest.InstalledAt
+				if manifest.Bytes > 0 {
+					resource.Bytes = manifest.Bytes
+				}
+				if manifest.File != "" && manifest.File != model.File {
+					resource.Error = "manifest file does not match catalog"
+				}
+				if manifest.Bytes > 0 && manifest.Bytes != uint64(info.Size()) {
+					resource.Error = "manifest size does not match model file"
+					resource.Bytes = uint64(info.Size())
+				}
+			} else {
+				resource.Error = "manifest id does not match catalog"
+			}
+		} else {
+			resource.Error = "manifest missing"
+		}
 		out = append(out, cluster.ModelResource{
-			ID:    model.ID,
-			Name:  model.Name,
-			Path:  path,
-			Bytes: uint64(info.Size()),
+			ID:          resource.ID,
+			Name:        resource.Name,
+			Family:      resource.Family,
+			Runtime:     resource.Runtime,
+			Path:        resource.Path,
+			Bytes:       resource.Bytes,
+			Ready:       resource.Ready,
+			Error:       resource.Error,
+			InstalledAt: resource.InstalledAt,
 		})
 	}
 	return out
+}
+
+const modelManifestFile = "cmesh-model.json"
+
+type ModelManifest struct {
+	Schema      string    `json:"schema"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Family      string    `json:"family,omitempty"`
+	Runtime     string    `json:"runtime"`
+	Repo        string    `json:"repo,omitempty"`
+	File        string    `json:"file"`
+	URL         string    `json:"url,omitempty"`
+	Path        string    `json:"path"`
+	Bytes       uint64    `json:"bytes"`
+	InstalledAt time.Time `json:"installed_at"`
+}
+
+func ModelFilePath(cacheDir string, model models.Model) string {
+	return filepath.Join(cacheDir, "models", model.ID, model.File)
+}
+
+func WriteModelManifest(cacheDir string, model models.Model, path string, bytes uint64, installedAt time.Time) error {
+	if installedAt.IsZero() {
+		installedAt = time.Now().UTC()
+	}
+	manifest := ModelManifest{
+		Schema:      "cmesh.model.v1",
+		ID:          model.ID,
+		Name:        model.Name,
+		Family:      model.Family,
+		Runtime:     string(model.Runtime),
+		Repo:        model.Repo,
+		File:        model.File,
+		URL:         model.URL,
+		Path:        path,
+		Bytes:       bytes,
+		InstalledAt: installedAt.UTC(),
+	}
+	body, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(ModelManifestPath(cacheDir, model.ID)), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(ModelManifestPath(cacheDir, model.ID), append(body, '\n'), 0o644)
+}
+
+func ModelManifestPath(cacheDir string, modelID string) string {
+	return filepath.Join(cacheDir, "models", modelID, modelManifestFile)
+}
+
+func readModelManifest(cacheDir string, modelID string) (ModelManifest, bool) {
+	body, err := os.ReadFile(ModelManifestPath(cacheDir, modelID))
+	if err != nil {
+		return ModelManifest{}, false
+	}
+	var manifest ModelManifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return ModelManifest{}, false
+	}
+	return manifest, true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func discoverTotalMemory() uint64 {

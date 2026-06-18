@@ -316,6 +316,37 @@ func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, b
 	return job, true
 }
 
+func (s *State) UpdateJobProgress(jobID string, req jobs.ProgressRequest) (jobs.Job, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, ok := s.jobs[jobID]
+	if !ok || job.AssignedTo != req.NodeID || job.Status != jobs.StatusRunning {
+		return jobs.Job{}, false
+	}
+	now := time.Now().UTC()
+	job.Result = jobProgressResult(req, now)
+	job.UpdatedAt = now
+	s.jobs[job.ID] = job
+	return job, true
+}
+
+func jobProgressResult(req jobs.ProgressRequest, updatedAt time.Time) string {
+	payload := map[string]any{
+		"kind":             "job.progress",
+		"progress_bytes":   req.ProgressBytes,
+		"total_bytes":      req.TotalBytes,
+		"progress_percent": req.ProgressPercent,
+		"progress_label":   strings.TrimSpace(req.ProgressLabel),
+		"updated_at":       updatedAt,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(body)
+}
+
 func (s *State) Conversation(id string) (Conversation, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -489,6 +520,10 @@ func (s *State) cleanupModelPersistenceForDeleteJobLocked(job *jobs.Job) {
 	if err := json.Unmarshal([]byte(job.Input), &input); err != nil || input.ModelID == "" {
 		return
 	}
+	if s.modelInstalledOnAnotherOnlineWorkerLocked(input.ModelID, job.AssignedTo) {
+		job.Result = withDeleteCleanupResult(job.Result, 0, 0)
+		return
+	}
 	deletedMemories := 0
 	for id, memory := range s.memories {
 		if memory.ModelID == input.ModelID {
@@ -504,6 +539,24 @@ func (s *State) cleanupModelPersistenceForDeleteJobLocked(job *jobs.Job) {
 		}
 	}
 	job.Result = withDeleteCleanupResult(job.Result, deletedMemories, deletedConversations)
+}
+
+func (s *State) modelInstalledOnAnotherOnlineWorkerLocked(modelID string, excludedNodeID string) bool {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return false
+	}
+	for _, node := range s.nodes {
+		if node.ID == excludedNodeID || node.Role != cluster.NodeRoleWorker || node.Status != cluster.NodeStatusOnline {
+			continue
+		}
+		for _, installed := range node.Resources.Models {
+			if installed.ID == modelID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func withDeleteCleanupResult(result string, deletedMemories int, deletedConversations int) string {
@@ -775,6 +828,13 @@ func (s *State) ClusterSummary() ClusterSummary {
 			summary.Resources.Storage.TotalBytes += node.Resources.Storage.TotalBytes
 			summary.Resources.Storage.AllowedBytes += node.Resources.Storage.AllowedBytes
 			summary.Resources.Storage.FreeBytes += node.Resources.Storage.FreeBytes
+			summary.Resources.Storage.UsedByModelsBytes += node.Resources.Storage.UsedByModelsBytes
+			summary.Resources.Storage.UsedByRuntimesBytes += node.Resources.Storage.UsedByRuntimesBytes
+			summary.Resources.Storage.UsedByCacheBytes += node.Resources.Storage.UsedByCacheBytes
+			summary.Resources.Storage.PartialModelBytes += node.Resources.Storage.PartialModelBytes
+			summary.Resources.Storage.PartialModelFiles += node.Resources.Storage.PartialModelFiles
+			summary.Resources.Storage.OrphanModelBytes += node.Resources.Storage.OrphanModelBytes
+			summary.Resources.Storage.OrphanModelDirs += node.Resources.Storage.OrphanModelDirs
 			summary.GPUs += len(node.Resources.GPU)
 			for _, gpu := range node.Resources.GPU {
 				summary.VRAMTotalBytes += gpu.TotalVRAMBytes

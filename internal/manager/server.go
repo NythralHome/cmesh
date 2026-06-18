@@ -2,6 +2,8 @@ package manager
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cmesh/cmesh/internal/cluster"
@@ -28,6 +32,8 @@ type Server struct {
 	publicURL     string
 	mux           *http.ServeMux
 	server        *http.Server
+	snapshotMu    sync.RWMutex
+	snapshots     map[string]CapacitySnapshot
 }
 
 type ServerOptions struct {
@@ -50,12 +56,16 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 		operatorToken: options.OperatorToken,
 		publicURL:     strings.TrimRight(options.PublicURL, "/"),
 		mux:           mux,
+		snapshots:     make(map[string]CapacitySnapshot),
 	}
 
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/invite", s.handleInvite)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/cluster", s.handleCluster)
+	mux.HandleFunc("/v1/capacity/snapshots", s.handleCapacitySnapshots)
+	mux.HandleFunc("/v1/capacity", s.handleCapacity)
+	mux.HandleFunc("/v1/dashboard/status", s.handleDashboardStatus)
 	mux.HandleFunc("/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/v1/cluster-benchmarks", s.handleClusterBenchmarks)
@@ -126,6 +136,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		ClusterBenchmarks  []ClusterBenchmarkSummary
 		Models             []ModelSummary
 		Readiness          ReadinessSummary
+		Capacity           CapacitySummary
 		NodesByID          map[string]cluster.Node
 		WorkerActiveJobs   map[string]int
 		MaxClusterGFLOPS   float64
@@ -142,6 +153,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		ClusterBenchmarks:  clusterBenchmarks,
 		Models:             modelsView,
 		Readiness:          clusterReadiness(onlineWorkerNodes(nodes), modelsView, allJobs),
+		Capacity:           clusterCapacity(s.state.ClusterSummary(), modelsView, onlineWorkerNodes(nodes)),
 		NodesByID:          nodesByID(nodes),
 		WorkerActiveJobs:   activeJobsByWorker(allJobs),
 		MaxClusterGFLOPS:   maxClusterBenchmarkGFLOPS(clusterBenchmarks),
@@ -380,6 +392,91 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.state.ClusterSummary())
 }
 
+func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	current := s.capacitySnapshot("")
+	payload := map[string]any{
+		"summary":  current.Summary,
+		"capacity": current.Capacity,
+	}
+	if baselineID := strings.TrimSpace(r.URL.Query().Get("baseline")); baselineID != "" {
+		if baseline, ok := s.capacitySnapshotByID(baselineID); ok {
+			payload["baseline"] = baseline
+			payload["delta"] = capacityDelta(baseline, current)
+		} else {
+			http.Error(w, "baseline snapshot not found", http.StatusNotFound)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) handleCapacitySnapshots(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"snapshots": s.capacitySnapshots()})
+	case http.MethodPost:
+		var req struct {
+			Label     string `json:"label"`
+			CompareTo string `json:"compare_to"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&req)
+		}
+		snapshot := s.saveCapacitySnapshot(req.Label)
+		payload := map[string]any{"snapshot": snapshot}
+		if baselineID := strings.TrimSpace(req.CompareTo); baselineID != "" {
+			if baseline, ok := s.capacitySnapshotByID(baselineID); ok {
+				payload["baseline"] = baseline
+				payload["delta"] = capacityDelta(baseline, snapshot)
+			} else {
+				http.Error(w, "compare_to snapshot not found", http.StatusNotFound)
+				return
+			}
+		}
+		writeJSON(w, http.StatusCreated, payload)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleDashboardStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodes := s.state.Nodes()
+	jobsList := s.state.Jobs()
+	modelsView := modelSummaries(models.Catalog(), jobsList, nodes)
+	summary := s.state.ClusterSummary()
+	readiness := clusterReadiness(onlineWorkerNodes(nodes), modelsView, jobsList)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"readiness_status":   readiness.Status,
+		"workers_online":     summary.WorkersOnline,
+		"workers_total":      summary.WorkersTotal,
+		"ready_models":       readiness.GeneratableModels,
+		"active_jobs":        readiness.ActiveJobs,
+		"recent_failures":    readiness.RecentFailures,
+		"jobs_total":         len(jobsList),
+		"runtime_ready":      readiness.RuntimeReadyWorkers,
+		"installed_models":   readiness.InstalledModels,
+		"benchmark_score":    summary.BenchmarkScore,
+		"updated_at_unix_ms": time.Now().UTC().UnixMilli(),
+	})
+}
+
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperatorAuth(w, r, false) {
 		return
@@ -529,9 +626,31 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	filters := modelCatalogFiltersFromRequest(r)
+	summaries := modelSummaries(models.Catalog(), s.state.Jobs(), s.state.Nodes())
+	filtered := filterAndSortModelSummaries(summaries, filters)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"models": modelSummaries(models.Catalog(), s.state.Jobs(), s.state.Nodes()),
+		"models":  filtered,
+		"total":   len(summaries),
+		"count":   len(filtered),
+		"filters": filters,
 	})
+}
+
+func modelCatalogFiltersFromRequest(r *http.Request) ModelCatalogFilters {
+	query := r.URL.Query()
+	return ModelCatalogFilters{
+		Query:       firstNonEmptyString(query.Get("q"), query.Get("query")),
+		Status:      query.Get("status"),
+		Family:      query.Get("family"),
+		CapableOnly: boolQuery(query.Get("capable")),
+		Sort:        query.Get("sort"),
+	}
+}
+
+func boolQuery(raw string) bool {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	return raw == "1" || raw == "true" || raw == "yes"
 }
 
 func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
@@ -539,8 +658,8 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/models/")
-	parts := strings.Split(path, "/")
-	if len(parts) != 2 {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 1 || len(parts) > 2 || parts[0] == "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -549,17 +668,55 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if len(parts) == 1 {
+		s.handleModelDetail(w, r, model)
+		return
+	}
 	action := parts[1]
 	switch action {
+	case "placement":
+		s.handleModelPlacement(w, r, model)
 	case "install":
 		s.handleModelInstall(w, r, model)
 	case "delete":
 		s.handleModelDelete(w, r, model)
+	case "repair":
+		s.handleModelRepair(w, r, model)
 	case "generate":
 		s.handleModelGenerate(w, r, model)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleModelPlacement(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
+	if len(summaries) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"placement": modelPlacementPlan(summaries[0]),
+	})
+}
+
+func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
+	if len(summaries) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model": summaries[0],
+	})
 }
 
 func (s *Server) handleModelInstall(w http.ResponseWriter, r *http.Request, model models.Model) {
@@ -578,8 +735,13 @@ func (s *Server) handleModelInstall(w http.ResponseWriter, r *http.Request, mode
 		http.Error(w, "model is not available", http.StatusNotFound)
 		return
 	}
-	if ok, reason := modelInstallEligibility(summaries[0], req.NodeID); !ok {
-		http.Error(w, "no eligible worker for model install: "+reason, http.StatusConflict)
+	summary := summaries[0]
+	if ok, reason := modelInstallEligibility(summary, req.NodeID); !ok {
+		writeJSON(w, http.StatusConflict, modelInstallConflictResponse{
+			Error:     "no eligible worker for model install",
+			Reason:    reason,
+			Placement: modelPlacementPlan(summary),
+		})
 		return
 	}
 	input, err := json.Marshal(models.InstallInput{ModelID: model.ID})
@@ -623,6 +785,15 @@ func (s *Server) handleModelDelete(w http.ResponseWriter, r *http.Request, model
 		http.Error(w, "node_id is required", http.StatusBadRequest)
 		return
 	}
+	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
+	if len(summaries) == 0 || !modelInstalledOn(summaries[0], req.NodeID) {
+		http.Error(w, "model is not installed on the selected worker", http.StatusConflict)
+		return
+	}
+	if activeJobID := activeModelJobForNode(s.state.Jobs(), model.ID, req.NodeID); activeJobID != "" {
+		http.Error(w, "model has an active job on the selected worker: "+activeJobID, http.StatusConflict)
+		return
+	}
 	input, err := json.Marshal(models.DeleteInput{ModelID: model.ID})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -633,6 +804,55 @@ func (s *Server) handleModelDelete(w http.ResponseWriter, r *http.Request, model
 		Input:       string(input),
 		RequestedBy: "dashboard-models",
 		AssignedTo:  req.NodeID,
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, job)
+}
+
+func (s *Server) handleModelRepair(w http.ResponseWriter, r *http.Request, model models.Model) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		NodeID string `json:"node_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	summaries := modelSummaries([]models.Model{model}, s.state.Jobs(), s.state.Nodes())
+	if len(summaries) == 0 || !modelInstalledOn(summaries[0], req.NodeID) {
+		http.Error(w, "model is not installed on the selected worker", http.StatusConflict)
+		return
+	}
+	if activeJobID := activeModelJobForNode(s.state.Jobs(), model.ID, req.NodeID); activeJobID != "" {
+		http.Error(w, "model has an active job on the selected worker: "+activeJobID, http.StatusConflict)
+		return
+	}
+	input, err := json.Marshal(models.RepairInput{ModelID: model.ID})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	job, err := s.state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobRepair,
+		Input:       string(input),
+		RequestedBy: "dashboard-models",
+		AssignedTo:  req.NodeID,
+		Requirements: jobs.Requirements{
+			CPUCores:    1,
+			MemoryBytes: model.MemoryBytes,
+			VRAMBytes:   model.VRAMBytes,
+		},
 		MaxAttempts: 1,
 	})
 	if err != nil {
@@ -672,31 +892,44 @@ func (s *Server) handleModelGenerate(w http.ResponseWriter, r *http.Request, mod
 		http.Error(w, "model is not installed on the selected worker", http.StatusConflict)
 		return
 	}
-	if !modelGeneratableOn(summaries[0], req.NodeID) {
-		http.Error(w, "model runtime is not ready on the selected worker", http.StatusConflict)
-		return
-	}
 	conversationID := strings.TrimSpace(req.ConversationID)
 	if conversationID == "" {
 		conversationID = newConversationID()
 	}
+	if activeJobID := activeGenerateJobForConversation(s.state.Jobs(), conversationID); activeJobID != "" {
+		http.Error(w, "conversation already has an active generate job: "+activeJobID, http.StatusConflict)
+		return
+	}
+	if !modelGeneratableOn(summaries[0], req.NodeID) {
+		http.Error(w, modelGenerateBlockedReason(summaries[0], req.NodeID), http.StatusConflict)
+		return
+	}
 	systemPrompt := strings.TrimSpace(req.SystemPrompt)
 	if systemPrompt == "" {
 		systemPrompt = modelDefaultSystemPrompt(model)
+	}
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = models.QualityPresetFor(model).MaxTokens
+	}
+	temperature := strings.TrimSpace(req.Temperature)
+	if temperature == "" {
+		temperature = models.QualityPresetFor(model).Temperature
 	}
 	conversation := appendConversationMessage(s.state, conversationID, model.ID, req.NodeID, systemPrompt, models.ChatMessage{
 		Role:    "user",
 		Content: req.Prompt,
 	})
 	effectiveSystemPrompt := systemPromptWithMemory(systemPrompt, model.ID, s.state)
+	budgetedMessages := budgetConversationMessages(model, effectiveSystemPrompt, conversation.Messages, maxTokens)
 	input, err := json.Marshal(models.GenerateInput{
 		ModelID:        model.ID,
 		Prompt:         req.Prompt,
-		Messages:       conversation.Messages,
+		Messages:       budgetedMessages,
 		SystemPrompt:   effectiveSystemPrompt,
 		ConversationID: conversation.ID,
-		MaxTokens:      req.MaxTokens,
-		Temperature:    req.Temperature,
+		MaxTokens:      maxTokens,
+		Temperature:    temperature,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -895,16 +1128,46 @@ func (s *Server) handleMemoryPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	systemPrompt := strings.TrimSpace(r.URL.Query().Get("system_prompt"))
+	conversationID := strings.TrimSpace(r.URL.Query().Get("conversation_id"))
+	draftPrompt := strings.TrimSpace(r.URL.Query().Get("prompt"))
+	maxTokens := intQuery(r, "max_tokens", models.QualityPresetFor(model).MaxTokens)
 	if systemPrompt == "" {
 		systemPrompt = modelDefaultSystemPrompt(model)
 	}
+	messages := []models.ChatMessage{}
+	if conversations, ok := s.state.(conversationStore); ok && conversationID != "" {
+		if conversation, found := conversations.Conversation(conversationID); found {
+			messages = append(messages, conversation.Messages...)
+			if systemPrompt == "" && conversation.SystemPrompt != "" {
+				systemPrompt = conversation.SystemPrompt
+			}
+		}
+	}
+	if draftPrompt != "" {
+		messages = append(messages, models.ChatMessage{Role: "user", Content: draftPrompt})
+	}
 	memories := memoriesForModel(s.state, model.ID)
+	effectiveSystemPrompt := systemPromptWithMemory(systemPrompt, model.ID, s.state)
+	preview := promptContextPreview(model, effectiveSystemPrompt, messages, maxTokens)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"model_id":                model.ID,
 		"memories":                memories,
 		"memory_context":          memoryContext(model.ID, memories),
-		"effective_system_prompt": systemPromptWithMemory(systemPrompt, model.ID, s.state),
+		"effective_system_prompt": effectiveSystemPrompt,
+		"context":                 preview,
 	})
+}
+
+func intQuery(r *http.Request, key string, fallback int) int {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
@@ -918,6 +1181,10 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	jobID := parts[0]
 	if len(parts) == 2 && parts[1] == "complete" {
 		s.handleJobComplete(w, r, jobID)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "progress" {
+		s.handleJobProgress(w, r, jobID)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "cancel" {
@@ -981,6 +1248,28 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request, jobID
 	writeJSON(w, http.StatusOK, job)
 }
 
+func (s *Server) handleJobProgress(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req jobs.ProgressRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	job, ok := s.state.UpdateJobProgress(jobID, req)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
 func (s *Server) handleWorkerRoutes(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/v1/workers/")
 	parts := strings.Split(path, "/")
@@ -988,7 +1277,64 @@ func (s *Server) handleWorkerRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleWorkerNextJob(w, r, parts[0])
 		return
 	}
+	if len(parts) == 2 && parts[1] == "model-cleanup" {
+		s.handleWorkerModelCleanup(w, r, parts[0])
+		return
+	}
 	http.NotFound(w, r)
+}
+
+func (s *Server) handleWorkerModelCleanup(w http.ResponseWriter, r *http.Request, nodeID string) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	node, ok := findNodeByID(s.state.Nodes(), nodeID)
+	if !ok || node.Role != cluster.NodeRoleWorker {
+		http.Error(w, "worker not found", http.StatusNotFound)
+		return
+	}
+	if node.Status != cluster.NodeStatusOnline {
+		http.Error(w, "worker is not online", http.StatusConflict)
+		return
+	}
+	input, err := json.Marshal(models.CleanupInput{Scope: "cache"})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	job, err := s.state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobCleanup,
+		Input:       string(input),
+		RequestedBy: "dashboard-workers",
+		AssignedTo:  nodeID,
+		Requirements: jobs.Requirements{
+			CPUCores: 1,
+		},
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, job)
+}
+
+func findNodeByID(nodes []cluster.Node, nodeID string) (cluster.Node, bool) {
+	for _, node := range nodes {
+		if node.ID == nodeID {
+			return node, true
+		}
+	}
+	return cluster.Node{}, false
 }
 
 func (s *Server) handleWorkerNextJob(w http.ResponseWriter, r *http.Request, nodeID string) {
@@ -1154,6 +1500,50 @@ func recentChatJobs(in []jobs.Job, limit int) []jobs.Job {
 	return recentJobs(out, limit)
 }
 
+func activeGenerateJobForConversation(in []jobs.Job, conversationID string) string {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return ""
+	}
+	for _, job := range in {
+		if job.Type != models.JobGenerate {
+			continue
+		}
+		if job.Status != jobs.StatusQueued && job.Status != jobs.StatusScheduled && job.Status != jobs.StatusRunning {
+			continue
+		}
+		var input models.GenerateInput
+		if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
+			continue
+		}
+		if input.ConversationID == conversationID {
+			return job.ID
+		}
+	}
+	return ""
+}
+
+func activeModelJobForNode(in []jobs.Job, modelID string, nodeID string) string {
+	modelID = strings.TrimSpace(modelID)
+	nodeID = strings.TrimSpace(nodeID)
+	if modelID == "" || nodeID == "" {
+		return ""
+	}
+	for _, job := range in {
+		if job.AssignedTo != nodeID {
+			continue
+		}
+		if job.Status != jobs.StatusQueued && job.Status != jobs.StatusScheduled && job.Status != jobs.StatusRunning {
+			continue
+		}
+		activeModelID, ok := jobModelID(job)
+		if ok && activeModelID == modelID {
+			return job.ID
+		}
+	}
+	return ""
+}
+
 func maxClusterBenchmarkGFLOPS(in []ClusterBenchmarkSummary) float64 {
 	var maxValue float64
 	for _, summary := range in {
@@ -1301,6 +1691,334 @@ type ReadinessCheck struct {
 	Tab    string
 }
 
+type CapacitySummary struct {
+	WorkersOnline              int              `json:"workers_online"`
+	AllowedCPUCores            int              `json:"allowed_cpu_cores"`
+	AllowedMemoryBytes         uint64           `json:"allowed_memory_bytes"`
+	AllowedStorageBytes        uint64           `json:"allowed_storage_bytes"`
+	FreeStorageBytes           uint64           `json:"free_storage_bytes"`
+	AllowedVRAMBytes           uint64           `json:"allowed_vram_bytes"`
+	CatalogModels              int              `json:"catalog_models"`
+	SingleWorkerRunnableModels int              `json:"single_worker_runnable_models"`
+	ShardedEstimateModels      int              `json:"sharded_estimate_models"`
+	BlockedModels              int              `json:"blocked_models"`
+	LargestSingleWorkerModel   CapacityModel    `json:"largest_single_worker_model"`
+	LargestShardedModel        CapacityModel    `json:"largest_sharded_model"`
+	Workers                    []CapacityWorker `json:"workers"`
+	SingleWorkerRunnable       []CapacityModel  `json:"single_worker_runnable"`
+	ShardedEstimate            []CapacityModel  `json:"sharded_estimate"`
+	Blocked                    []CapacityModel  `json:"blocked"`
+	UnlockTargets              []CapacityTarget `json:"unlock_targets"`
+}
+
+type CapacityModel struct {
+	ID               string `json:"id,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Parameters       string `json:"parameters,omitempty"`
+	Quant            string `json:"quant,omitempty"`
+	RequiredMemory   uint64 `json:"required_memory_bytes,omitempty"`
+	RequiredDisk     uint64 `json:"required_disk_bytes,omitempty"`
+	PlacementMode    string `json:"placement_mode,omitempty"`
+	PlacementHint    string `json:"placement_hint,omitempty"`
+	CandidateWorkers int    `json:"candidate_workers,omitempty"`
+	ShardWorkers     int    `json:"shard_workers,omitempty"`
+}
+
+type CapacityWorker struct {
+	NodeID               string        `json:"node_id"`
+	Name                 string        `json:"name"`
+	AllowedCPUCores      int           `json:"allowed_cpu_cores"`
+	AllowedMemoryBytes   uint64        `json:"allowed_memory_bytes"`
+	AllowedStorageBytes  uint64        `json:"allowed_storage_bytes"`
+	FreeStorageBytes     uint64        `json:"free_storage_bytes"`
+	AllowedVRAMBytes     uint64        `json:"allowed_vram_bytes"`
+	JobSlots             int           `json:"job_slots"`
+	RuntimeReady         bool          `json:"runtime_ready"`
+	InstalledModels      int           `json:"installed_models"`
+	RunnableModels       int           `json:"runnable_models"`
+	LargestRunnableModel CapacityModel `json:"largest_runnable_model"`
+	MemorySharePercent   float64       `json:"memory_share_percent"`
+	StorageSharePercent  float64       `json:"storage_share_percent"`
+	FreeStorageSharePct  float64       `json:"free_storage_share_percent"`
+	VRAMSharePercent     float64       `json:"vram_share_percent"`
+}
+
+type CapacityTarget struct {
+	Model                CapacityModel `json:"model"`
+	MemoryShortBytes     uint64        `json:"memory_short_bytes,omitempty"`
+	DiskShortBytes       uint64        `json:"disk_short_bytes,omitempty"`
+	AggregateMemoryBytes uint64        `json:"aggregate_memory_bytes,omitempty"`
+	AggregateDiskBytes   uint64        `json:"aggregate_disk_bytes,omitempty"`
+	Blockers             []string      `json:"blockers,omitempty"`
+}
+
+type CapacitySnapshot struct {
+	ID        string          `json:"id"`
+	Label     string          `json:"label,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	Summary   ClusterSummary  `json:"summary"`
+	Capacity  CapacitySummary `json:"capacity"`
+}
+
+type CapacityDelta struct {
+	BaselineID                    string          `json:"baseline_id"`
+	CurrentID                     string          `json:"current_id,omitempty"`
+	WorkersOnlineDelta            int             `json:"workers_online_delta"`
+	AllowedCPUCoresDelta          int             `json:"allowed_cpu_cores_delta"`
+	AllowedMemoryBytesDelta       int64           `json:"allowed_memory_bytes_delta"`
+	AllowedStorageBytesDelta      int64           `json:"allowed_storage_bytes_delta"`
+	FreeStorageBytesDelta         int64           `json:"free_storage_bytes_delta"`
+	AllowedVRAMBytesDelta         int64           `json:"allowed_vram_bytes_delta"`
+	SingleWorkerRunnableDelta     int             `json:"single_worker_runnable_delta"`
+	ShardedEstimateDelta          int             `json:"sharded_estimate_delta"`
+	BlockedModelsDelta            int             `json:"blocked_models_delta"`
+	NewSingleWorkerRunnableModels []CapacityModel `json:"new_single_worker_runnable_models,omitempty"`
+	NewShardedEstimateModels      []CapacityModel `json:"new_sharded_estimate_models,omitempty"`
+}
+
+func clusterCapacity(summary ClusterSummary, modelsView []ModelSummary, onlineNodes []cluster.Node) CapacitySummary {
+	capacity := CapacitySummary{
+		WorkersOnline:        summary.WorkersOnline,
+		AllowedCPUCores:      summary.Resources.CPU.CoresAllowed,
+		AllowedMemoryBytes:   summary.Resources.Memory.AllowedBytes,
+		AllowedStorageBytes:  summary.Resources.Storage.AllowedBytes,
+		FreeStorageBytes:     summary.Resources.Storage.FreeBytes,
+		AllowedVRAMBytes:     summary.VRAMAllowedBytes,
+		CatalogModels:        len(modelsView),
+		SingleWorkerRunnable: make([]CapacityModel, 0),
+		ShardedEstimate:      make([]CapacityModel, 0),
+		Blocked:              make([]CapacityModel, 0),
+	}
+	for _, modelSummary := range modelsView {
+		plan := modelPlacementPlan(modelSummary)
+		modelCapacity := capacityModelFromPlacement(modelSummary, plan)
+		switch {
+		case plan.RunnableNow:
+			capacity.SingleWorkerRunnableModels++
+			capacity.SingleWorkerRunnable = append(capacity.SingleWorkerRunnable, modelCapacity)
+			if modelCapacity.RequiredMemory > capacity.LargestSingleWorkerModel.RequiredMemory {
+				capacity.LargestSingleWorkerModel = modelCapacity
+			}
+		case plan.Feasible:
+			capacity.ShardedEstimateModels++
+			capacity.ShardedEstimate = append(capacity.ShardedEstimate, modelCapacity)
+			if modelCapacity.RequiredMemory > capacity.LargestShardedModel.RequiredMemory {
+				capacity.LargestShardedModel = modelCapacity
+			}
+		default:
+			capacity.BlockedModels++
+			capacity.Blocked = append(capacity.Blocked, modelCapacity)
+			capacity.UnlockTargets = append(capacity.UnlockTargets, capacityTargetFromPlacement(modelCapacity, plan))
+		}
+	}
+	sort.Slice(capacity.UnlockTargets, func(i, j int) bool {
+		left := capacity.UnlockTargets[i]
+		right := capacity.UnlockTargets[j]
+		leftTotal := left.MemoryShortBytes + left.DiskShortBytes
+		rightTotal := right.MemoryShortBytes + right.DiskShortBytes
+		if leftTotal != rightTotal {
+			return leftTotal < rightTotal
+		}
+		return left.Model.RequiredMemory < right.Model.RequiredMemory
+	})
+	if len(capacity.UnlockTargets) > 5 {
+		capacity.UnlockTargets = capacity.UnlockTargets[:5]
+	}
+	capacity.Workers = capacityWorkers(summary, modelsView, onlineNodes)
+	return capacity
+}
+
+func capacityTargetFromPlacement(model CapacityModel, plan ModelPlacementPlan) CapacityTarget {
+	return CapacityTarget{
+		Model:                model,
+		MemoryShortBytes:     shortfall(plan.RequiredMemoryBytes, plan.AggregateMemoryBytes),
+		DiskShortBytes:       shortfall(plan.RequiredDiskBytes, plan.AggregateDiskBytes),
+		AggregateMemoryBytes: plan.AggregateMemoryBytes,
+		AggregateDiskBytes:   plan.AggregateDiskBytes,
+		Blockers:             append([]string(nil), plan.Blockers...),
+	}
+}
+
+func shortfall(required uint64, available uint64) uint64 {
+	if required <= available {
+		return 0
+	}
+	return required - available
+}
+
+func capacityModelFromPlacement(summary ModelSummary, plan ModelPlacementPlan) CapacityModel {
+	return CapacityModel{
+		ID:               summary.Model.ID,
+		Name:             summary.Model.Name,
+		Parameters:       summary.Model.Parameters,
+		Quant:            summary.Model.Quant,
+		RequiredMemory:   summary.Model.MemoryBytes,
+		RequiredDisk:     summary.Model.DiskBytes,
+		PlacementMode:    plan.Mode,
+		PlacementHint:    modelPlacementHint(plan),
+		CandidateWorkers: len(plan.SingleNodeCandidates),
+		ShardWorkers:     len(plan.Shards),
+	}
+}
+
+func (s *Server) capacitySnapshot(label string) CapacitySnapshot {
+	nodes := s.state.Nodes()
+	jobsList := s.state.Jobs()
+	summary := s.state.ClusterSummary()
+	modelsView := modelSummaries(models.Catalog(), jobsList, nodes)
+	return CapacitySnapshot{
+		ID:        newCapacitySnapshotID(),
+		Label:     strings.TrimSpace(label),
+		CreatedAt: time.Now().UTC(),
+		Summary:   summary,
+		Capacity:  clusterCapacity(summary, modelsView, onlineWorkerNodes(nodes)),
+	}
+}
+
+func (s *Server) saveCapacitySnapshot(label string) CapacitySnapshot {
+	snapshot := s.capacitySnapshot(label)
+	s.snapshotMu.Lock()
+	s.snapshots[snapshot.ID] = snapshot
+	s.snapshotMu.Unlock()
+	return snapshot
+}
+
+func (s *Server) capacitySnapshots() []CapacitySnapshot {
+	s.snapshotMu.RLock()
+	defer s.snapshotMu.RUnlock()
+	out := make([]CapacitySnapshot, 0, len(s.snapshots))
+	for _, snapshot := range s.snapshots {
+		out = append(out, snapshot)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out
+}
+
+func (s *Server) capacitySnapshotByID(id string) (CapacitySnapshot, bool) {
+	s.snapshotMu.RLock()
+	defer s.snapshotMu.RUnlock()
+	snapshot, ok := s.snapshots[id]
+	return snapshot, ok
+}
+
+func capacityDelta(baseline CapacitySnapshot, current CapacitySnapshot) CapacityDelta {
+	return CapacityDelta{
+		BaselineID:                    baseline.ID,
+		CurrentID:                     current.ID,
+		WorkersOnlineDelta:            current.Capacity.WorkersOnline - baseline.Capacity.WorkersOnline,
+		AllowedCPUCoresDelta:          current.Capacity.AllowedCPUCores - baseline.Capacity.AllowedCPUCores,
+		AllowedMemoryBytesDelta:       uint64Delta(current.Capacity.AllowedMemoryBytes, baseline.Capacity.AllowedMemoryBytes),
+		AllowedStorageBytesDelta:      uint64Delta(current.Capacity.AllowedStorageBytes, baseline.Capacity.AllowedStorageBytes),
+		FreeStorageBytesDelta:         uint64Delta(current.Capacity.FreeStorageBytes, baseline.Capacity.FreeStorageBytes),
+		AllowedVRAMBytesDelta:         uint64Delta(current.Capacity.AllowedVRAMBytes, baseline.Capacity.AllowedVRAMBytes),
+		SingleWorkerRunnableDelta:     current.Capacity.SingleWorkerRunnableModels - baseline.Capacity.SingleWorkerRunnableModels,
+		ShardedEstimateDelta:          current.Capacity.ShardedEstimateModels - baseline.Capacity.ShardedEstimateModels,
+		BlockedModelsDelta:            current.Capacity.BlockedModels - baseline.Capacity.BlockedModels,
+		NewSingleWorkerRunnableModels: newCapacityModels(baseline.Capacity.SingleWorkerRunnable, current.Capacity.SingleWorkerRunnable),
+		NewShardedEstimateModels:      newCapacityModels(baseline.Capacity.ShardedEstimate, current.Capacity.ShardedEstimate),
+	}
+}
+
+func newCapacityModels(baseline []CapacityModel, current []CapacityModel) []CapacityModel {
+	seen := make(map[string]bool, len(baseline))
+	for _, model := range baseline {
+		seen[model.ID] = true
+	}
+	out := make([]CapacityModel, 0)
+	for _, model := range current {
+		if model.ID == "" || seen[model.ID] {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
+}
+
+func uint64Delta(current uint64, baseline uint64) int64 {
+	if current >= baseline {
+		return int64(current - baseline)
+	}
+	return -int64(baseline - current)
+}
+
+func newCapacitySnapshotID() string {
+	var buf [6]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "cap-unknown"
+	}
+	return "cap-" + hex.EncodeToString(buf[:])
+}
+
+func capacityWorkers(summary ClusterSummary, modelsView []ModelSummary, onlineNodes []cluster.Node) []CapacityWorker {
+	out := make([]CapacityWorker, 0, len(onlineNodes))
+	for _, node := range onlineNodes {
+		worker := CapacityWorker{
+			NodeID:              node.ID,
+			Name:                nodeDisplayName(node),
+			AllowedCPUCores:     node.Resources.CPU.CoresAllowed,
+			AllowedMemoryBytes:  node.Resources.Memory.AllowedBytes,
+			AllowedStorageBytes: node.Resources.Storage.AllowedBytes,
+			FreeStorageBytes:    node.Resources.Storage.FreeBytes,
+			JobSlots:            node.Resources.JobSlots,
+			RuntimeReady:        nodeAnyRuntimeReady(node),
+			InstalledModels:     len(node.Resources.Models),
+			MemorySharePercent:  percentOf(node.Resources.Memory.AllowedBytes, summary.Resources.Memory.AllowedBytes),
+			StorageSharePercent: percentOf(node.Resources.Storage.AllowedBytes, summary.Resources.Storage.AllowedBytes),
+			FreeStorageSharePct: percentOf(node.Resources.Storage.FreeBytes, summary.Resources.Storage.FreeBytes),
+		}
+		for _, gpu := range node.Resources.GPU {
+			worker.AllowedVRAMBytes += gpu.AllowedVRAMBytes
+		}
+		worker.VRAMSharePercent = percentOf(worker.AllowedVRAMBytes, summary.VRAMAllowedBytes)
+		for _, modelSummary := range modelsView {
+			capability, ok := modelCapabilityForNode(modelSummary, node.ID)
+			if !ok || !capability.Capable {
+				continue
+			}
+			worker.RunnableModels++
+			modelCapacity := capacityModelFromPlacement(modelSummary, modelPlacementPlan(modelSummary))
+			if modelCapacity.RequiredMemory > worker.LargestRunnableModel.RequiredMemory {
+				worker.LargestRunnableModel = modelCapacity
+			}
+		}
+		out = append(out, worker)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].AllowedMemoryBytes != out[j].AllowedMemoryBytes {
+			return out[i].AllowedMemoryBytes > out[j].AllowedMemoryBytes
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func modelCapabilityForNode(summary ModelSummary, nodeID string) (ModelCapability, bool) {
+	for _, capability := range summary.Capabilities {
+		if capability.NodeID == nodeID {
+			return capability, true
+		}
+	}
+	return ModelCapability{}, false
+}
+
+func nodeAnyRuntimeReady(node cluster.Node) bool {
+	for _, runtime := range node.Resources.Runtimes {
+		if runtime.Ready {
+			return true
+		}
+	}
+	return false
+}
+
+func percentOf(value uint64, total uint64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(value) * 100 / float64(total)
+}
+
 func clusterReadiness(onlineNodes []cluster.Node, modelsView []ModelSummary, jobsList []jobs.Job) ReadinessSummary {
 	readiness := ReadinessSummary{
 		WorkersOnline:       len(onlineNodes),
@@ -1442,7 +2160,7 @@ func schedulerJobs(in []jobs.Job) []jobs.Job {
 }
 
 func isModelJob(job jobs.Job) bool {
-	return job.Type == models.JobInstall || job.Type == models.JobDelete || job.Type == models.JobGenerate
+	return job.Type == models.JobInstall || job.Type == models.JobDelete || job.Type == models.JobGenerate || job.Type == models.JobRepair || job.Type == models.JobCleanup
 }
 
 func modelJobCount(in []jobs.Job) int {
@@ -1484,10 +2202,64 @@ func generatableModelCount(in []ModelSummary) int {
 }
 
 func modelFailureHint(summary ModelSummary) string {
-	if strings.Contains(summary.LastError, "unsupported job type") {
+	if strings.TrimSpace(summary.LastError) != "" && !strings.Contains(summary.LastError, "unsupported job type") {
+		return "Last model job failed: " + summary.LastError
+	}
+	if summary.CapableNodes > 0 || len(summary.Capabilities) == 0 {
 		return ""
 	}
-	return ""
+	reasons := make([]string, 0, len(summary.Capabilities))
+	for _, capability := range summary.Capabilities {
+		if capability.Capable || len(capability.Reasons) == 0 {
+			continue
+		}
+		reasons = append(reasons, capability.Name+": "+strings.Join(capability.Reasons, "; "))
+		if len(reasons) == 2 {
+			break
+		}
+	}
+	if len(reasons) == 0 {
+		return ""
+	}
+	return "No capable worker yet. " + strings.Join(reasons, " | ")
+}
+
+func modelPlacementClass(plan ModelPlacementPlan) string {
+	switch {
+	case plan.RunnableNow:
+		return "model-placement-card is-ready"
+	case plan.Feasible:
+		return "model-placement-card is-estimate"
+	default:
+		return "model-placement-card is-blocked"
+	}
+}
+
+func modelPlacementLabel(plan ModelPlacementPlan) string {
+	switch plan.Mode {
+	case "single_worker":
+		return "Single-worker ready"
+	case "sharded_estimate":
+		return "Sharded estimate"
+	default:
+		return "Blocked"
+	}
+}
+
+func modelPlacementHint(plan ModelPlacementPlan) string {
+	switch {
+	case plan.RunnableNow:
+		if len(plan.SingleNodeCandidates) == 1 {
+			return "Can run on 1 online worker."
+		}
+		return fmt.Sprintf("Can run on %d online workers.", len(plan.SingleNodeCandidates))
+	case plan.Feasible:
+		return fmt.Sprintf("Aggregate resources fit across %d workers, but distributed model execution is not implemented yet.", len(plan.Shards))
+	case len(plan.Blockers) > 0:
+		return strings.Join(plan.Blockers, " | ")
+	default:
+		return "No viable placement found."
+	}
 }
 
 type conversationStore interface {
@@ -1502,6 +2274,12 @@ type memoryStore interface {
 	UpsertMemory(memory Memory) (Memory, error)
 	DeleteMemory(id string) bool
 	DeleteMemoriesByModel(modelID string) int
+}
+
+type modelInstallConflictResponse struct {
+	Error     string             `json:"error"`
+	Reason    string             `json:"reason"`
+	Placement ModelPlacementPlan `json:"placement"`
 }
 
 func appendConversationMessage(store Store, id string, modelID string, nodeID string, systemPrompt string, message models.ChatMessage) Conversation {
@@ -1533,22 +2311,7 @@ func systemPromptWithMemory(systemPrompt string, modelID string, store Store) st
 }
 
 func modelDefaultSystemPrompt(model models.Model) string {
-	base := "You are CMesh's local AI assistant. Continue the conversation using the provided history. Answer the latest user message directly. If the user shared personal details earlier in this conversation, remember and use them. Do not print role names, chat template tokens, or hidden reasoning."
-	if strings.Contains(strings.ToLower(model.ID), "deepseek") {
-		return base + " Return only the final answer unless the user explicitly asks for reasoning."
-	}
-	switch strings.ToLower(model.Family) {
-	case "qwen":
-		return base + " Prefer concise, natural answers."
-	case "gemma":
-		return base + " Keep answers clear and conversational."
-	case "mistral":
-		return base + " Be practical and concise."
-	case "phi":
-		return base + " Keep answers short unless more detail is needed."
-	default:
-		return base
-	}
+	return models.QualityPresetFor(model).SystemPrompt
 }
 
 func recentConversations(store Store, limit int) []Conversation {
@@ -1746,6 +2509,41 @@ func jobDetail(job jobs.Job) string {
 	if output, ok := result["output"].(string); ok && strings.TrimSpace(output) != "" {
 		return output
 	}
+	if progress := jobProgress(job); progress != "" {
+		return progress
+	}
+	if job.Type == models.JobRepair {
+		parts := []string{"Model repaired"}
+		if reinstalled, ok := result["reinstalled"].(bool); ok && reinstalled {
+			parts = append(parts, "reinstalled")
+		}
+		if manifestRepaired, ok := result["manifest_repaired"].(bool); ok && manifestRepaired {
+			parts = append(parts, "manifest repaired")
+		}
+		if tempCleaned, ok := result["temp_cleaned"].(bool); ok && tempCleaned {
+			parts = append(parts, "partial download removed")
+		}
+		if bytesValue := numberResult(result, "bytes"); bytesValue > 0 {
+			parts = append(parts, fmt.Sprintf("%.1f GB", bytesValue/1024/1024/1024))
+		}
+		return strings.Join(parts, "; ")
+	}
+	if job.Type == models.JobCleanup {
+		parts := []string{"Model cache cleaned"}
+		if partial := int(numberResult(result, "partial_files_removed")); partial > 0 {
+			parts = append(parts, fmt.Sprintf("removed %d partial file(s)", partial))
+		}
+		if orphans := int(numberResult(result, "orphan_dirs_removed")); orphans > 0 {
+			parts = append(parts, fmt.Sprintf("removed %d orphan dir(s)", orphans))
+		}
+		if manifests := int(numberResult(result, "stale_manifests_removed")); manifests > 0 {
+			parts = append(parts, fmt.Sprintf("removed %d stale manifest(s)", manifests))
+		}
+		if bytesValue := numberResult(result, "total_bytes_removed"); bytesValue > 0 {
+			parts = append(parts, fmt.Sprintf("freed %.1f GB", bytesValue/1024/1024/1024))
+		}
+		return strings.Join(parts, "; ")
+	}
 	if job.Type == models.JobDelete {
 		parts := []string{"Model files removed"}
 		if freed := numberResult(result, "freed_bytes"); freed > 0 {
@@ -1763,6 +2561,33 @@ func jobDetail(job jobs.Job) string {
 		return "Completed on " + runtimeValue
 	}
 	return "Completed."
+}
+
+func jobProgress(job jobs.Job) string {
+	if strings.TrimSpace(job.Result) == "" {
+		return ""
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(job.Result), &result); err != nil {
+		return ""
+	}
+	if kind, _ := result["kind"].(string); kind != "job.progress" {
+		return ""
+	}
+	label, _ := result["progress_label"].(string)
+	if strings.TrimSpace(label) == "" {
+		label = "Running"
+	}
+	written := numberResult(result, "progress_bytes")
+	total := numberResult(result, "total_bytes")
+	percent := numberResult(result, "progress_percent")
+	if total > 0 {
+		return fmt.Sprintf("%s %.1f%% · %.1f / %.1f GB", label, percent, written/1024/1024/1024, total/1024/1024/1024)
+	}
+	if written > 0 {
+		return fmt.Sprintf("%s · %.1f GB", label, written/1024/1024/1024)
+	}
+	return label
 }
 
 func numberResult(result map[string]any, key string) float64 {
@@ -1792,6 +2617,8 @@ func jobWorkload(job jobs.Job) string {
 			return "install " + modelID
 		case models.JobDelete:
 			return "delete " + modelID
+		case models.JobRepair:
+			return "repair " + modelID
 		case models.JobGenerate:
 			var input models.GenerateInput
 			if err := json.Unmarshal([]byte(job.Input), &input); err == nil && strings.TrimSpace(input.Prompt) != "" {
@@ -1799,6 +2626,9 @@ func jobWorkload(job jobs.Job) string {
 			}
 			return "generate " + modelID
 		}
+	}
+	if job.Type == models.JobCleanup {
+		return "cleanup model cache"
 	}
 	size, iterations := computeJobInput(job.Input)
 	if size > 0 && iterations > 0 {
@@ -1899,6 +2729,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		return job.AssignedTo[:12]
 	},
 	"jobDetail": jobDetail,
+	"jobProgress": func(job jobs.Job) string {
+		if progress := jobProgress(job); progress != "" {
+			return progress
+		}
+		return "-"
+	},
 	"clip": func(value string, limit int) string {
 		value = strings.TrimSpace(value)
 		if limit <= 0 || len(value) <= limit {
@@ -1960,6 +2796,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 	"installedInstanceCount": installedModelInstanceCount,
 	"generatableCount":       generatableModelCount,
 	"modelFailureHint":       modelFailureHint,
+	"modelPlacement":         modelPlacementPlan,
+	"modelPlacementClass":    modelPlacementClass,
+	"modelPlacementLabel":    modelPlacementLabel,
+	"modelPlacementHint":     modelPlacementHint,
+	"formatClock":            formatClock,
 	"workerSlots":            workerJobSlots,
 	"jobCanCancel":           jobCanBeCanceled,
 	"jobDuration":            jobDuration,
@@ -1987,17 +2828,20 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		switch status {
 		case "installed":
 			return "pill"
-		case "installing", "deleting":
+		case "installing", "deleting", "repairing":
 			return "pill pill-job"
 		default:
 			return "pill pill-muted"
 		}
 	},
 	"modelCanInstall": func(summary ModelSummary) bool {
-		return summary.Status == "available" && summary.CapableNodes > 0
+		return summary.Status != "installing" && summary.Status != "deleting" && summary.Status != "repairing" && summary.CapableNodes > 0
 	},
 	"modelCanGenerate": func(summary ModelSummary) bool {
 		return len(summary.GeneratableOn) > 0 && summary.Status != "deleting"
+	},
+	"modelPreset": func(model models.Model) models.QualityPreset {
+		return models.QualityPresetFor(model)
 	},
 	"jobMetric": func(job jobs.Job, key string) string {
 		if job.Result == "" {
@@ -2069,8 +2913,40 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     main {
       padding: 24px 32px 40px;
       width: 100%;
-      max-width: 1680px;
+      max-width: 1920px;
       margin: 0 auto;
+    }
+    .dashboard-layout {
+      display: grid;
+      grid-template-columns: 248px minmax(0, 1fr);
+      gap: 20px;
+      align-items: start;
+    }
+    .dashboard-sidebar {
+      position: sticky;
+      top: 16px;
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+      overflow: visible;
+    }
+    .sidebar-card {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(14px);
+    }
+    .sidebar-title {
+      display: grid;
+      gap: 2px;
+      margin-bottom: 10px;
+    }
+    .sidebar-title strong {
+      font-size: 14px;
+    }
+    .dashboard-content {
+      min-width: 0;
     }
     .grid {
       display: grid;
@@ -2231,6 +3107,41 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       border-top: 1px solid var(--line);
       background: #fbfcfd;
     }
+    .capacity-snapshot-panel {
+      display: grid;
+      gap: 12px;
+      padding: 16px;
+      border-top: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .capacity-snapshot-toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .capacity-snapshot-toolbar input {
+      min-width: min(320px, 100%);
+    }
+    .capacity-snapshot-list {
+      display: grid;
+      gap: 8px;
+    }
+    .capacity-snapshot-row {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) minmax(120px, auto) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    .capacity-delta-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
     .model-run-guide {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2386,25 +3297,32 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       fill: none;
     }
     .console-tabs {
-      position: sticky;
-      top: 0;
-      z-index: 5;
-      display: flex;
-      gap: 8px;
-      margin-bottom: 16px;
-      padding: 8px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.92);
-      backdrop-filter: blur(14px);
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      overflow: visible;
+    }
+    .nav-group {
+      display: grid;
+      gap: 6px;
+    }
+    .nav-label {
+      padding: 6px 10px 2px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
     }
     .tab-button {
-      display: inline-flex;
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto;
       align-items: center;
-      justify-content: center;
+      justify-content: start;
       gap: 8px;
       min-height: 38px;
-      padding: 0 14px;
+      width: 100%;
+      padding: 0 10px;
       border: 1px solid transparent;
       border-radius: 6px;
       background: transparent;
@@ -2412,10 +3330,49 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       font: inherit;
       font-weight: 700;
       cursor: pointer;
+      text-align: left;
+      line-height: 1.15;
+    }
+    .tab-button span {
+      min-width: 0;
+    }
+    .nav-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 22px;
+      height: 20px;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: #edf2f7;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      line-height: 1;
+    }
+    .nav-badge[hidden] {
+      display: none;
+    }
+    .nav-badge.ready {
+      background: #dcfce7;
+      color: #166534;
+    }
+    .nav-badge.warn {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    .nav-badge.blocked,
+    .nav-badge.failed {
+      background: #fee2e2;
+      color: #991b1b;
     }
     .tab-button.active {
       border-color: var(--line);
       background: var(--accent);
+      color: #fff;
+    }
+    .tab-button.active .nav-badge {
+      background: rgba(255,255,255,.22);
       color: #fff;
     }
     .tab-panel {
@@ -2661,6 +3618,52 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       font-size: 12px;
       line-height: 1.35;
     }
+    .context-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .context-metric {
+      display: grid;
+      gap: 3px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .context-metric span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .context-metric strong {
+      font-size: 18px;
+    }
+    .context-message-list {
+      display: grid;
+      gap: 8px;
+      max-height: 360px;
+      overflow: auto;
+    }
+    .context-message {
+      display: grid;
+      gap: 4px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .context-message strong {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+    .context-message p {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
     .empty-action {
       display: grid;
       place-items: center;
@@ -2846,6 +3849,63 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       padding: 16px;
       background: #fbfcfd;
     }
+    .catalog-toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) minmax(140px, auto) minmax(140px, auto) minmax(160px, auto) auto auto auto;
+      gap: 10px;
+      align-items: end;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    .catalog-toolbar .field {
+      margin: 0;
+    }
+    .catalog-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .catalog-clear {
+      align-self: end;
+      min-height: 40px;
+      padding-inline: 14px;
+    }
+    .catalog-empty {
+      display: none;
+      margin: 16px;
+      padding: 24px;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      background: #fff;
+      text-align: center;
+      color: var(--muted);
+    }
+    .catalog-empty.is-visible {
+      display: block;
+    }
+    .catalog-empty strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--ink);
+      font-size: 18px;
+    }
+    .catalog-toggle input {
+      width: 16px;
+      min-height: 16px;
+    }
+    .catalog-count {
+      align-self: center;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
     .installed-models {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -2905,10 +3965,191 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .model-specs strong {
       font-size: 13px;
     }
+    .storage-detail {
+      display: grid;
+      gap: 4px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .storage-detail strong {
+      color: var(--text);
+      font-weight: 800;
+    }
+    .model-placement-card {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f8faf9;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .model-placement-card strong {
+      color: var(--text);
+      font-size: 13px;
+    }
+    .model-placement-card.is-ready {
+      border-color: #a9dfc7;
+      background: #f3fbf7;
+    }
+    .model-placement-card.is-estimate {
+      border-color: #eac56f;
+      background: #fff9e8;
+    }
+    .model-placement-card.is-blocked {
+      border-color: #f4b4b4;
+      background: #fff7f7;
+    }
+    .model-placement-card code {
+      white-space: normal;
+    }
     .model-actions {
       display: flex;
       gap: 8px;
       flex-wrap: wrap;
+    }
+    body.modal-open {
+      overflow: hidden;
+    }
+    .model-detail-panel {
+      position: fixed;
+      inset: 0;
+      z-index: 80;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(15, 23, 42, 0.36);
+      backdrop-filter: blur(4px);
+    }
+    .model-detail-panel[hidden] {
+      display: none;
+    }
+    .model-detail-dialog {
+      width: min(980px, calc(100vw - 32px));
+      max-height: min(820px, calc(100vh - 32px));
+      overflow: auto;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+    }
+    .model-detail-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 14px;
+    }
+    .model-detail-head h3 {
+      margin: 0 0 4px;
+      font-size: 20px;
+    }
+    .model-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .model-detail-grid div {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #f8faf9;
+    }
+    .model-detail-grid span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .model-detail-grid strong {
+      display: block;
+      margin-top: 4px;
+      font-size: 16px;
+    }
+    .model-detail-list {
+      display: grid;
+      gap: 8px;
+    }
+    .model-detail-row {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) minmax(80px, auto) minmax(220px, 2fr) auto;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfcfd;
+    }
+    .model-detail-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .model-detail-placement {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 14px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f8faf9;
+    }
+    .model-detail-placement h4 {
+      margin: 0;
+      font-size: 15px;
+    }
+    .model-detail-placement .placement-summary {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .model-detail-placement .placement-list {
+      display: grid;
+      gap: 8px;
+    }
+    .placement-shard {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) minmax(120px, auto) minmax(120px, auto);
+      gap: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    .placement-warning {
+      color: #8a5a00;
+      font-weight: 700;
+    }
+    .placement-blocker {
+      color: #b42318;
+      font-weight: 700;
+    }
+    @media (max-width: 720px) {
+      .model-detail-panel {
+        padding: 12px;
+      }
+      .model-detail-head {
+        align-items: stretch;
+        flex-direction: column;
+      }
+      .model-detail-row {
+        grid-template-columns: 1fr;
+      }
+      .placement-shard {
+        grid-template-columns: 1fr;
+      }
     }
     .model-operation {
       display: grid;
@@ -2935,8 +4176,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       background: #fbfcfd;
     }
     .capability-row {
-      display: flex;
-      justify-content: space-between;
+      display: grid;
+      grid-template-columns: minmax(120px, .7fr) minmax(0, 1fr) auto;
       gap: 10px;
       align-items: start;
       font-size: 12px;
@@ -2947,6 +4188,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .capability-row span {
       color: var(--muted);
       text-align: right;
+    }
+    .capability-row .button {
+      padding: 6px 8px;
+      font-size: 12px;
     }
     .hint {
       padding: 10px;
@@ -3011,6 +4256,27 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       header { display: block; }
       header .actions { margin-top: 14px; }
       header, main { padding-left: 18px; padding-right: 18px; }
+      .dashboard-layout { grid-template-columns: 1fr; gap: 14px; }
+      .dashboard-sidebar { position: static; max-height: none; }
+      .console-tabs {
+        grid-auto-flow: column;
+        grid-auto-columns: max-content;
+        grid-template-columns: none;
+        max-height: none;
+        overflow-x: auto;
+        overflow-y: hidden;
+      }
+      .nav-group {
+        grid-auto-flow: column;
+        grid-auto-columns: max-content;
+        grid-template-columns: none;
+        align-items: center;
+      }
+      .nav-label {
+        padding: 0 6px 0 0;
+        white-space: nowrap;
+      }
+      .tab-button { width: auto; min-width: 132px; }
       table { display: block; overflow-x: auto; }
       .onboarding-body { grid-template-columns: 1fr; }
       .readiness-hero { grid-template-columns: 1fr; }
@@ -3022,8 +4288,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       .first-test-form { grid-template-columns: 1fr; }
       .first-test-form .wide { grid-column: auto; }
       .job-runner, .cluster-runner { grid-template-columns: 1fr; }
-      .console-tabs { overflow-x: auto; }
       .models-shell { grid-template-columns: 1fr; }
+      .catalog-toolbar { grid-template-columns: 1fr; }
       .chat-shell { grid-template-columns: 1fr; }
       .conversation-shell, .memory-shell, .debug-shell { grid-template-columns: 1fr; }
       .chat-topbar { grid-template-columns: 1fr; }
@@ -3046,6 +4312,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     <symbol id="icon-chart" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
     <symbol id="icon-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
     <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18 2v4h4"/><path d="M6 22v-4H2"/></symbol>
     <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 15H6L5 6"/><path d="M10 11v6M14 11v6"/></symbol>
     <symbol id="icon-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
     <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
@@ -3061,21 +4328,44 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     </div>
   </header>
   <main>
-    <nav class="console-tabs" aria-label="Dashboard sections">
-      <button class="tab-button active" type="button" data-tab-target="overview"><svg class="icon"><use href="#icon-workers"></use></svg>Overview</button>
-      <button class="tab-button" type="button" data-tab-target="readiness"><svg class="icon"><use href="#icon-chart"></use></svg>Readiness</button>
-      <button class="tab-button" type="button" data-tab-target="workers"><svg class="icon"><use href="#icon-workers"></use></svg>Workers</button>
-      <button class="tab-button" type="button" data-tab-target="chat"><svg class="icon"><use href="#icon-send"></use></svg>Chat</button>
-      <button class="tab-button" type="button" data-tab-target="memory"><svg class="icon"><use href="#icon-brain"></use></svg>Memory</button>
-      <button class="tab-button" type="button" data-tab-target="conversations"><svg class="icon"><use href="#icon-terminal"></use></svg>Conversations</button>
-      <button class="tab-button" type="button" data-tab-target="installed-models"><svg class="icon"><use href="#icon-download"></use></svg>Installed Models</button>
-      <button class="tab-button" type="button" data-tab-target="models"><svg class="icon"><use href="#icon-brain"></use></svg>Model Catalog</button>
-      <button class="tab-button" type="button" data-tab-target="prompt-debug"><svg class="icon"><use href="#icon-terminal"></use></svg>Prompt Debug</button>
-      <button class="tab-button" type="button" data-tab-target="model-activity"><svg class="icon"><use href="#icon-terminal"></use></svg>Model Activity</button>
-      <button class="tab-button" type="button" data-tab-target="scheduler"><svg class="icon"><use href="#icon-chart"></use></svg>Scheduler</button>
-      <button class="tab-button" type="button" data-tab-target="jobs"><svg class="icon"><use href="#icon-terminal"></use></svg>Jobs</button>
-      <button class="tab-button" type="button" data-tab-target="benchmarks"><svg class="icon"><use href="#icon-chart"></use></svg>Benchmarks</button>
-    </nav>
+    <div class="dashboard-layout">
+      <aside class="dashboard-sidebar" aria-label="Dashboard navigation">
+        <div class="sidebar-card">
+          <div class="sidebar-title">
+            <strong>Cluster Console</strong>
+            <span class="sub" id="sidebar-summary-text">{{.Readiness.Status}} · {{len .OnlineNodes}} worker(s) online</span>
+          </div>
+          <nav class="console-tabs" aria-label="Dashboard sections">
+            <div class="nav-group" aria-label="Cluster">
+              <div class="nav-label">Cluster</div>
+              <button class="tab-button active" type="button" data-tab-target="overview"><svg class="icon"><use href="#icon-workers"></use></svg><span>Overview</span></button>
+              <button class="tab-button" type="button" data-tab-target="readiness"><svg class="icon"><use href="#icon-chart"></use></svg><span>Readiness</span><strong class="nav-badge {{.Readiness.Status}}" data-nav-badge="readiness">{{.Readiness.Status}}</strong></button>
+              <button class="tab-button" type="button" data-tab-target="workers"><svg class="icon"><use href="#icon-workers"></use></svg><span>Workers</span><strong class="nav-badge" data-nav-badge="workers">{{.Summary.WorkersOnline}}/{{.Summary.WorkersTotal}}</strong></button>
+              <button class="tab-button" type="button" data-tab-target="benchmarks"><svg class="icon"><use href="#icon-chart"></use></svg><span>Benchmarks</span></button>
+            </div>
+            <div class="nav-group" aria-label="AI workspace">
+              <div class="nav-label">AI Workspace</div>
+              <button class="tab-button" type="button" data-tab-target="chat"><svg class="icon"><use href="#icon-send"></use></svg><span>Chat</span><strong class="nav-badge {{if gt .Readiness.GeneratableModels 0}}ready{{else}}blocked{{end}}" data-nav-badge="ready-models">{{.Readiness.GeneratableModels}}</strong></button>
+              <button class="tab-button" type="button" data-tab-target="memory"><svg class="icon"><use href="#icon-brain"></use></svg><span>Memory</span></button>
+              <button class="tab-button" type="button" data-tab-target="conversations"><svg class="icon"><use href="#icon-terminal"></use></svg><span>Conversations</span></button>
+              <button class="tab-button" type="button" data-tab-target="prompt-debug"><svg class="icon"><use href="#icon-terminal"></use></svg><span>Prompt Debug</span></button>
+            </div>
+            <div class="nav-group" aria-label="Models">
+              <div class="nav-label">Models</div>
+              <button class="tab-button" type="button" data-tab-target="model-inventory"><svg class="icon"><use href="#icon-download"></use></svg><span>Model Inventory</span></button>
+              <button class="tab-button" type="button" data-tab-target="installed-models"><svg class="icon"><use href="#icon-download"></use></svg><span>Installed Models</span></button>
+              <button class="tab-button" type="button" data-tab-target="models"><svg class="icon"><use href="#icon-brain"></use></svg><span>Model Catalog</span></button>
+              <button class="tab-button" type="button" data-tab-target="model-activity"><svg class="icon"><use href="#icon-terminal"></use></svg><span>Model Activity</span><strong class="nav-badge failed" data-nav-badge="recent-failures" {{if eq .Readiness.RecentFailures 0}}hidden{{end}}>{{.Readiness.RecentFailures}}</strong></button>
+            </div>
+            <div class="nav-group" aria-label="Operations">
+              <div class="nav-label">Operations</div>
+              <button class="tab-button" type="button" data-tab-target="scheduler"><svg class="icon"><use href="#icon-chart"></use></svg><span>Scheduler</span><strong class="nav-badge warn" data-nav-badge="active-jobs" {{if eq .Readiness.ActiveJobs 0}}hidden{{end}}>{{.Readiness.ActiveJobs}}</strong></button>
+              <button class="tab-button" type="button" data-tab-target="jobs"><svg class="icon"><use href="#icon-terminal"></use></svg><span>Jobs</span><strong class="nav-badge" data-nav-badge="jobs-total">{{len .Jobs}}</strong></button>
+            </div>
+          </nav>
+        </div>
+      </aside>
+      <div class="dashboard-content">
     <div class="tab-panel" id="tab-overview">
     <section class="onboarding" aria-label="Cluster console">
       <div class="section-head">
@@ -3167,6 +4457,115 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           {{end}}
         </div>
       </div>
+      <div class="readiness-hero">
+        <div class="readiness-status">
+          <span class="pill pill-muted">capacity</span>
+          <strong>Cluster model capacity</strong>
+          <p class="sub">This shows the usable model capacity reported by online workers. Sharded estimates prove aggregate capacity, but distributed model execution is not implemented yet.</p>
+          <div class="readiness-grid">
+            <div class="first-test-stat"><span>Allowed CPU</span><strong>{{.Capacity.AllowedCPUCores}}</strong></div>
+            <div class="first-test-stat"><span>Allowed RAM</span><strong>{{printf "%.1f" (gb .Capacity.AllowedMemoryBytes)}} GB</strong></div>
+            <div class="first-test-stat"><span>Allowed disk</span><strong>{{printf "%.1f" (gb .Capacity.AllowedStorageBytes)}} GB</strong></div>
+            <div class="first-test-stat"><span>Free disk</span><strong>{{printf "%.1f" (gb .Capacity.FreeStorageBytes)}} GB</strong></div>
+            <div class="first-test-stat"><span>Allowed VRAM</span><strong>{{printf "%.1f" (gb .Capacity.AllowedVRAMBytes)}} GB</strong></div>
+            <div class="first-test-stat"><span>Catalog models</span><strong>{{.Capacity.CatalogModels}}</strong></div>
+          </div>
+        </div>
+        <div class="readiness-checks">
+          <div class="readiness-check">
+            <strong>Single worker</strong>
+            <div>
+              <p>{{.Capacity.SingleWorkerRunnableModels}} catalog model(s) can run on one online worker now.</p>
+              {{if .Capacity.LargestSingleWorkerModel.ID}}
+              <p class="sub">Largest: {{.Capacity.LargestSingleWorkerModel.Name}} · {{printf "%.1f" (gb .Capacity.LargestSingleWorkerModel.RequiredMemory)}} GB RAM · {{printf "%.1f" (gb .Capacity.LargestSingleWorkerModel.RequiredDisk)}} GB disk.</p>
+              {{else}}
+              <p class="sub">No model has a single-worker placement yet.</p>
+              {{end}}
+            </div>
+            <button class="button" type="button" data-tab-shortcut="models">Models</button>
+          </div>
+          <div class="readiness-check">
+            <strong>Sharded estimate</strong>
+            <div>
+              <p>{{.Capacity.ShardedEstimateModels}} catalog model(s) fit only as aggregate multi-worker estimates.</p>
+              {{if .Capacity.LargestShardedModel.ID}}
+              <p class="sub">Largest estimate: {{.Capacity.LargestShardedModel.Name}} · {{.Capacity.LargestShardedModel.ShardWorkers}} worker shards · {{printf "%.1f" (gb .Capacity.LargestShardedModel.RequiredMemory)}} GB RAM.</p>
+              {{else}}
+              <p class="sub">No aggregate-only model placement is currently feasible.</p>
+              {{end}}
+            </div>
+            <button class="button" type="button" data-tab-shortcut="models">Catalog</button>
+          </div>
+          <div class="readiness-check">
+            <strong>Blocked</strong>
+            <div>
+              <p>{{.Capacity.BlockedModels}} catalog model(s) do not fit current online resources.</p>
+              <p class="sub">Add workers, increase allowed RAM/disk, or free storage on existing workers.</p>
+            </div>
+            <button class="button" type="button" data-tab-shortcut="workers">Workers</button>
+          </div>
+          <div class="readiness-check">
+            <strong>Next unlock</strong>
+            <div>
+              {{if .Capacity.UnlockTargets}}{{with index .Capacity.UnlockTargets 0}}
+              <p>{{.Model.Name}}</p>
+              <p class="sub">Short by {{printf "%.1f" (gb .MemoryShortBytes)}} GB RAM · {{printf "%.1f" (gb .DiskShortBytes)}} GB disk.</p>
+              {{end}}{{else}}
+              <p>No blocked model targets.</p>
+              <p class="sub">Current resources cover the catalog or no catalog target exists.</p>
+              {{end}}
+            </div>
+            <button class="button" type="button" data-tab-shortcut="models">Catalog</button>
+          </div>
+        </div>
+      </div>
+      <div class="readiness-hero">
+        <div class="readiness-status">
+          <span class="pill pill-muted">growth</span>
+          <strong>Worker capacity contributors</strong>
+          <p class="sub">Each online worker contribution is measured from the resource limits it reports to this manager.</p>
+        </div>
+        <div class="readiness-checks">
+          {{if .Capacity.Workers}}
+          {{range .Capacity.Workers}}
+          <div class="readiness-check">
+            <strong>{{.Name}}</strong>
+            <div>
+              <p>{{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM · {{printf "%.1f" (gb .AllowedStorageBytes)}} GB disk · {{.AllowedCPUCores}} CPU core(s){{if gt .AllowedVRAMBytes 0}} · {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</p>
+              <p class="sub">{{.RunnableModels}} runnable catalog model(s) on this worker{{if .LargestRunnableModel.ID}} · largest {{.LargestRunnableModel.Name}}{{end}} · RAM share {{printf "%.0f" .MemorySharePercent}}% · disk share {{printf "%.0f" .StorageSharePercent}}%</p>
+            </div>
+            <button class="button" type="button" data-tab-shortcut="workers">{{if .RuntimeReady}}runtime ready{{else}}runtime missing{{end}}</button>
+          </div>
+          {{end}}
+          {{else}}
+          <div class="readiness-check">
+            <strong>No contributors</strong>
+            <div>
+              <p>No online workers are reporting capacity yet.</p>
+              <p class="sub">Invite a worker to start measuring cluster growth.</p>
+            </div>
+            <button class="button" type="button" data-tab-shortcut="workers">Workers</button>
+          </div>
+          {{end}}
+        </div>
+      </div>
+      <div class="capacity-snapshot-panel">
+        <div class="section-head">
+          <div>
+            <h3>Capacity snapshots</h3>
+            <p class="sub">Save a baseline, connect more workers, then compare current cluster capacity against that baseline.</p>
+          </div>
+          <code id="capacity-snapshot-count">0 snapshots</code>
+        </div>
+        <div class="capacity-snapshot-toolbar">
+          <input id="capacity-snapshot-label" type="text" placeholder="Baseline label">
+          <button class="button primary" type="button" id="capacity-save-snapshot"><svg class="icon"><use href="#icon-plus"></use></svg>Save baseline</button>
+          <button class="button" type="button" id="capacity-refresh-snapshots"><svg class="icon"><use href="#icon-refresh"></use></svg>Refresh</button>
+        </div>
+        <div class="runner-status" id="capacity-snapshot-status">No baseline selected.</div>
+        <div class="capacity-delta-grid" id="capacity-delta-grid" hidden></div>
+        <div class="capacity-snapshot-list" id="capacity-snapshot-list"></div>
+      </div>
       <div class="readiness-actions">
         <button class="button" type="button" data-tab-shortcut="workers"><svg class="icon"><use href="#icon-workers"></use></svg>Workers</button>
         <button class="button" type="button" data-tab-shortcut="models"><svg class="icon"><use href="#icon-brain"></use></svg>Models</button>
@@ -3211,6 +4610,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 <span class="sub">{{printf "%.1f" (gb .Resources.Storage.FreeBytes)}} GB free</span><br>
                 <span class="sub">CMesh {{printf "%.1f" (gb .Resources.Storage.UsedByCacheBytes)}} GB</span><br>
                 <span class="sub">models {{printf "%.1f" (gb .Resources.Storage.UsedByModelsBytes)}} GB · runtimes {{printf "%.1f" (gb .Resources.Storage.UsedByRuntimesBytes)}} GB</span>
+                {{if or (gt .Resources.Storage.PartialModelFiles 0) (gt .Resources.Storage.OrphanModelDirs 0)}}<br><span class="sub">cleanup candidates: {{.Resources.Storage.PartialModelFiles}} partial / {{.Resources.Storage.OrphanModelDirs}} orphan · {{printf "%.1f" (gb .Resources.Storage.PartialModelBytes)}} GB partial · {{printf "%.1f" (gb .Resources.Storage.OrphanModelBytes)}} GB orphan</span><br><button class="button model-cleanup" type="button" data-node-id="{{.ID}}"><svg class="icon"><use href="#icon-refresh"></use></svg><span>Cleanup cache</span></button>{{end}}
               </td>
               <td>
                 {{range .Resources.Models}}
@@ -3235,6 +4635,82 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       {{end}}
     </section>
     </div>
+    <div class="tab-panel" id="tab-model-inventory" hidden>
+    <section id="model-inventory">
+      <div class="section-head">
+        <h2>Model Inventory</h2>
+        <code>{{installedInstanceCount .Models}} worker installs</code>
+      </div>
+      {{if gt (installedInstanceCount .Models) 0}}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Worker</th>
+              <th>Model</th>
+              <th>Model state</th>
+              <th>Runtime</th>
+              <th>Generate</th>
+              <th>Storage</th>
+              <th>Path</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+          {{range .Models}}
+          {{$modelID := .Model.ID}}
+          {{$modelName := .Model.Name}}
+          {{range .Installed}}
+            <tr data-model-id="{{$modelID}}" data-model-surface="inventory">
+              <td><code>{{.NodeName}}</code><br><span class="sub">{{shortID .NodeID}}</span></td>
+              <td>
+                <strong>{{$modelName}}</strong><br>
+                <span class="sub">{{if .Family}}{{.Family}}{{else}}-{{end}} · {{printf "%.0f" (mb .Bytes)}} MB · installed {{formatClock .InstalledAt}}</span>
+              </td>
+              <td>
+                {{if .ModelReady}}<span class="pill">model ready</span>{{else}}<span class="pill pill-failed">model blocked</span>{{end}}
+                {{if .ModelError}}<br><span class="sub">{{.ModelError}}</span>{{end}}
+                {{if .RepairReason}}<br><span class="sub">repair: {{.RepairReason}}</span>{{end}}
+                {{if .ActiveJobID}}<br><span class="sub">active {{.ActiveJobID}}</span>{{end}}
+              </td>
+              <td>
+                {{if .RuntimeReady}}<span class="pill">runtime ready</span>{{else}}<span class="pill pill-failed">runtime blocked</span>{{end}}<br>
+                <span class="sub">{{.Runtime}}{{if .RuntimeStatus.Version}} · {{.RuntimeStatus.Version}}{{end}}{{if .RuntimeStatus.Source}} · {{.RuntimeStatus.Source}}{{end}}</span>
+                {{if and (not .RuntimeReady) .RuntimeStatus.Error}}<br><span class="sub">{{.RuntimeStatus.Error}}</span>{{end}}
+              </td>
+              <td>
+                {{if .GenerateReady}}<span class="pill">ready</span>{{else}}<span class="pill pill-failed">blocked</span>{{end}}
+                {{if .GenerateBlocked}}<br><span class="sub">{{.GenerateBlocked}}</span>{{end}}
+              </td>
+              <td>
+                <strong>{{printf "%.1f" (gb .UsedByModelsBytes)}} GB</strong> models<br>
+                <span class="sub">{{printf "%.1f" (gb .UsedByCacheBytes)}} GB CMesh cache</span><br>
+                <span class="sub">{{printf "%.1f" (gb .AllowedStorageBytes)}} GB allowed · {{printf "%.1f" (gb .FreeStorageBytes)}} GB free</span>
+              </td>
+              <td><code>{{.Path}}</code></td>
+              <td>
+                <div class="model-actions">
+                  <button class="button model-repair" type="button" data-model-id="{{$modelID}}" data-node-id="{{.NodeID}}" data-repairable="{{.Repairable}}" {{if or .ActiveJobID (not .Repairable)}}disabled{{end}}><svg class="icon"><use href="#icon-refresh"></use></svg><span>Repair</span></button>
+                  <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.NodeID}}" {{if .ActiveJobID}}disabled{{end}}><svg class="icon"><use href="#icon-trash"></use></svg><span>Delete</span></button>
+                </div>
+              </td>
+            </tr>
+          {{end}}
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="empty-action">
+        <div>
+          <h3>No model inventory yet</h3>
+          <p>Install a catalog model on an online worker to populate worker-level inventory.</p>
+          <button class="button primary" type="button" data-tab-shortcut="models"><svg class="icon"><use href="#icon-brain"></use></svg>Open Model Catalog</button>
+        </div>
+      </div>
+      {{end}}
+    </section>
+    </div>
     <div class="tab-panel" id="tab-chat" hidden>
     <section id="chat">
       <div class="section-head">
@@ -3253,7 +4729,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 <label for="chat-model">Model</label>
                 <select id="chat-model" name="model_id">
                   {{if eq (generatableCount .Models) 0}}<option value="">Install a model first</option>{{end}}
-                  {{range .Models}}{{if modelCanGenerate .}}<option value="{{.Model.ID}}">{{.Model.Name}}</option>{{end}}{{end}}
+                  {{range .Models}}{{if modelCanGenerate .}}{{$preset := modelPreset .Model}}<option value="{{.Model.ID}}" data-temperature="{{$preset.Temperature}}" data-max-tokens="{{$preset.MaxTokens}}" data-system-prompt="{{$preset.SystemPrompt}}">{{.Model.Name}}</option>{{end}}{{end}}
                 </select>
               </div>
               <div class="field">
@@ -3404,8 +4880,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <p class="sub">This shows exactly what memory and system prompt context will be sent before the chat messages.</p>
         </div>
         <div class="memory-preview">
+          <span class="conversation-meta">Context budget</span>
+          <div class="context-metrics" id="context-metrics"></div>
           <span class="conversation-meta">Effective system context</span>
           <pre id="memory-preview-text">Select a model to preview the prompt context.</pre>
+          <span class="conversation-meta">Included chat messages</span>
+          <div class="context-message-list" id="context-message-list"></div>
         </div>
       </div>
     </section>
@@ -3428,12 +4908,25 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <h3>{{$modelName}}</h3>
               <p class="sub"><code>{{.NodeName}}</code></p>
             </div>
-            {{if .RuntimeReady}}<span class="pill">ready</span>{{else}}<span class="pill pill-failed">runtime blocked</span>{{end}}
+            {{if .GenerateReady}}<span class="pill">generate ready</span>{{else}}<span class="pill pill-failed">generate blocked</span>{{end}}
           </div>
           <div class="model-specs">
             <div><span>Size</span><strong>{{printf "%.0f" (mb .Bytes)}} MB</strong></div>
+            <div><span>Family</span><strong>{{if .Family}}{{.Family}}{{else}}-{{end}}</strong></div>
             <div><span>Runtime</span><strong>{{.Runtime}}</strong></div>
             <div><span>Worker</span><strong>{{shortID .NodeID}}</strong></div>
+            <div><span>Installed</span><strong>{{formatClock .InstalledAt}}</strong></div>
+          </div>
+          {{if .ModelError}}
+          <div class="hint">Model inventory warning on this worker: {{.ModelError}}</div>
+          {{end}}
+          {{if .RepairReason}}
+          <p class="sub">Repair action: {{.RepairReason}}</p>
+          {{end}}
+          <div class="storage-detail">
+            <div><strong>{{printf "%.1f" (gb .UsedByModelsBytes)}} GB</strong> used by worker models</div>
+            <div><strong>{{printf "%.1f" (gb .UsedByCacheBytes)}} GB</strong> used by CMesh cache</div>
+            <div><strong>{{printf "%.1f" (gb .AllowedStorageBytes)}} GB</strong> allowed · <strong>{{printf "%.1f" (gb .FreeStorageBytes)}} GB</strong> free on disk</div>
           </div>
           <p class="sub">Path <code>{{.Path}}</code></p>
           {{if .RuntimeReady}}
@@ -3442,8 +4935,15 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <div class="hint">Runtime is not ready on this worker: {{if .RuntimeStatus.Error}}{{.RuntimeStatus.Error}}{{else}}not reported{{end}}</div>
           <p class="sub">Open CMesh Worker on <code>{{.NodeName}}</code>, then use Runtime → Repair runtime.</p>
           {{end}}
+          {{if .ActiveJobID}}
+          <div class="hint">Model is busy on this worker: {{.ActiveJobID}}</div>
+          {{end}}
+          {{if .GenerateBlocked}}
+          <div class="hint">Generate blocked: {{.GenerateBlocked}}</div>
+          {{end}}
           <div class="model-actions">
-            <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.NodeID}}"><svg class="icon"><use href="#icon-trash"></use></svg><span>Delete from {{.NodeName}}</span></button>
+            <button class="button model-repair" type="button" data-model-id="{{$modelID}}" data-node-id="{{.NodeID}}" data-repairable="{{.Repairable}}" {{if or .ActiveJobID (not .Repairable)}}disabled{{end}}><svg class="icon"><use href="#icon-refresh"></use></svg><span>Repair</span></button>
+            <button class="button danger model-delete" type="button" data-model-id="{{$modelID}}" data-node-id="{{.NodeID}}" {{if .ActiveJobID}}disabled{{end}}><svg class="icon"><use href="#icon-trash"></use></svg><span>Delete from {{.NodeName}}</span></button>
           </div>
         </article>
         {{end}}
@@ -3466,9 +4966,54 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         <h2>Model Catalog</h2>
         <code>{{len .Models}} catalog entries</code>
       </div>
+      <div class="catalog-toolbar">
+        <div class="field">
+          <label for="model-catalog-search">Search</label>
+          <input id="model-catalog-search" type="search" placeholder="Model, family, quant, runtime">
+        </div>
+        <div class="field">
+          <label for="model-catalog-status">Status</label>
+          <select id="model-catalog-status">
+            <option value="">Any status</option>
+            <option value="available">Available</option>
+            <option value="installed">Installed</option>
+            <option value="installing">Installing</option>
+            <option value="repairing">Repairing</option>
+            <option value="deleting">Deleting</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="model-catalog-family">Family</label>
+          <select id="model-catalog-family">
+            <option value="">Any family</option>
+            {{range .Models}}<option value="{{.Model.Family}}">{{.Model.Family}}</option>{{end}}
+          </select>
+        </div>
+        <div class="field">
+          <label for="model-catalog-sort">Sort</label>
+          <select id="model-catalog-sort">
+            <option value="recommended">Recommended</option>
+            <option value="name">Name</option>
+            <option value="ram-asc">RAM low to high</option>
+            <option value="ram-desc">RAM high to low</option>
+            <option value="disk-asc">Disk low to high</option>
+            <option value="capable-desc">Most capable</option>
+          </select>
+        </div>
+        <label class="catalog-toggle" for="model-catalog-capable"><input id="model-catalog-capable" type="checkbox">Capable only</label>
+        <div class="catalog-count" id="model-catalog-count">{{len .Models}} shown</div>
+        <button class="button catalog-clear" type="button" id="model-catalog-clear">Clear</button>
+      </div>
+      <div class="catalog-empty" id="model-catalog-empty">
+        <strong>No models match these filters</strong>
+        Adjust search, status, family, or capability filters.
+      </div>
       <div class="model-catalog">
           {{range .Models}}
-          <article class="model-card" data-model-id="{{.Model.ID}}" data-model-surface="catalog">
+          {{$catalogModelID := .Model.ID}}
+          {{$catalogStatus := .Status}}
+          {{$placement := modelPlacement .}}
+          <article class="model-card" data-model-id="{{.Model.ID}}" data-model-surface="catalog" data-model-search="{{.Model.ID}} {{.Model.Name}} {{.Model.Family}} {{.Model.Parameters}} {{.Model.Quant}} {{.Model.Runtime}} {{.Model.Description}}" data-model-status-value="{{.Status}}" data-model-family="{{.Model.Family}}" data-model-capable="{{if gt .CapableNodes 0}}true{{else}}false{{end}}" data-model-name="{{.Model.Name}}" data-model-memory="{{.Model.MemoryBytes}}" data-model-disk="{{.Model.DiskBytes}}" data-model-capable-nodes="{{.CapableNodes}}">
             <div class="model-title">
               <div>
                 <h3>{{.Model.Name}}</h3>
@@ -3481,6 +5026,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <div><span>Required RAM</span><strong>{{printf "%.1f" (gb .Model.MemoryBytes)}} GB</strong></div>
               <div><span>Required disk</span><strong>{{printf "%.1f" (gb .Model.DiskBytes)}} GB</strong></div>
             </div>
+            <div class="{{modelPlacementClass $placement}}" data-model-placement="{{.Model.ID}}" data-placement-mode="{{$placement.Mode}}">
+              <strong>{{modelPlacementLabel $placement}}</strong>
+              <span>{{modelPlacementHint $placement}}</span>
+              <code>RAM {{printf "%.1f" (gb $placement.RequiredMemoryBytes)}} GB · disk {{printf "%.1f" (gb $placement.RequiredDiskBytes)}} GB</code>
+            </div>
             <p class="sub">Runtime {{.Model.Runtime}} · context {{.Model.Context}} · {{.CapableNodes}} capable online workers</p>
             {{if modelFailureHint .}}<div class="hint">{{modelFailureHint .}}</div>{{end}}
             {{if .Capabilities}}
@@ -3490,8 +5040,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 <strong>{{.Name}}</strong>
                 {{if .Capable}}
                 <span>ready · jobs {{.ActiveJobs}}/{{.JobSlots}} · {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM · {{printf "%.1f" (gb .AllowedStorageBytes)}} GB allowed disk · {{printf "%.1f" (gb .FreeStorageBytes)}} GB free{{if gt .AllowedVRAMBytes 0}} · {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
+                <button class="button model-install" type="button" data-model-id="{{$catalogModelID}}" data-node-id="{{.NodeID}}" {{if or (or (eq $catalogStatus "installing") (eq $catalogStatus "deleting")) (eq $catalogStatus "repairing")}}disabled{{end}}><svg class="icon"><use href="#icon-download"></use></svg><span>Install here</span></button>
                 {{else}}
                 <span>{{range $index, $reason := .Reasons}}{{if $index}}; {{end}}{{$reason}}{{end}} · jobs {{.ActiveJobs}}/{{.JobSlots}} · has {{printf "%.1f" (gb .AllowedMemoryBytes)}} GB RAM / {{printf "%.1f" (gb .AllowedStorageBytes)}} GB allowed disk / {{printf "%.1f" (gb .FreeStorageBytes)}} GB free{{if gt .AllowedVRAMBytes 0}} / {{printf "%.1f" (gb .AllowedVRAMBytes)}} GB VRAM{{end}}</span>
+                <span></span>
                 {{end}}
               </div>
               {{end}}
@@ -3503,10 +5055,26 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <p class="sub">Last error: {{.LastError}}</p>
             {{end}}
             <div class="model-actions">
+              <button class="button model-detail" type="button" data-model-id="{{.Model.ID}}"><svg class="icon"><use href="#icon-terminal"></use></svg><span>Details</span></button>
               <button class="button primary model-install" type="button" data-model-id="{{.Model.ID}}" {{if not (modelCanInstall .)}}disabled{{end}}><svg class="icon"><use href="#icon-download"></use></svg><span>Install</span></button>
             </div>
           </article>
           {{end}}
+      </div>
+      <div class="model-detail-panel" id="model-detail-panel" hidden>
+        <div class="model-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="model-detail-title">
+          <div class="model-detail-head">
+            <div>
+              <h3 id="model-detail-title">Model details</h3>
+              <p class="sub" id="model-detail-subtitle"></p>
+            </div>
+            <button class="button" type="button" id="model-detail-close"><svg class="icon"><use href="#icon-x"></use></svg><span>Close</span></button>
+          </div>
+          <div class="model-detail-grid" id="model-detail-grid"></div>
+          <div class="model-detail-placement" id="model-detail-placement"></div>
+          <div class="model-detail-actions" id="model-detail-actions"></div>
+          <div class="model-detail-list" id="model-detail-list"></div>
+        </div>
       </div>
     </section>
     </div>
@@ -3737,6 +5305,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                   <div><span>Runtime ms</span><strong>{{jobMetric . "duration_ms"}}</strong></div>
                   <div><span>GFLOPS</span><strong>{{jobMetric . "gflops"}}</strong></div>
                   <div><span>Runtime</span><strong>{{jobMetric . "worker_runtime"}}</strong></div>
+                  <div><span>Progress</span><strong>{{jobProgress .}}</strong></div>
                 </div>
               </td>
               <td class="mono-output">
@@ -3763,6 +5332,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       {{end}}
     </section>
     </div>
+      </div>
+    </div>
   </main>
   <script>
     function setButtonText(button, text) {
@@ -3774,7 +5345,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       }
     }
     function activateTab(name, updateHash) {
-      var target = name || "overview";
+      var target = String(name || "overview").split("?")[0] || "overview";
       var panel = document.getElementById("tab-" + target);
       if (!panel) target = "overview";
       document.querySelectorAll(".tab-panel").forEach(function(section) {
@@ -3782,10 +5353,21 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       });
       document.querySelectorAll(".tab-button[data-tab-target]").forEach(function(button) {
         button.classList.toggle("active", button.dataset.tabTarget === target);
+        if (button.dataset.tabTarget === target && typeof button.scrollIntoView === "function") {
+          button.scrollIntoView({ block: "nearest", inline: "nearest" });
+        }
       });
       if (updateHash) {
-        history.replaceState(null, "", target === "overview" ? window.location.pathname : "#" + target);
+        var baseURL = window.location.pathname + window.location.search;
+        history.replaceState(null, "", target === "overview" ? baseURL : baseURL + "#" + target);
+        try {
+          window.localStorage.setItem("cmesh.dashboard.activeTab", target);
+        } catch (error) {}
       }
+    }
+    function currentActiveTab() {
+      var active = document.querySelector(".tab-button.active");
+      return active ? active.dataset.tabTarget : "";
     }
     document.querySelectorAll("[data-tab-target]").forEach(function(button) {
       button.addEventListener("click", function() {
@@ -3797,7 +5379,194 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         activateTab(button.dataset.tabShortcut, true);
       });
     });
-    activateTab((window.location.hash || "").replace("#", ""), false);
+    function initialDashboardTab() {
+      var fromHash = (window.location.hash || "").replace("#", "").split("?")[0];
+      if (fromHash) return fromHash;
+      try {
+        return window.localStorage.getItem("cmesh.dashboard.activeTab") || "";
+      } catch (error) {
+        return "";
+      }
+    }
+    window.addEventListener("hashchange", function() {
+      var hashTarget = (window.location.hash || "").replace("#", "").split("?")[0];
+      activateTab(hashTarget, false);
+      applyModelCatalogFiltersFromHash();
+    });
+    activateTab(initialDashboardTab(), false);
+    function navBadge(name) {
+      return document.querySelector('[data-nav-badge="' + name + '"]');
+    }
+    function setNavBadge(name, value, tone, visible) {
+      var badge = navBadge(name);
+      if (!badge) return;
+      badge.textContent = String(value);
+      badge.hidden = visible === false;
+      badge.className = "nav-badge" + (tone ? " " + tone : "");
+    }
+    function refreshSidebarStatus() {
+      fetch("/v1/dashboard/status").then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(status) {
+        var readiness = status.readiness_status || "blocked";
+        var workersOnline = Number(status.workers_online || 0);
+        var workersTotal = Number(status.workers_total || 0);
+        var readyModels = Number(status.ready_models || 0);
+        var activeJobs = Number(status.active_jobs || 0);
+        var recentFailures = Number(status.recent_failures || 0);
+        var jobsTotal = Number(status.jobs_total || 0);
+        var sidebarSummary = document.getElementById("sidebar-summary-text");
+        if (sidebarSummary) {
+          sidebarSummary.textContent = readiness + " · " + workersOnline + " worker(s) online";
+        }
+        setNavBadge("readiness", readiness, readiness, true);
+        setNavBadge("workers", workersOnline + "/" + workersTotal, "", true);
+        setNavBadge("ready-models", readyModels, readyModels > 0 ? "ready" : "blocked", true);
+        setNavBadge("recent-failures", recentFailures, "failed", recentFailures > 0);
+        setNavBadge("active-jobs", activeJobs, "warn", activeJobs > 0);
+        setNavBadge("jobs-total", jobsTotal, "", true);
+        document.body.dataset.activeJobs = activeJobs > 0 ? "true" : "false";
+      }).catch(function() {
+        setNavBadge("readiness", "offline", "failed", true);
+      });
+    }
+    refreshSidebarStatus();
+    window.setInterval(refreshSidebarStatus, 5000);
+    var capacitySnapshotLabel = document.getElementById("capacity-snapshot-label");
+    var capacitySaveSnapshot = document.getElementById("capacity-save-snapshot");
+    var capacityRefreshSnapshots = document.getElementById("capacity-refresh-snapshots");
+    var capacitySnapshotStatus = document.getElementById("capacity-snapshot-status");
+    var capacitySnapshotList = document.getElementById("capacity-snapshot-list");
+    var capacitySnapshotCount = document.getElementById("capacity-snapshot-count");
+    var capacityDeltaGrid = document.getElementById("capacity-delta-grid");
+    function signedNumber(value) {
+      var number = Number(value || 0);
+      return (number > 0 ? "+" : "") + String(number);
+    }
+    function signedBytes(value) {
+      var number = Number(value || 0);
+      var prefix = number > 0 ? "+" : "";
+      return prefix + formatBytesGB(Math.abs(number));
+    }
+    function setCapacitySnapshotStatus(text) {
+      if (capacitySnapshotStatus) capacitySnapshotStatus.textContent = text;
+    }
+    function renderCapacityDelta(delta) {
+      if (!capacityDeltaGrid) return;
+      capacityDeltaGrid.innerHTML = "";
+      if (!delta) {
+        capacityDeltaGrid.hidden = true;
+        return;
+      }
+      [
+        ["Workers", signedNumber(delta.workers_online_delta)],
+        ["CPU cores", signedNumber(delta.allowed_cpu_cores_delta)],
+        ["RAM", signedBytes(delta.allowed_memory_bytes_delta)],
+        ["Disk", signedBytes(delta.allowed_storage_bytes_delta)],
+        ["Free disk", signedBytes(delta.free_storage_bytes_delta)],
+        ["VRAM", signedBytes(delta.allowed_vram_bytes_delta)],
+        ["Runnable models", signedNumber(delta.single_worker_runnable_delta)],
+        ["Sharded estimates", signedNumber(delta.sharded_estimate_delta)]
+      ].forEach(function(item) {
+        var cell = document.createElement("div");
+        cell.className = "first-test-stat";
+        cell.innerHTML = "<span></span><strong></strong>";
+        cell.querySelector("span").textContent = item[0];
+        cell.querySelector("strong").textContent = item[1];
+        capacityDeltaGrid.appendChild(cell);
+      });
+      capacityDeltaGrid.hidden = false;
+    }
+    function compareCapacitySnapshot(snapshotID) {
+      if (!snapshotID) return;
+      setCapacitySnapshotStatus("Comparing current capacity...");
+      fetch("/v1/capacity?baseline=" + encodeURIComponent(snapshotID)).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(payload) {
+        renderCapacityDelta(payload.delta);
+        var delta = payload.delta || {};
+        var newModels = (delta.new_single_worker_runnable_models || []).map(function(model) { return model.name || model.id; }).slice(0, 3);
+        var suffix = newModels.length ? " New runnable: " + newModels.join(", ") + "." : "";
+        setCapacitySnapshotStatus("Compared to " + snapshotID + "." + suffix);
+      }).catch(function(error) {
+        renderCapacityDelta(null);
+        setCapacitySnapshotStatus("Compare failed: " + error.message);
+      });
+    }
+    function renderCapacitySnapshots(snapshots) {
+      snapshots = snapshots || [];
+      if (capacitySnapshotCount) capacitySnapshotCount.textContent = snapshots.length + " snapshots";
+      if (!capacitySnapshotList) return;
+      capacitySnapshotList.innerHTML = "";
+      if (!snapshots.length) {
+        var empty = document.createElement("div");
+        empty.className = "hint";
+        empty.textContent = "No capacity baselines saved yet.";
+        capacitySnapshotList.appendChild(empty);
+        return;
+      }
+      snapshots.forEach(function(snapshot) {
+        var row = document.createElement("div");
+        row.className = "capacity-snapshot-row";
+        row.innerHTML = "<div><strong></strong><br><span class=\"sub\"></span></div><code></code><button class=\"button\" type=\"button\">Compare</button>";
+        row.querySelector("strong").textContent = snapshot.label || snapshot.id;
+        row.querySelector("span").textContent = snapshot.created_at || "";
+        row.querySelector("code").textContent = (snapshot.capacity ? snapshot.capacity.workers_online || 0 : 0) + " workers";
+        var button = row.querySelector("button");
+        button.addEventListener("click", function() {
+          compareCapacitySnapshot(snapshot.id);
+        });
+        capacitySnapshotList.appendChild(row);
+      });
+    }
+    function loadCapacitySnapshots() {
+      if (!capacitySnapshotList) return;
+      fetch("/v1/capacity/snapshots").then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(payload) {
+        renderCapacitySnapshots(payload.snapshots || []);
+      }).catch(function(error) {
+        setCapacitySnapshotStatus("Snapshot refresh failed: " + error.message);
+      });
+    }
+    if (capacitySaveSnapshot) {
+      capacitySaveSnapshot.addEventListener("click", function() {
+        var label = capacitySnapshotLabel ? String(capacitySnapshotLabel.value || "").trim() : "";
+        setCapacitySnapshotStatus("Saving capacity baseline...");
+        capacitySaveSnapshot.disabled = true;
+        fetch("/v1/capacity/snapshots", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label: label })
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function(payload) {
+          if (capacitySnapshotLabel) capacitySnapshotLabel.value = "";
+          setCapacitySnapshotStatus("Saved baseline " + (payload.snapshot ? payload.snapshot.id : "") + ".");
+          loadCapacitySnapshots();
+        }).catch(function(error) {
+          setCapacitySnapshotStatus("Snapshot save failed: " + error.message);
+        }).finally(function() {
+          capacitySaveSnapshot.disabled = false;
+        });
+      });
+    }
+    if (capacityRefreshSnapshots) {
+      capacityRefreshSnapshots.addEventListener("click", loadCapacitySnapshots);
+    }
+    loadCapacitySnapshots();
     var form = document.getElementById("compute-job-form");
     var status = document.getElementById("compute-job-status");
     if (form) {
@@ -3916,16 +5685,185 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       if (!modelID) return [];
       return Array.prototype.slice.call(document.querySelectorAll('[data-model-id="' + cssIdent(modelID) + '"]'));
     }
+    var modelCatalogSearch = document.getElementById("model-catalog-search");
+    var modelCatalogStatus = document.getElementById("model-catalog-status");
+    var modelCatalogFamily = document.getElementById("model-catalog-family");
+    var modelCatalogSort = document.getElementById("model-catalog-sort");
+    var modelCatalogCapable = document.getElementById("model-catalog-capable");
+    var modelCatalogCount = document.getElementById("model-catalog-count");
+    var modelCatalogClear = document.getElementById("model-catalog-clear");
+    var modelCatalogEmpty = document.getElementById("model-catalog-empty");
+    var modelCatalogStorageKey = "cmesh.modelCatalog.filters";
+    var applyingModelCatalogHash = false;
+    function catalogHashParams() {
+      var raw = String(window.location.hash || "");
+      var marker = "#models?";
+      if (raw.indexOf(marker) !== 0) return null;
+      return new URLSearchParams(raw.slice(marker.length));
+    }
+    function setCatalogControlValues(values) {
+      if (!values) return false;
+      var changed = false;
+      function setValue(control, value) {
+        if (!control || value === null || typeof value === "undefined") return;
+        if (control.value !== value) {
+          control.value = value;
+          changed = true;
+        }
+      }
+      setValue(modelCatalogSearch, values.query || "");
+      setValue(modelCatalogStatus, values.status || "");
+      setValue(modelCatalogFamily, values.family || "");
+      setValue(modelCatalogSort, values.sort || "recommended");
+      if (modelCatalogCapable) {
+        var capable = Boolean(values.capableOnly);
+        if (modelCatalogCapable.checked !== capable) {
+          modelCatalogCapable.checked = capable;
+          changed = true;
+        }
+      }
+      return changed;
+    }
+    function currentModelCatalogFilters() {
+      return {
+        query: modelCatalogSearch ? modelCatalogSearch.value : "",
+        status: modelCatalogStatus ? modelCatalogStatus.value : "",
+        family: modelCatalogFamily ? modelCatalogFamily.value : "",
+        sort: modelCatalogSort ? modelCatalogSort.value : "recommended",
+        capableOnly: Boolean(modelCatalogCapable && modelCatalogCapable.checked)
+      };
+    }
+    function updateModelCatalogHash() {
+      if (applyingModelCatalogHash || !window.history || currentActiveTab() !== "models") return;
+      var filters = currentModelCatalogFilters();
+      var params = new URLSearchParams();
+      if (filters.query) params.set("q", filters.query);
+      if (filters.status) params.set("status", filters.status);
+      if (filters.family) params.set("family", filters.family);
+      if (filters.sort && filters.sort !== "recommended") params.set("sort", filters.sort);
+      if (filters.capableOnly) params.set("capable", "true");
+      var nextHash = params.toString() ? "#models?" + params.toString() : "#models";
+      if (window.location.hash !== nextHash) {
+        window.history.replaceState(null, "", window.location.pathname + window.location.search + nextHash);
+      }
+    }
+    function applyModelCatalogFiltersFromHash() {
+      var params = catalogHashParams();
+      if (!params) return false;
+      applyingModelCatalogHash = true;
+      setCatalogControlValues({
+        query: params.get("q") || params.get("query") || "",
+        status: params.get("status") || "",
+        family: params.get("family") || "",
+        sort: params.get("sort") || "recommended",
+        capableOnly: params.get("capable") === "true" || params.get("capable") === "1"
+      });
+      applyingModelCatalogHash = false;
+      saveModelCatalogFilters();
+      applyModelCatalogFilters();
+      return true;
+    }
+    function saveModelCatalogFilters() {
+      try {
+        if (!window.localStorage) return;
+        window.localStorage.setItem(modelCatalogStorageKey, JSON.stringify(currentModelCatalogFilters()));
+      } catch (error) {}
+    }
+    function restoreModelCatalogFilters() {
+      try {
+        if (!window.localStorage) return;
+        var raw = window.localStorage.getItem(modelCatalogStorageKey);
+        if (!raw) return;
+        var saved = JSON.parse(raw);
+        setCatalogControlValues(saved);
+      } catch (error) {}
+    }
+    function clearModelCatalogFilters() {
+      if (modelCatalogSearch) modelCatalogSearch.value = "";
+      if (modelCatalogStatus) modelCatalogStatus.value = "";
+      if (modelCatalogFamily) modelCatalogFamily.value = "";
+      if (modelCatalogSort) modelCatalogSort.value = "recommended";
+      if (modelCatalogCapable) modelCatalogCapable.checked = false;
+      saveModelCatalogFilters();
+      updateModelCatalogHash();
+      applyModelCatalogFilters();
+    }
+    function dedupeModelFamilyOptions() {
+      if (!modelCatalogFamily) return;
+      var seen = {};
+      Array.prototype.slice.call(modelCatalogFamily.options).forEach(function(option) {
+        var value = String(option.value || "").trim();
+        if (!value) return;
+        var key = value.toLowerCase();
+        if (seen[key]) {
+          option.remove();
+        } else {
+          seen[key] = true;
+        }
+      });
+    }
+    function applyModelCatalogFilters() {
+      var query = modelCatalogSearch ? String(modelCatalogSearch.value || "").trim().toLowerCase() : "";
+      var status = modelCatalogStatus ? String(modelCatalogStatus.value || "").trim() : "";
+      var family = modelCatalogFamily ? String(modelCatalogFamily.value || "").trim().toLowerCase() : "";
+      var sortMode = modelCatalogSort ? String(modelCatalogSort.value || "recommended") : "recommended";
+      var capableOnly = Boolean(modelCatalogCapable && modelCatalogCapable.checked);
+      var total = 0;
+      var visible = 0;
+      var catalog = document.querySelector(".model-catalog");
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.model-card[data-model-surface="catalog"]'));
+      cards.sort(function(left, right) {
+        var leftCapableNodes = Number(left.dataset.modelCapableNodes || "0");
+        var rightCapableNodes = Number(right.dataset.modelCapableNodes || "0");
+        var leftMemory = Number(left.dataset.modelMemory || "0");
+        var rightMemory = Number(right.dataset.modelMemory || "0");
+        var leftDisk = Number(left.dataset.modelDisk || "0");
+        var rightDisk = Number(right.dataset.modelDisk || "0");
+        var leftName = String(left.dataset.modelName || left.dataset.modelId || "");
+        var rightName = String(right.dataset.modelName || right.dataset.modelId || "");
+        if (sortMode === "name") return leftName.localeCompare(rightName);
+        if (sortMode === "ram-asc") return leftMemory - rightMemory || leftName.localeCompare(rightName);
+        if (sortMode === "ram-desc") return rightMemory - leftMemory || leftName.localeCompare(rightName);
+        if (sortMode === "disk-asc") return leftDisk - rightDisk || leftName.localeCompare(rightName);
+        if (sortMode === "capable-desc") return rightCapableNodes - leftCapableNodes || leftMemory - rightMemory || leftName.localeCompare(rightName);
+        return rightCapableNodes - leftCapableNodes || leftMemory - rightMemory || leftDisk - rightDisk || leftName.localeCompare(rightName);
+      });
+      if (catalog) {
+        cards.forEach(function(card) {
+          catalog.appendChild(card);
+        });
+      }
+      cards.forEach(function(card) {
+        total++;
+        var text = String(card.dataset.modelSearch || "").toLowerCase();
+        var cardStatus = String(card.dataset.modelStatusValue || "");
+        var cardFamily = String(card.dataset.modelFamily || "").toLowerCase();
+        var cardCapable = card.dataset.modelCapable === "true";
+        var matches = (!query || text.indexOf(query) !== -1) &&
+          (!status || cardStatus === status) &&
+          (!family || cardFamily === family) &&
+          (!capableOnly || cardCapable);
+        card.hidden = !matches;
+        if (matches) visible++;
+      });
+      if (modelCatalogCount) {
+        modelCatalogCount.textContent = visible + " / " + total + " shown";
+      }
+      if (modelCatalogEmpty) {
+        modelCatalogEmpty.classList.toggle("is-visible", total > 0 && visible === 0);
+      }
+      updateModelCatalogHash();
+    }
     function setModelButtons(modelID, disabled) {
       modelCardsFor(modelID).forEach(function(card) {
-        card.querySelectorAll(".model-install, .model-delete").forEach(function(button) {
+        card.querySelectorAll(".model-install, .model-delete, .model-repair").forEach(function(button) {
           button.disabled = disabled;
         });
       });
     }
     function modelStatusClass(status) {
       if (status === "installed") return "pill";
-      if (status === "installing" || status === "deleting") return "pill pill-job";
+      if (status === "installing" || status === "deleting" || status === "repairing") return "pill pill-job";
       return "pill pill-muted";
     }
     function updateModelStatus(summary) {
@@ -3936,18 +5874,26 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         statusElement.className = modelStatusClass(summary.status || "available");
       });
       modelCardsFor(modelID).forEach(function(card) {
+        if (card.getAttribute("data-model-surface") === "catalog") {
+          card.dataset.modelStatusValue = summary.status || "available";
+          card.dataset.modelCapable = summary.capable_nodes > 0 ? "true" : "false";
+          card.dataset.modelCapableNodes = String(summary.capable_nodes || 0);
+        }
         if (card.getAttribute("data-model-surface") === "installed") {
           card.hidden = !(summary.installed_on && summary.installed_on.length);
         }
-        var install = card.querySelector(".model-install");
-        if (install) {
-          install.disabled = summary.status !== "available" || !(summary.capable_nodes > 0);
-          setButtonText(install, "Install");
-        }
+        card.querySelectorAll(".model-install").forEach(function(install) {
+          install.disabled = summary.status === "installing" || summary.status === "deleting" || summary.status === "repairing" || !(summary.capable_nodes > 0);
+          setButtonText(install, install.dataset.nodeId ? "Install here" : "Install");
+        });
         card.querySelectorAll(".model-delete").forEach(function(button) {
-          button.disabled = !(summary.installed_on && summary.installed_on.length) || summary.status === "deleting";
+          button.disabled = !(summary.installed_on && summary.installed_on.length) || summary.status === "deleting" || Boolean(summary.active_job_id);
+        });
+        card.querySelectorAll(".model-repair").forEach(function(button) {
+          button.disabled = button.dataset.repairable !== "true" || !(summary.installed_on && summary.installed_on.length) || summary.status === "repairing" || Boolean(summary.active_job_id);
         });
       });
+      applyModelCatalogFilters();
     }
     function refreshModelSummary(modelID) {
       if (!modelID) return Promise.resolve(null);
@@ -3961,12 +5907,326 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         for (var i = 0; i < models.length; i++) {
           if (models[i].model && models[i].model.id === modelID) {
             updateModelStatus(models[i]);
+            refreshModelPlacement(modelID);
             return models[i];
           }
         }
         return null;
       });
     }
+    dedupeModelFamilyOptions();
+    [modelCatalogSearch, modelCatalogStatus, modelCatalogFamily, modelCatalogSort, modelCatalogCapable].forEach(function(control) {
+      if (!control) return;
+      control.addEventListener("input", function() {
+        saveModelCatalogFilters();
+        applyModelCatalogFilters();
+      });
+      control.addEventListener("change", function() {
+        saveModelCatalogFilters();
+        applyModelCatalogFilters();
+      });
+    });
+    if (modelCatalogClear) {
+      modelCatalogClear.addEventListener("click", clearModelCatalogFilters);
+    }
+    if (!applyModelCatalogFiltersFromHash()) {
+      restoreModelCatalogFilters();
+    }
+    applyModelCatalogFilters();
+    var modelDetailPanel = document.getElementById("model-detail-panel");
+    var modelDetailTitle = document.getElementById("model-detail-title");
+    var modelDetailSubtitle = document.getElementById("model-detail-subtitle");
+    var modelDetailGrid = document.getElementById("model-detail-grid");
+    var modelDetailPlacement = document.getElementById("model-detail-placement");
+    var modelDetailActions = document.getElementById("model-detail-actions");
+    var modelDetailList = document.getElementById("model-detail-list");
+    var modelDetailClose = document.getElementById("model-detail-close");
+    function formatBytesGB(bytes) {
+      var value = Number(bytes || 0);
+      if (!value) return "0.0 GB";
+      return (value / 1024 / 1024 / 1024).toFixed(1) + " GB";
+    }
+    function openModelDetailPanel() {
+      if (!modelDetailPanel) return;
+      modelDetailPanel.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+    function closeModelDetailPanel() {
+      if (!modelDetailPanel) return;
+      modelDetailPanel.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+    function setModelDetailLoading(modelID) {
+      if (!modelDetailPanel) return;
+      openModelDetailPanel();
+      if (modelDetailTitle) modelDetailTitle.textContent = "Loading model...";
+      if (modelDetailSubtitle) modelDetailSubtitle.textContent = modelID;
+      if (modelDetailGrid) modelDetailGrid.innerHTML = "";
+      if (modelDetailPlacement) modelDetailPlacement.innerHTML = '<h4>Placement plan</h4><div class="hint">Loading placement planner.</div>';
+      if (modelDetailActions) modelDetailActions.innerHTML = "";
+      if (modelDetailList) modelDetailList.innerHTML = '<div class="hint">Loading model details from the manager API.</div>';
+    }
+    function renderModelPlacement(placement) {
+      if (!modelDetailPlacement) return;
+      modelDetailPlacement.innerHTML = "";
+      var title = document.createElement("h4");
+      title.textContent = "Placement plan";
+      modelDetailPlacement.appendChild(title);
+      if (!placement) {
+        var missing = document.createElement("div");
+        missing.className = "hint";
+        missing.textContent = "Placement planner did not return a plan.";
+        modelDetailPlacement.appendChild(missing);
+        return;
+      }
+      var summary = document.createElement("div");
+      summary.className = "placement-summary";
+      var mode = String(placement.mode || "blocked").replace(/_/g, " ");
+      var status = placement.runnable_now ? "runnable now" : (placement.feasible ? "feasible estimate" : "blocked");
+      summary.innerHTML = "<span class=\"pill\"></span><span class=\"pill\"></span><code></code>";
+      summary.querySelectorAll("span")[0].textContent = mode;
+      summary.querySelectorAll("span")[1].textContent = status;
+      summary.querySelector("code").textContent = "required RAM " + formatBytesGB(placement.required_memory_bytes) + " · disk " + formatBytesGB(placement.required_disk_bytes);
+      modelDetailPlacement.appendChild(summary);
+
+      var list = document.createElement("div");
+      list.className = "placement-list";
+      (placement.single_node_candidates || []).forEach(function(candidate) {
+        var row = document.createElement("div");
+        row.className = "placement-shard";
+        row.innerHTML = "<strong></strong><span></span><code></code>";
+        row.querySelector("strong").textContent = candidate.name || candidate.node_id || "worker";
+        row.querySelector("span").textContent = "single worker";
+        row.querySelector("code").textContent = "RAM " + formatBytesGB(candidate.allowed_memory_bytes) + " · disk " + formatBytesGB(candidate.allowed_storage_bytes);
+        list.appendChild(row);
+      });
+      (placement.shards || []).forEach(function(shard) {
+        var row = document.createElement("div");
+        row.className = "placement-shard";
+        row.innerHTML = "<strong></strong><span></span><code></code>";
+        row.querySelector("strong").textContent = shard.node_name || shard.node_id || "worker";
+        row.querySelector("span").textContent = "planned shard";
+        row.querySelector("code").textContent = "RAM " + formatBytesGB(shard.memory_bytes) + " · disk " + formatBytesGB(shard.disk_bytes);
+        list.appendChild(row);
+      });
+      (placement.blockers || []).forEach(function(blocker) {
+        var item = document.createElement("div");
+        item.className = "placement-blocker";
+        item.textContent = blocker;
+        list.appendChild(item);
+      });
+      (placement.warnings || []).forEach(function(warning) {
+        var item = document.createElement("div");
+        item.className = "placement-warning";
+        item.textContent = warning;
+        list.appendChild(item);
+      });
+      if (!list.children.length) {
+        var empty = document.createElement("div");
+        empty.className = "hint";
+        empty.textContent = "No viable placement candidates yet.";
+        list.appendChild(empty);
+      }
+      modelDetailPlacement.appendChild(list);
+    }
+    function modelInstallConflictText(conflict) {
+      if (!conflict || typeof conflict !== "object") return "";
+      var parts = [];
+      if (conflict.error) parts.push(conflict.error);
+      if (conflict.reason) parts.push(conflict.reason);
+      if (conflict.placement && conflict.placement.blockers && conflict.placement.blockers.length) {
+        parts.push(conflict.placement.blockers.join("; "));
+      }
+      if (conflict.placement && conflict.placement.mode === "sharded_estimate") {
+        parts.push("multi-worker placement is only an estimate; distributed execution is not implemented yet");
+      }
+      return parts.join(": ");
+    }
+    function placementLabel(plan) {
+      if (!plan) return "Blocked";
+      if (plan.mode === "single_worker") return "Single-worker ready";
+      if (plan.mode === "sharded_estimate") return "Sharded estimate";
+      return "Blocked";
+    }
+    function placementClass(plan) {
+      if (plan && plan.runnable_now) return "model-placement-card is-ready";
+      if (plan && plan.feasible) return "model-placement-card is-estimate";
+      return "model-placement-card is-blocked";
+    }
+    function placementHint(plan) {
+      if (!plan) return "No viable placement found.";
+      if (plan.runnable_now) {
+        var candidates = (plan.single_node_candidates || []).length;
+        return candidates === 1 ? "Can run on 1 online worker." : "Can run on " + candidates + " online workers.";
+      }
+      if (plan.feasible) {
+        return "Aggregate resources fit across " + ((plan.shards || []).length) + " workers, but distributed model execution is not implemented yet.";
+      }
+      if (plan.blockers && plan.blockers.length) return plan.blockers.join(" | ");
+      return "No viable placement found.";
+    }
+    function updateModelPlacementCard(modelID, plan) {
+      if (!modelID || !plan) return;
+      document.querySelectorAll('[data-model-placement="' + cssIdent(modelID) + '"]').forEach(function(card) {
+        card.className = placementClass(plan);
+        card.dataset.placementMode = plan.mode || "blocked";
+        var title = card.querySelector("strong");
+        var body = card.querySelector("span");
+        var specs = card.querySelector("code");
+        if (title) title.textContent = placementLabel(plan);
+        if (body) body.textContent = placementHint(plan);
+        if (specs) specs.textContent = "RAM " + formatBytesGB(plan.required_memory_bytes) + " · disk " + formatBytesGB(plan.required_disk_bytes);
+      });
+    }
+    function refreshModelPlacement(modelID) {
+      if (!modelID) return Promise.resolve(null);
+      return fetch("/v1/models/" + encodeURIComponent(modelID) + "/placement").then(function(response) {
+        if (!response.ok) return null;
+        return response.json();
+      }).then(function(payload) {
+        if (payload && payload.placement) {
+          updateModelPlacementCard(modelID, payload.placement);
+          if (modelDetailPanel && !modelDetailPanel.hidden) {
+            renderModelPlacement(payload.placement);
+          }
+          return payload.placement;
+        }
+        return null;
+      }).catch(function() {
+        return null;
+      });
+    }
+    function renderModelDetail(summary, placement) {
+      if (!summary || !summary.model || !modelDetailPanel) return;
+      var model = summary.model;
+      openModelDetailPanel();
+      if (modelDetailTitle) modelDetailTitle.textContent = model.name || model.id;
+      if (modelDetailSubtitle) {
+        modelDetailSubtitle.textContent = model.id + " · " + (model.runtime || "runtime") + " · " + (summary.status || "available");
+      }
+      if (modelDetailGrid) {
+        modelDetailGrid.innerHTML = "";
+        [
+          ["Parameters", (model.parameters || "-") + " / " + (model.quant || "-")],
+          ["Required RAM", formatBytesGB(model.memory_bytes)],
+          ["Required disk", formatBytesGB(model.disk_bytes)],
+          ["Context", String(model.context || "-")],
+          ["Capable workers", String(summary.capable_nodes || 0)],
+          ["Installed workers", String((summary.installed_on || []).length)]
+        ].forEach(function(item) {
+          var cell = document.createElement("div");
+          cell.innerHTML = "<span></span><strong></strong>";
+          cell.querySelector("span").textContent = item[0];
+          cell.querySelector("strong").textContent = item[1];
+          modelDetailGrid.appendChild(cell);
+        });
+      }
+      renderModelPlacement(placement);
+      if (modelDetailActions) {
+        modelDetailActions.innerHTML = "";
+        var bestCapability = (summary.capabilities || []).find(function(capability) {
+          return capability.capable && !capability.installed;
+        });
+        var installAny = document.createElement("button");
+        installAny.className = "button primary model-detail-install";
+        installAny.type = "button";
+        installAny.dataset.modelId = model.id;
+        installAny.innerHTML = '<svg class="icon"><use href="#icon-download"></use></svg><span>Install on best worker</span>';
+        installAny.disabled = !bestCapability || summary.status === "installing" || summary.status === "deleting" || summary.status === "repairing";
+        modelDetailActions.appendChild(installAny);
+        if (bestCapability) {
+          var installHere = document.createElement("button");
+          installHere.className = "button model-detail-install";
+          installHere.type = "button";
+          installHere.dataset.modelId = model.id;
+          installHere.dataset.nodeId = bestCapability.node_id || "";
+          installHere.innerHTML = '<svg class="icon"><use href="#icon-download"></use></svg><span></span>';
+          installHere.querySelector("span").textContent = "Install on " + (bestCapability.name || "worker");
+          installHere.disabled = installAny.disabled;
+          modelDetailActions.appendChild(installHere);
+        }
+      }
+      if (modelDetailList) {
+        modelDetailList.innerHTML = "";
+        var capabilities = summary.capabilities || [];
+        if (!capabilities.length) {
+          modelDetailList.innerHTML = '<div class="hint">No online workers are reporting capability for this model.</div>';
+        } else {
+          capabilities.forEach(function(capability) {
+            var row = document.createElement("div");
+            row.className = "model-detail-row";
+            var reasons = (capability.reasons || []).join("; ");
+            row.innerHTML = "<strong></strong><span></span><code></code><div></div>";
+            row.querySelector("strong").textContent = capability.name || capability.node_id || "worker";
+            row.querySelector("span").textContent = capability.capable ? "capable" : "blocked";
+            row.querySelector("code").textContent = capability.capable
+              ? "jobs " + (capability.active_jobs || 0) + "/" + (capability.job_slots || 0) + " · RAM " + formatBytesGB(capability.allowed_memory_bytes) + " · disk " + formatBytesGB(capability.allowed_storage_bytes)
+              : (reasons || "requirements not satisfied");
+            var action = row.querySelector("div");
+            if (capability.capable && !capability.installed) {
+              var install = document.createElement("button");
+              install.className = "button model-detail-install";
+              install.type = "button";
+              install.dataset.modelId = model.id;
+              install.dataset.nodeId = capability.node_id || "";
+              install.innerHTML = '<svg class="icon"><use href="#icon-download"></use></svg><span>Install</span>';
+              install.disabled = summary.status === "installing" || summary.status === "deleting" || summary.status === "repairing";
+              action.appendChild(install);
+            } else if (capability.installed) {
+              action.innerHTML = '<span class="pill">installed</span>';
+            }
+            modelDetailList.appendChild(row);
+          });
+        }
+      }
+    }
+    function loadModelDetail(modelID) {
+      if (!modelID) return;
+      setModelDetailLoading(modelID);
+      Promise.all([
+        fetch("/v1/models/" + encodeURIComponent(modelID)).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }),
+        fetch("/v1/models/" + encodeURIComponent(modelID) + "/placement").then(function(response) {
+          if (!response.ok) return { placement: null };
+          return response.json();
+        }).catch(function() {
+          return { placement: null };
+        })
+      ]).then(function(payloads) {
+        renderModelDetail(payloads[0].model, payloads[1].placement);
+      }).catch(function(error) {
+        if (modelDetailTitle) modelDetailTitle.textContent = "Model detail failed";
+        if (modelDetailSubtitle) modelDetailSubtitle.textContent = modelID;
+        if (modelDetailPlacement) modelDetailPlacement.innerHTML = "";
+        if (modelDetailList) modelDetailList.innerHTML = '<div class="hint"></div>';
+        var hint = modelDetailList ? modelDetailList.querySelector(".hint") : null;
+        if (hint) hint.textContent = error.message;
+      });
+    }
+    document.querySelectorAll(".model-detail").forEach(function(button) {
+      button.addEventListener("click", function() {
+        loadModelDetail(button.dataset.modelId);
+      });
+    });
+    if (modelDetailClose) {
+      modelDetailClose.addEventListener("click", function() {
+        closeModelDetailPanel();
+      });
+    }
+    if (modelDetailPanel) {
+      modelDetailPanel.addEventListener("click", function(event) {
+        if (event.target === modelDetailPanel) closeModelDetailPanel();
+      });
+    }
+    document.addEventListener("keydown", function(event) {
+      if (event.key === "Escape" && modelDetailPanel && !modelDetailPanel.hidden) {
+        closeModelDetailPanel();
+      }
+    });
     function modelOperationText(job) {
       if (!job) return "Waiting for job...";
       if (job.error) return job.error;
@@ -4056,6 +6316,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           refreshModelSummary(modelID).catch(function(error) {
             renderModelOperation(modelID, job, modelOperationText(job) + " Refresh failed: " + error.message);
           });
+          if (job.status === "succeeded") {
+            setTimeout(function() { window.location.reload(); }, 900);
+          }
           return;
         }
         if (attempt < 240) {
@@ -4065,33 +6328,63 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         renderModelOperation(modelID, null, "Could not read job: " + error.message);
       });
     }
+    function submitModelInstall(modelID, nodeID, button) {
+      if (!modelID) return;
+      var originalText = button ? button.textContent.trim() || "Install" : "Install";
+      setModelButtons(modelID, true);
+      if (modelDetailActions) {
+        modelDetailActions.querySelectorAll("button").forEach(function(actionButton) {
+          actionButton.disabled = true;
+        });
+      }
+      if (button) setButtonText(button, "Installing...");
+      fetch("/v1/models/" + encodeURIComponent(modelID) + "/install", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(nodeID ? { node_id: nodeID } : {})
+      }).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) {
+            var conflict = null;
+            try {
+              conflict = JSON.parse(text);
+            } catch (error) {}
+            if (conflict && conflict.placement) {
+              updateModelPlacementCard(modelID, conflict.placement);
+              if (modelDetailPanel && !modelDetailPanel.hidden) {
+                renderModelPlacement(conflict.placement);
+              }
+              throw new Error(modelInstallConflictText(conflict) || response.statusText);
+            }
+            throw new Error(text || response.statusText);
+          });
+        }
+        return response.json();
+      }).then(function(job) {
+        var statusElement = document.getElementById("model-status");
+        if (statusElement) statusElement.innerText = "Install job " + job.id + " submitted.";
+        renderModelOperation(modelID, job, "Install submitted.");
+        refreshModelSummary(modelID).then(function(summary) {
+          if (modelDetailPanel && !modelDetailPanel.hidden && summary && summary.model && summary.model.id === modelID) {
+            renderModelDetail(summary);
+          }
+        });
+        pollModelLifecycleJob(modelID, job.id, 0);
+      }).catch(function(error) {
+        refreshModelSummary(modelID).catch(function() { setModelButtons(modelID, false); });
+        if (button) setButtonText(button, originalText);
+        renderModelOperation(modelID, null, "Install failed: " + error.message);
+      });
+    }
     document.querySelectorAll(".model-install").forEach(function(button) {
       button.addEventListener("click", function() {
-        var modelID = button.dataset.modelId;
-        if (!modelID) return;
-        setModelButtons(modelID, true);
-        setButtonText(button, "Installing...");
-        fetch("/v1/models/" + encodeURIComponent(modelID) + "/install", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}"
-        }).then(function(response) {
-          if (!response.ok) {
-            return response.text().then(function(text) { throw new Error(text || response.statusText); });
-          }
-          return response.json();
-        }).then(function(job) {
-          var statusElement = document.getElementById("model-status");
-          if (statusElement) statusElement.innerText = "Install job " + job.id + " submitted.";
-          renderModelOperation(modelID, job, "Install submitted.");
-          refreshModelSummary(modelID);
-          pollModelLifecycleJob(modelID, job.id, 0);
-        }).catch(function(error) {
-          refreshModelSummary(modelID).catch(function() { setModelButtons(modelID, false); });
-          setButtonText(button, "Install");
-          renderModelOperation(modelID, null, "Install failed: " + error.message);
-        });
+        submitModelInstall(button.dataset.modelId, button.dataset.nodeId || "", button);
       });
+    });
+    document.addEventListener("click", function(event) {
+      var button = event.target.closest ? event.target.closest(".model-detail-install") : null;
+      if (!button) return;
+      submitModelInstall(button.dataset.modelId, button.dataset.nodeId || "", button);
     });
     document.querySelectorAll(".model-delete").forEach(function(button) {
       button.addEventListener("click", function() {
@@ -4123,6 +6416,63 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         });
       });
     });
+    document.querySelectorAll(".model-repair").forEach(function(button) {
+      button.addEventListener("click", function() {
+        var modelID = button.dataset.modelId;
+        var nodeID = button.dataset.nodeId;
+        if (!modelID || !nodeID) return;
+        var originalText = button.textContent.trim() || "Repair";
+        setModelButtons(modelID, true);
+        setButtonText(button, "Repairing...");
+        fetch("/v1/models/" + encodeURIComponent(modelID) + "/repair", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ node_id: nodeID })
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function(job) {
+          var statusElement = document.getElementById("model-status");
+          if (statusElement) statusElement.innerText = "Repair job " + job.id + " submitted.";
+          renderModelOperation(modelID, job, "Repair submitted.");
+          refreshModelSummary(modelID);
+          pollModelLifecycleJob(modelID, job.id, 0);
+        }).catch(function(error) {
+          refreshModelSummary(modelID).catch(function() { setModelButtons(modelID, false); });
+          setButtonText(button, originalText);
+          renderModelOperation(modelID, null, "Repair failed: " + error.message);
+        });
+      });
+    });
+    document.querySelectorAll(".model-cleanup").forEach(function(button) {
+      button.addEventListener("click", function() {
+        var nodeID = button.dataset.nodeId;
+        if (!nodeID) return;
+        var originalText = button.textContent.trim() || "Cleanup cache";
+        button.disabled = true;
+        setButtonText(button, "Cleaning...");
+        fetch("/v1/workers/" + encodeURIComponent(nodeID) + "/model-cleanup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}"
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function(job) {
+          setButtonText(button, "Cleanup submitted");
+          button.title = "Job " + job.id + " submitted";
+        }).catch(function(error) {
+          button.disabled = false;
+          setButtonText(button, originalText);
+          button.title = error.message;
+          window.alert("Cleanup failed: " + error.message);
+        });
+      });
+    });
     var chatForm = document.getElementById("model-chat-form");
     var chatModel = document.getElementById("chat-model");
     var chatNode = document.getElementById("chat-node");
@@ -4135,16 +6485,32 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var memoryEditorReset = document.getElementById("memory-editor-reset");
     var memoryClearModel = document.getElementById("memory-clear-model");
     var memoryPreviewText = document.getElementById("memory-preview-text");
+    var contextMetrics = document.getElementById("context-metrics");
+    var contextMessageList = document.getElementById("context-message-list");
     var memoryModelSelect = document.getElementById("memory-model-select");
     var debugModelSelect = document.getElementById("debug-model-select");
     var chatSystemPrompt = document.getElementById("chat-system-prompt");
     var chatTemperature = document.getElementById("chat-temperature");
     var chatMaxTokens = document.getElementById("chat-max-tokens");
+    var chatPrompt = document.getElementById("chat-prompt");
+    var chatSubmitButton = chatForm ? chatForm.querySelector('button[type="submit"]') : null;
     var chatConversationKey = "cmesh.chat.conversation";
     var chatConversationID = "";
+    var chatSubmitting = false;
+    var chatSystemPromptDirty = false;
     try {
       chatConversationID = window.localStorage.getItem(chatConversationKey) || "";
     } catch (error) {}
+    function setChatSubmitting(isSubmitting) {
+      chatSubmitting = isSubmitting;
+      if (chatSubmitButton) {
+        chatSubmitButton.disabled = isSubmitting || !chatModel || !chatNode || !chatModel.value || !chatNode.value;
+        setButtonText(chatSubmitButton, isSubmitting ? "Generating..." : "Generate");
+      }
+      if (chatPrompt) chatPrompt.disabled = isSubmitting;
+      if (chatModel) chatModel.disabled = isSubmitting;
+      if (chatNode) chatNode.disabled = isSubmitting;
+    }
     function syncChatNodes() {
       if (!chatModel || !chatNode) return;
       var modelID = chatModel.value;
@@ -4181,6 +6547,26 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     }
     function currentChatModelID() {
       return chatModel ? String(chatModel.value || "").trim() : "";
+    }
+    function currentModelPreset() {
+      if (!chatModel || !chatModel.selectedOptions || chatModel.selectedOptions.length === 0) return null;
+      var option = chatModel.selectedOptions[0];
+      return {
+        temperature: option.dataset.temperature || "0.6",
+        maxTokens: option.dataset.maxTokens || "512",
+        systemPrompt: option.dataset.systemPrompt || ""
+      };
+    }
+    function applyChatModelPreset(forceSystemPrompt) {
+      var preset = currentModelPreset();
+      if (!preset) return;
+      if (chatTemperature) chatTemperature.value = preset.temperature || "0.6";
+      if (chatMaxTokens) chatMaxTokens.value = preset.maxTokens || "512";
+      if (chatSystemPrompt && (forceSystemPrompt || !chatSystemPromptDirty || !chatSystemPrompt.value)) {
+        chatSystemPrompt.value = preset.systemPrompt || "";
+        chatSystemPromptDirty = false;
+      }
+      updateMemoryPreview();
     }
     function selectedMemoryModelID() {
       if (memoryModelSelect && memoryModelSelect.value) return String(memoryModelSelect.value || "").trim();
@@ -4265,11 +6651,16 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       var modelID = selectedDebugModelID();
       if (!modelID) {
         memoryPreviewText.textContent = "Select a model to preview the prompt context.";
+        renderContextMetrics(null);
+        renderContextMessages([]);
         return;
       }
       var params = new URLSearchParams();
       params.set("model_id", modelID);
       if (chatSystemPrompt && chatSystemPrompt.value) params.set("system_prompt", chatSystemPrompt.value);
+      if (chatConversationID) params.set("conversation_id", chatConversationID);
+      if (chatPrompt && chatPrompt.value) params.set("prompt", chatPrompt.value);
+      if (chatMaxTokens && chatMaxTokens.value) params.set("max_tokens", chatMaxTokens.value);
       fetch("/v1/memories/preview?" + params.toString()).then(function(response) {
         if (!response.ok) {
           return response.text().then(function(text) { throw new Error(text || response.statusText); });
@@ -4277,8 +6668,58 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         return response.json();
       }).then(function(payload) {
         memoryPreviewText.textContent = payload.effective_system_prompt || "No effective prompt context.";
+        renderContextMetrics(payload.context || null);
+        renderContextMessages(payload.context && payload.context.included_messages ? payload.context.included_messages : []);
       }).catch(function(error) {
         memoryPreviewText.textContent = "Preview failed: " + error.message;
+        renderContextMetrics(null);
+        renderContextMessages([]);
+      });
+    }
+    function renderContextMetrics(context) {
+      if (!contextMetrics) return;
+      contextMetrics.innerHTML = "";
+      if (!context) {
+        contextMetrics.innerHTML = '<div class="sub">No context budget loaded.</div>';
+        return;
+      }
+      [
+        ["Context", context.context_tokens || 0],
+        ["Response reserve", context.output_reserve_tokens || 0],
+        ["History budget", context.history_budget_tokens || 0],
+        ["Dropped", context.dropped_messages || 0]
+      ].forEach(function(item) {
+        var card = document.createElement("div");
+        card.className = "context-metric";
+        var label = document.createElement("span");
+        label.textContent = item[0];
+        var value = document.createElement("strong");
+        value.textContent = String(item[1]);
+        card.appendChild(label);
+        card.appendChild(value);
+        contextMetrics.appendChild(card);
+      });
+    }
+    function renderContextMessages(messages) {
+      if (!contextMessageList) return;
+      contextMessageList.innerHTML = "";
+      if (!messages || messages.length === 0) {
+        var empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No chat messages included yet.";
+        contextMessageList.appendChild(empty);
+        return;
+      }
+      messages.forEach(function(message) {
+        var item = document.createElement("div");
+        item.className = "context-message";
+        var role = document.createElement("strong");
+        role.textContent = message.role || "user";
+        var content = document.createElement("p");
+        content.textContent = message.content || "";
+        item.appendChild(role);
+        item.appendChild(content);
+        contextMessageList.appendChild(item);
       });
     }
     function setActiveConversation(id) {
@@ -4310,15 +6751,84 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         appendChatMessage(message.role === "assistant" ? "assistant" : "user", message.content || "");
       });
       if (chatSystemPrompt) chatSystemPrompt.value = conversation.system_prompt || "";
+      chatSystemPromptDirty = Boolean(chatSystemPrompt && chatSystemPrompt.value);
       if (chatModel && conversation.model_id) chatModel.value = conversation.model_id;
       syncChatNodes();
       if (chatNode && conversation.node_id) chatNode.value = conversation.node_id;
       loadModelMemory();
+      updateMemoryPreview();
       if (modelStatus) modelStatus.innerText = "Loaded conversation " + conversation.id + ".";
     }
-    function loadConversation(id) {
+    function conversationTitleText(conversation) {
+      var messages = conversation && conversation.messages ? conversation.messages : [];
+      for (var i = 0; i < messages.length; i++) {
+        if (messages[i].role === "user" && messages[i].content) {
+          var title = String(messages[i].content).trim();
+          return title.length > 56 ? title.slice(0, 56) + "..." : title;
+        }
+      }
+      return "New conversation";
+    }
+    function conversationSubtitleText(conversation) {
+      var parts = [];
+      if (conversation && conversation.model_id) parts.push(conversation.model_id);
+      if (conversation && conversation.node_id) parts.push(conversation.node_id);
+      if (conversation && conversation.updated_at) parts.push(new Date(conversation.updated_at).toLocaleTimeString());
+      return parts.length ? parts.join(" · ") : "-";
+    }
+    function renderConversationList(conversations) {
+      if (!conversationList) return;
+      conversationList.innerHTML = "";
+      if (!conversations || conversations.length === 0) {
+        var empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No saved conversations yet.";
+        conversationList.appendChild(empty);
+        return;
+      }
+      conversations.forEach(function(conversation) {
+        var row = document.createElement("div");
+        row.className = "conversation-row";
+        row.dataset.conversationId = conversation.id || "";
+        var button = document.createElement("button");
+        button.className = "conversation-item";
+        if (conversation.id === chatConversationID) button.classList.add("active");
+        button.type = "button";
+        button.dataset.conversationId = conversation.id || "";
+        var title = document.createElement("span");
+        title.className = "conversation-title";
+        title.textContent = conversationTitleText(conversation);
+        var meta = document.createElement("span");
+        meta.className = "conversation-meta";
+        meta.textContent = conversationSubtitleText(conversation);
+        button.appendChild(title);
+        button.appendChild(meta);
+        var deleteButton = document.createElement("button");
+        deleteButton.className = "button danger conversation-delete";
+        deleteButton.type = "button";
+        deleteButton.dataset.conversationId = conversation.id || "";
+        deleteButton.innerHTML = '<svg class="icon"><use href="#icon-trash"></use></svg>';
+        row.appendChild(button);
+        row.appendChild(deleteButton);
+        conversationList.appendChild(row);
+      });
+    }
+    function refreshConversationList() {
+      if (!conversationList) return;
+      fetch("/v1/conversations").then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(payload) {
+        renderConversationList(payload.conversations || []);
+      }).catch(function(error) {
+        if (modelStatus) modelStatus.innerText = "Conversation refresh failed: " + error.message;
+      });
+    }
+    function loadConversation(id, fallbackAssistantText) {
       if (!id) return;
-      fetch("/v1/conversations/" + encodeURIComponent(id)).then(function(response) {
+      return fetch("/v1/conversations/" + encodeURIComponent(id)).then(function(response) {
         if (!response.ok) {
           return response.text().then(function(text) { throw new Error(text || response.statusText); });
         }
@@ -4329,6 +6839,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         activateTab("chat", true);
       }).catch(function(error) {
         if (modelStatus) modelStatus.innerText = "Could not load conversation: " + error.message;
+        if (fallbackAssistantText) appendChatMessage("assistant", fallbackAssistantText);
       });
     }
     function modelJobText(job) {
@@ -4353,12 +6864,20 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       }).then(function(job) {
         if (job.status === "succeeded") {
           if (modelStatus) modelStatus.innerText = "Completed " + job.id + ".";
-          appendChatMessage("assistant", modelJobText(job));
+          if (chatConversationID) {
+            loadConversation(chatConversationID, modelJobText(job));
+          } else {
+            appendChatMessage("assistant", modelJobText(job));
+          }
+          refreshConversationList();
+          loadModelMemory();
+          setChatSubmitting(false);
           return;
         }
         if (job.status === "failed" || job.status === "canceled") {
           if (modelStatus) modelStatus.innerText = "Model job " + job.status + ".";
           appendChatMessage("system", modelJobText(job));
+          setChatSubmitting(false);
           return;
         }
         if (modelStatus) modelStatus.innerText = "Running " + job.id + " (" + job.status + ")...";
@@ -4369,17 +6888,20 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         }
       }).catch(function(error) {
         if (modelStatus) modelStatus.innerText = "Could not read model job: " + error.message;
+        setChatSubmitting(false);
       });
     }
     if (chatModel) {
       chatModel.addEventListener("change", function() {
         syncChatNodes();
         syncAuxModelSelects(currentChatModelID());
+        applyChatModelPreset(true);
         loadModelMemory();
         updateMemoryPreview();
       });
       syncChatNodes();
       syncAuxModelSelects(currentChatModelID());
+      applyChatModelPreset(false);
       loadModelMemory();
     }
     if (memoryModelSelect) {
@@ -4393,13 +6915,14 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       });
     }
     if (conversationList) {
-      conversationList.querySelectorAll(".conversation-item").forEach(function(button) {
-        button.addEventListener("click", function() {
-          loadConversation(button.dataset.conversationId || "");
-        });
-      });
-      conversationList.querySelectorAll(".conversation-delete").forEach(function(button) {
-        button.addEventListener("click", function() {
+      conversationList.addEventListener("click", function(event) {
+        var openButton = event.target.closest ? event.target.closest(".conversation-item") : null;
+        if (openButton && conversationList.contains(openButton)) {
+          loadConversation(openButton.dataset.conversationId || "");
+          return;
+        }
+        var button = event.target.closest ? event.target.closest(".conversation-delete") : null;
+        if (button && conversationList.contains(button)) {
           var id = button.dataset.conversationId || "";
           if (!id) return;
           button.disabled = true;
@@ -4422,7 +6945,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             button.disabled = false;
             if (modelStatus) modelStatus.innerText = "Conversation delete failed: " + error.message;
           });
-        });
+        }
       });
     }
     if (newChatButton) {
@@ -4430,13 +6953,26 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         setActiveConversation("");
         resetChatThread();
         if (chatSystemPrompt) chatSystemPrompt.value = "";
+        chatSystemPromptDirty = false;
+        applyChatModelPreset(true);
         loadModelMemory();
+        updateMemoryPreview();
         if (modelStatus) modelStatus.innerText = "New chat ready.";
         activateTab("chat", true);
       });
     }
     if (chatSystemPrompt) {
-      chatSystemPrompt.addEventListener("input", updateMemoryPreview);
+      chatSystemPrompt.addEventListener("input", function() {
+        chatSystemPromptDirty = true;
+        updateMemoryPreview();
+      });
+    }
+    if (chatPrompt) {
+      chatPrompt.addEventListener("input", updateMemoryPreview);
+    }
+    if (chatMaxTokens) {
+      chatMaxTokens.addEventListener("change", updateMemoryPreview);
+      chatMaxTokens.addEventListener("input", updateMemoryPreview);
     }
     if (memoryList) {
       memoryList.addEventListener("click", function(event) {
@@ -4559,6 +7095,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       chatForm.addEventListener("submit", function(event) {
         event.preventDefault();
         if (!chatModel || !chatNode) return;
+        if (chatSubmitting) {
+          if (modelStatus) modelStatus.innerText = "A generate job is already running for this chat.";
+          return;
+        }
         var modelID = chatModel.value;
         var nodeID = chatNode.value;
         var prompt = String(chatForm.elements.prompt.value || "").trim();
@@ -4572,6 +7112,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         }
         appendChatMessage("user", prompt);
         chatForm.elements.prompt.value = "";
+        setChatSubmitting(true);
         modelStatus.innerText = "Submitting model job...";
         var maxTokens = parseInt(chatMaxTokens && chatMaxTokens.value ? chatMaxTokens.value : "512", 10);
         if (!Number.isFinite(maxTokens) || maxTokens < 16) maxTokens = 512;
@@ -4603,13 +7144,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           modelStatus.innerText = "Generate job " + job.id + " submitted.";
           pollModelJob(job.id, 0);
         }).catch(function(error) {
+          setChatSubmitting(false);
           modelStatus.innerText = "Generate failed: " + error.message;
           appendChatMessage("system", error.message);
         });
       });
-    }
-    if (document.body.dataset.activeJobs === "true" && window.location.hash !== "#chat") {
-      setTimeout(function() { window.location.reload(); }, 5000);
     }
   </script>
 </body>

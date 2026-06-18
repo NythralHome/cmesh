@@ -769,7 +769,7 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapsh
 		fmt.Fprintf(os.Stderr, "failed to write worker job status: %v\n", err)
 	}
 
-	result, jobErr := executeWorkerJob(*resp.Job, snapshot, cacheDir, nodeID, startedAt)
+	result, jobErr := executeWorkerJob(*resp.Job, snapshot, cacheDir, nodeID, startedAt, managerURL)
 	complete := jobs.CompleteRequest{
 		NodeID: nodeID,
 		Result: result,
@@ -830,7 +830,7 @@ func pollAndExecuteJob(managerURL string, nodeID string, cacheDir string, snapsh
 }
 
 func isModelJobType(jobType string) bool {
-	return jobType == models.JobInstall || jobType == models.JobDelete || jobType == models.JobGenerate
+	return jobType == models.JobInstall || jobType == models.JobDelete || jobType == models.JobGenerate || jobType == models.JobRepair || jobType == models.JobCleanup
 }
 
 func executeJob(job jobs.Job) (string, error) {
@@ -842,10 +842,10 @@ func executeJobWithResources(job jobs.Job, snapshot cluster.ResourceSnapshot) (s
 }
 
 func executeJobWithRuntime(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir string) (string, error) {
-	return executeWorkerJob(job, snapshot, cacheDir, "", time.Time{})
+	return executeWorkerJob(job, snapshot, cacheDir, "", time.Time{}, "")
 }
 
-func executeWorkerJob(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir string, nodeID string, startedAt time.Time) (string, error) {
+func executeWorkerJob(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir string, nodeID string, startedAt time.Time, managerURL string) (string, error) {
 	if err := validateWorkerCanRunJob(job, snapshot); err != nil {
 		return "", err
 	}
@@ -855,7 +855,11 @@ func executeWorkerJob(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir 
 	case "compute.matrix_multiply":
 		return executeMatrixMultiplyJob(job.Input)
 	case models.JobInstall:
-		return executeModelInstallJob(job.Input, cacheDir, modelInstallProgressWriter(cacheDir, nodeID, job, startedAt))
+		return executeModelInstallJob(job.Input, cacheDir, modelInstallProgressWriter(managerURL, cacheDir, nodeID, job, startedAt))
+	case models.JobRepair:
+		return executeModelRepairJob(job.Input, cacheDir, modelInstallProgressWriter(managerURL, cacheDir, nodeID, job, startedAt))
+	case models.JobCleanup:
+		return executeModelCleanupJob(job.Input, cacheDir)
 	case models.JobDelete:
 		return executeModelDeleteJob(job.Input, cacheDir)
 	case models.JobGenerate:
@@ -865,7 +869,7 @@ func executeWorkerJob(job jobs.Job, snapshot cluster.ResourceSnapshot, cacheDir 
 	}
 }
 
-func modelInstallProgressWriter(cacheDir string, nodeID string, job jobs.Job, startedAt time.Time) func(int64, int64) {
+func modelInstallProgressWriter(managerURL string, cacheDir string, nodeID string, job jobs.Job, startedAt time.Time) func(int64, int64) {
 	if strings.TrimSpace(cacheDir) == "" || strings.TrimSpace(nodeID) == "" || startedAt.IsZero() {
 		return nil
 	}
@@ -883,7 +887,7 @@ func modelInstallProgressWriter(cacheDir string, nodeID string, job jobs.Job, st
 				percent = 100
 			}
 		}
-		if err := workerstatus.Write(cacheDir, workerstatus.JobStatus{
+		status := workerstatus.JobStatus{
 			State:           "running",
 			NodeID:          nodeID,
 			JobID:           job.ID,
@@ -894,9 +898,35 @@ func modelInstallProgressWriter(cacheDir string, nodeID string, job jobs.Job, st
 			ProgressPercent: percent,
 			ProgressLabel:   "Downloading model",
 			StartedAt:       &startedAt,
-		}); err != nil {
+		}
+		if err := workerstatus.Write(cacheDir, status); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to write model install progress: %v\n", err)
 		}
+		if strings.TrimSpace(managerURL) != "" {
+			postJobProgress(managerURL, job.ID, jobs.ProgressRequest{
+				NodeID:          nodeID,
+				ProgressBytes:   written,
+				TotalBytes:      total,
+				ProgressPercent: percent,
+				ProgressLabel:   status.ProgressLabel,
+			})
+		}
+	}
+}
+
+func postJobProgress(managerURL string, jobID string, req jobs.ProgressRequest) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return
+	}
+	resp, err := http.Post(strings.TrimRight(managerURL, "/")+"/v1/jobs/"+jobID+"/progress", "application/json", bytes.NewReader(body))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to post job progress: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "manager rejected job progress: %s\n", resp.Status)
 	}
 }
 
@@ -910,6 +940,16 @@ func validateWorkerCanRunJob(job jobs.Job, snapshot cluster.ResourceSnapshot) er
 	}
 	if req.DiskBytes > 0 && snapshot.Storage.AllowedBytes > 0 && snapshot.Storage.AllowedBytes < req.DiskBytes {
 		return fmt.Errorf("worker resource guard rejected job: requires %.1f GB disk, worker allows %.1f GB", bytesToGB(req.DiskBytes), bytesToGB(snapshot.Storage.AllowedBytes))
+	}
+	if job.Type == models.JobInstall && req.DiskBytes > 0 && snapshot.Storage.AllowedBytes > 0 && snapshot.Storage.UsedByModelsBytes > 0 && snapshot.Storage.UsedByModelsBytes+req.DiskBytes > snapshot.Storage.AllowedBytes {
+		remaining := uint64(0)
+		if snapshot.Storage.AllowedBytes > snapshot.Storage.UsedByModelsBytes {
+			remaining = snapshot.Storage.AllowedBytes - snapshot.Storage.UsedByModelsBytes
+		}
+		return fmt.Errorf("worker resource guard rejected job: requires %.1f GB model quota, worker has %.1f GB remaining model quota", bytesToGB(req.DiskBytes), bytesToGB(remaining))
+	}
+	if req.DiskBytes > 0 && snapshot.Storage.FreeBytes > 0 && snapshot.Storage.FreeBytes < req.DiskBytes {
+		return fmt.Errorf("worker resource guard rejected job: requires %.1f GB free disk, worker has %.1f GB", bytesToGB(req.DiskBytes), bytesToGB(snapshot.Storage.FreeBytes))
 	}
 	if !req.GPURequired && req.VRAMBytes == 0 {
 		return nil
@@ -947,6 +987,31 @@ type modelDeleteResult struct {
 	WorkerRuntime string `json:"worker_runtime"`
 }
 
+type modelRepairResult struct {
+	Kind             string `json:"kind"`
+	ModelID          string `json:"model_id"`
+	ModelName        string `json:"model_name"`
+	Path             string `json:"path"`
+	Bytes            int64  `json:"bytes"`
+	Runtime          string `json:"runtime"`
+	WorkerRuntime    string `json:"worker_runtime"`
+	ManifestRepaired bool   `json:"manifest_repaired"`
+	TempCleaned      bool   `json:"temp_cleaned"`
+	Reinstalled      bool   `json:"reinstalled"`
+}
+
+type modelCleanupResult struct {
+	Kind                  string `json:"kind"`
+	WorkerRuntime         string `json:"worker_runtime"`
+	PartialFilesRemoved   int    `json:"partial_files_removed"`
+	PartialBytesRemoved   int64  `json:"partial_bytes_removed"`
+	OrphanDirsRemoved     int    `json:"orphan_dirs_removed"`
+	OrphanBytesRemoved    int64  `json:"orphan_bytes_removed"`
+	StaleManifestsRemoved int    `json:"stale_manifests_removed"`
+	EmptyModelDirsRemoved int    `json:"empty_model_dirs_removed"`
+	TotalBytesRemoved     int64  `json:"total_bytes_removed"`
+}
+
 type modelGenerateResult struct {
 	Kind           string `json:"kind"`
 	ModelID        string `json:"model_id"`
@@ -968,6 +1033,9 @@ func executeModelInstallJob(input string, cacheDir string, progress func(int64, 
 	}
 	path := modelPath(cacheDir, model)
 	if stat, err := os.Stat(path); err == nil && stat.Size() > 0 {
+		if err := resources.WriteModelManifest(cacheDir, model, path, uint64(stat.Size()), stat.ModTime()); err != nil {
+			return "", fmt.Errorf("failed to write model manifest: %w", err)
+		}
 		return marshalModelInstallResult(model, path, stat.Size())
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -1017,10 +1085,215 @@ func executeModelInstallJob(input string, cacheDir string, progress func(int64, 
 		_ = os.Remove(tmp)
 		return "", err
 	}
+	if err := resources.WriteModelManifest(cacheDir, model, path, uint64(bytesWritten), time.Now().UTC()); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("failed to write model manifest: %w", err)
+	}
 	if progress != nil {
 		progress(bytesWritten, totalBytes)
 	}
 	return marshalModelInstallResult(model, path, bytesWritten)
+}
+
+func executeModelRepairJob(input string, cacheDir string, progress func(int64, int64)) (string, error) {
+	var req models.RepairInput
+	if err := json.Unmarshal([]byte(input), &req); err != nil {
+		return "", fmt.Errorf("invalid model repair input: %w", err)
+	}
+	model, err := models.MustFind(req.ModelID)
+	if err != nil {
+		return "", err
+	}
+	path := modelPath(cacheDir, model)
+	tmp := path + ".tmp"
+	tempCleaned := false
+	if _, err := os.Stat(tmp); err == nil {
+		if removeErr := os.Remove(tmp); removeErr != nil {
+			return "", fmt.Errorf("failed to remove partial model download: %w", removeErr)
+		}
+		tempCleaned = true
+	}
+	if stat, err := os.Stat(path); err == nil && !stat.IsDir() && stat.Size() > 0 {
+		if err := resources.WriteModelManifest(cacheDir, model, path, uint64(stat.Size()), stat.ModTime()); err != nil {
+			return "", fmt.Errorf("failed to repair model manifest: %w", err)
+		}
+		result := modelRepairResult{
+			Kind:             string(models.JobRepair),
+			ModelID:          model.ID,
+			ModelName:        model.Name,
+			Path:             path,
+			Bytes:            stat.Size(),
+			Runtime:          string(model.Runtime),
+			WorkerRuntime:    runtime.GOOS + "/" + runtime.GOARCH,
+			ManifestRepaired: true,
+			TempCleaned:      tempCleaned,
+		}
+		body, err := json.Marshal(result)
+		return string(body), err
+	}
+	installInput, err := json.Marshal(models.InstallInput{ModelID: model.ID})
+	if err != nil {
+		return "", err
+	}
+	installResult, err := executeModelInstallJob(string(installInput), cacheDir, progress)
+	if err != nil {
+		return "", err
+	}
+	var installed modelInstallResult
+	if err := json.Unmarshal([]byte(installResult), &installed); err != nil {
+		return "", err
+	}
+	result := modelRepairResult{
+		Kind:             string(models.JobRepair),
+		ModelID:          model.ID,
+		ModelName:        model.Name,
+		Path:             installed.Path,
+		Bytes:            installed.Bytes,
+		Runtime:          installed.Runtime,
+		WorkerRuntime:    installed.WorkerRuntime,
+		ManifestRepaired: true,
+		TempCleaned:      tempCleaned,
+		Reinstalled:      true,
+	}
+	body, err := json.Marshal(result)
+	return string(body), err
+}
+
+func executeModelCleanupJob(input string, cacheDir string) (string, error) {
+	var req models.CleanupInput
+	if strings.TrimSpace(input) != "" {
+		if err := json.Unmarshal([]byte(input), &req); err != nil {
+			return "", fmt.Errorf("invalid model cleanup input: %w", err)
+		}
+	}
+	if strings.TrimSpace(req.Scope) == "" {
+		req.Scope = "cache"
+	}
+	if req.Scope != "cache" {
+		return "", fmt.Errorf("unsupported model cleanup scope %q", req.Scope)
+	}
+	modelsDir := filepath.Join(cacheDir, "models")
+	result := modelCleanupResult{
+		Kind:          string(models.JobCleanup),
+		WorkerRuntime: runtime.GOOS + "/" + runtime.GOARCH,
+	}
+	partialFiles, partialBytes, err := removePartialModelDownloads(modelsDir)
+	if err != nil {
+		return "", err
+	}
+	result.PartialFilesRemoved = partialFiles
+	result.PartialBytesRemoved = partialBytes
+	orphanDirs, orphanBytes, err := removeOrphanModelDirs(modelsDir)
+	if err != nil {
+		return "", err
+	}
+	result.OrphanDirsRemoved = orphanDirs
+	result.OrphanBytesRemoved = orphanBytes
+	staleManifests, emptyDirs, err := removeStaleModelManifestsAndEmptyDirs(cacheDir)
+	if err != nil {
+		return "", err
+	}
+	result.StaleManifestsRemoved = staleManifests
+	result.EmptyModelDirsRemoved = emptyDirs
+	result.TotalBytesRemoved = result.PartialBytesRemoved + result.OrphanBytesRemoved
+	body, err := json.Marshal(result)
+	return string(body), err
+}
+
+func removePartialModelDownloads(modelsDir string) (int, int64, error) {
+	removed := 0
+	var bytesRemoved int64
+	err := filepath.WalkDir(modelsDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tmp") {
+			return err
+		}
+		info, statErr := entry.Info()
+		if statErr == nil && info.Size() > 0 {
+			bytesRemoved += info.Size()
+		}
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return removeErr
+		}
+		removed++
+		return nil
+	})
+	if os.IsNotExist(err) {
+		return 0, 0, nil
+	}
+	return removed, bytesRemoved, err
+}
+
+func removeOrphanModelDirs(modelsDir string) (int, int64, error) {
+	entries, err := os.ReadDir(modelsDir)
+	if os.IsNotExist(err) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	catalogIDs := map[string]bool{}
+	for _, model := range models.Catalog() {
+		catalogIDs[model.ID] = true
+	}
+	removed := 0
+	var bytesRemoved int64
+	for _, entry := range entries {
+		if !entry.IsDir() || catalogIDs[entry.Name()] {
+			continue
+		}
+		path := filepath.Join(modelsDir, entry.Name())
+		size, err := directorySize(path)
+		if err != nil {
+			return removed, bytesRemoved, err
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return removed, bytesRemoved, err
+		}
+		bytesRemoved += size
+		removed++
+	}
+	return removed, bytesRemoved, nil
+}
+
+func removeStaleModelManifestsAndEmptyDirs(cacheDir string) (int, int, error) {
+	staleManifests := 0
+	emptyDirs := 0
+	for _, model := range models.Catalog() {
+		modelFile := modelPath(cacheDir, model)
+		modelDir := filepath.Dir(modelFile)
+		if stat, err := os.Stat(modelFile); err == nil && !stat.IsDir() && stat.Size() > 0 {
+			continue
+		}
+		manifest := resources.ModelManifestPath(cacheDir, model.ID)
+		if err := os.Remove(manifest); err == nil {
+			staleManifests++
+		} else if err != nil && !os.IsNotExist(err) {
+			return staleManifests, emptyDirs, err
+		}
+		if removed, err := removeDirIfEmpty(modelDir); err != nil {
+			return staleManifests, emptyDirs, err
+		} else if removed {
+			emptyDirs++
+		}
+	}
+	return staleManifests, emptyDirs, nil
+}
+
+func removeDirIfEmpty(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if len(entries) != 0 {
+		return false, nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	return true, nil
 }
 
 type progressReader struct {
@@ -1129,11 +1402,14 @@ func executeModelGenerateJob(input string, cacheDir string) (string, error) {
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 || maxTokens > 2048 {
-		maxTokens = 256
+		maxTokens = models.QualityPresetFor(model).MaxTokens
+		if maxTokens <= 0 || maxTokens > 2048 {
+			maxTokens = 512
+		}
 	}
 	temperature := strings.TrimSpace(req.Temperature)
 	if temperature == "" {
-		temperature = "0.7"
+		temperature = models.QualityPresetFor(model).Temperature
 	}
 	timeout := modelGenerateTimeout(maxTokens)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -1232,21 +1508,11 @@ func modelContextSize(model models.Model) int {
 			return value
 		}
 	}
-	if model.Context > 0 && model.Context < 2048 {
-		return model.Context
-	}
-	return 2048
+	return modelAdapterFor(model).ContextSize(model)
 }
 
 func modelSystemPrompt(model models.Model) string {
-	base := "You are CMesh's local AI assistant. Continue the conversation using the provided history. Answer the latest user message directly. If the user shared personal details earlier in this conversation, remember and use them. Do not print role names, chat template tokens, or hidden reasoning."
-	if strings.Contains(strings.ToLower(model.ID), "deepseek") {
-		return base + " Return only the final answer unless the user explicitly asks for reasoning."
-	}
-	if strings.EqualFold(model.Family, "Qwen") {
-		return base + " Prefer concise, natural answers."
-	}
-	return base
+	return modelAdapterFor(model).SystemPrompt(model)
 }
 
 func modelPrompt(model models.Model, req models.GenerateInput) string {
@@ -1259,19 +1525,113 @@ func modelPrompt(model models.Model, req models.GenerateInput) string {
 		messages = []models.ChatMessage{{Role: "user", Content: strings.TrimSpace(req.Prompt)}}
 	}
 
+	return modelAdapterFor(model).Prompt(systemPrompt, messages)
+}
+
+type ModelAdapter struct {
+	Name               string
+	Prompt             func(systemPrompt string, messages []models.ChatMessage) string
+	SystemPromptSuffix string
+	StopSequences      []string
+	ContextFloor       int
+}
+
+func (a ModelAdapter) SystemPrompt(model models.Model) string {
+	if preset := strings.TrimSpace(models.QualityPresetFor(model).SystemPrompt); preset != "" {
+		return preset
+	}
+	base := "You are CMesh's local AI assistant. Continue the conversation using the provided history. Answer the latest user message directly. If the user shared personal details earlier in this conversation, remember and use them. Do not print role names, chat template tokens, or hidden reasoning."
+	suffix := strings.TrimSpace(a.SystemPromptSuffix)
+	if suffix == "" {
+		return base
+	}
+	return base + " " + suffix
+}
+
+func (a ModelAdapter) ContextSize(model models.Model) int {
+	floor := a.ContextFloor
+	if floor <= 0 {
+		floor = 4096
+	}
+	if model.Context > 0 && model.Context < floor {
+		return model.Context
+	}
+	return floor
+}
+
+func modelAdapterFor(model models.Model) ModelAdapter {
 	id := strings.ToLower(model.ID)
 	family := strings.ToLower(model.Family)
-	switch {
-	case strings.Contains(id, "deepseek") || family == "qwen":
-		return qwenChatPrompt(systemPrompt, messages)
-	case family == "gemma":
-		return gemmaChatPrompt(systemPrompt, messages)
-	case family == "mistral":
-		return mistralChatPrompt(systemPrompt, messages)
-	case family == "phi":
-		return phiChatPrompt(systemPrompt, messages)
+	if strings.Contains(id, "deepseek") {
+		return deepSeekQwenAdapter()
+	}
+	switch family {
+	case "qwen":
+		return qwenAdapter()
+	case "gemma":
+		return gemmaAdapter()
+	case "mistral":
+		return mistralAdapter()
+	case "phi":
+		return phiAdapter()
 	default:
-		return llamaChatPrompt(systemPrompt, messages)
+		return llamaAdapter()
+	}
+}
+
+func qwenAdapter() ModelAdapter {
+	return ModelAdapter{
+		Name:               "qwen",
+		Prompt:             qwenChatPrompt,
+		SystemPromptSuffix: "Prefer concise, natural answers.",
+		StopSequences:      []string{"<|im_end|>", "<|im_start|>user", "<|im_start|>system"},
+		ContextFloor:       4096,
+	}
+}
+
+func deepSeekQwenAdapter() ModelAdapter {
+	adapter := qwenAdapter()
+	adapter.Name = "deepseek-qwen"
+	adapter.SystemPromptSuffix = "Return only the final answer unless the user explicitly asks for reasoning."
+	return adapter
+}
+
+func gemmaAdapter() ModelAdapter {
+	return ModelAdapter{
+		Name:               "gemma",
+		Prompt:             gemmaChatPrompt,
+		SystemPromptSuffix: "Keep answers clear and conversational.",
+		StopSequences:      []string{"<end_of_turn>", "<start_of_turn>user"},
+		ContextFloor:       4096,
+	}
+}
+
+func mistralAdapter() ModelAdapter {
+	return ModelAdapter{
+		Name:               "mistral",
+		Prompt:             mistralChatPrompt,
+		SystemPromptSuffix: "Be practical and concise.",
+		StopSequences:      []string{"</s>", "[INST]"},
+		ContextFloor:       4096,
+	}
+}
+
+func phiAdapter() ModelAdapter {
+	return ModelAdapter{
+		Name:               "phi",
+		Prompt:             phiChatPrompt,
+		SystemPromptSuffix: "Keep answers short unless more detail is needed.",
+		StopSequences:      []string{"<|end|>", "<|user|>"},
+		ContextFloor:       4096,
+	}
+}
+
+func llamaAdapter() ModelAdapter {
+	return ModelAdapter{
+		Name:          "llama",
+		Prompt:        llamaChatPrompt,
+		StopSequences: []string{"</s>", "User:"},
+		ContextFloor:  4096,
 	}
 }
 
@@ -1432,15 +1792,9 @@ func llamaChatPrompt(systemPrompt string, messages []models.ChatMessage) string 
 }
 
 func modelStopSequences(model models.Model) []string {
-	stops := []string{
-		"<|im_end|>",
-		"<|im_start|>user",
-		"<|end|>",
-		"<end_of_turn>",
-		"<start_of_turn>user",
-		"<|user|>",
-		"</s>",
-		"User:",
+	stops := modelAdapterFor(model).StopSequences
+	if len(stops) == 0 {
+		return llamaAdapter().StopSequences
 	}
 	return stops
 }
@@ -1580,10 +1934,15 @@ func removeReasoningText(text string) string {
 
 func removeChatTemplateTokens(text string) string {
 	replacer := strings.NewReplacer(
+		"<|im_start|>system", "",
+		"<|im_start|>user", "",
+		"<|im_start|>assistant", "",
 		"<|im_start|>", "",
 		"<|im_end|>", "",
 		"</|im_start|>", "",
 		"</|im_end|>", "",
+		"<start_of_turn>user", "",
+		"<start_of_turn>model", "",
 		"<start_of_turn>", "",
 		"<end_of_turn>", "",
 		"<|system|>", "",
@@ -1607,7 +1966,7 @@ func modelPath(cacheDir string, model models.Model) string {
 	if strings.TrimSpace(cacheDir) == "" {
 		cacheDir = defaultCacheDir()
 	}
-	return filepath.Join(cacheDir, "models", model.ID, model.File)
+	return resources.ModelFilePath(cacheDir, model)
 }
 
 type matrixMultiplyInput struct {

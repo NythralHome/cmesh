@@ -18,6 +18,7 @@ type Store interface {
 	Jobs() []jobs.Job
 	Job(id string) (jobs.Job, bool)
 	NextJobForWorker(nodeID string) (jobs.Job, bool)
+	UpdateJobProgress(jobID string, req jobs.ProgressRequest) (jobs.Job, bool)
 	CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, bool)
 	CancelJob(jobID string) (jobs.Job, bool)
 	Nodes() []cluster.Node

@@ -27,5 +27,21 @@ func TestCatalogEntriesAreValid(t *testing.T) {
 		if model.DiskBytes == 0 || model.MemoryBytes == 0 {
 			t.Fatalf("model %q must declare disk and memory requirements", model.ID)
 		}
+		preset := QualityPresetFor(model)
+		if preset.Temperature == "" || preset.MaxTokens <= 0 || preset.SystemPrompt == "" {
+			t.Fatalf("model %q has invalid quality preset: %#v", model.ID, preset)
+		}
+	}
+}
+
+func TestQualityPresetSpecializesCoderAndDeepSeek(t *testing.T) {
+	coder := QualityPresetFor(Model{ID: "qwen2.5-coder-7b-instruct-q4-k-m", Family: "Qwen"})
+	if coder.Temperature != "0.2" || !strings.Contains(coder.SystemPrompt, "precise code") {
+		t.Fatalf("expected coder preset, got %#v", coder)
+	}
+
+	deepseek := QualityPresetFor(Model{ID: "deepseek-r1-distill-qwen-32b-q4-k-m", Family: "Qwen"})
+	if deepseek.Temperature != "0.3" || !strings.Contains(deepseek.SystemPrompt, "final answer") {
+		t.Fatalf("expected deepseek preset, got %#v", deepseek)
 	}
 }

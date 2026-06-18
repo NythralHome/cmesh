@@ -409,6 +409,19 @@ RETURNING id, type, status, requested_by, assigned_to, input, requirements, resu
 	return updated, ok
 }
 
+func (s *PostgresStore) UpdateJobProgress(jobID string, req jobs.ProgressRequest) (jobs.Job, bool) {
+	now := time.Now().UTC()
+	result := jobProgressResult(req, now)
+	row := s.pool.QueryRow(context.Background(), `
+UPDATE jobs
+SET result = $4,
+    updated_at = $5
+WHERE id = $1 AND assigned_to = $2 AND status = $3
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at
+`, jobID, req.NodeID, string(jobs.StatusRunning), result, now)
+	return scanJob(row)
+}
+
 func (s *PostgresStore) CancelJob(jobID string) (jobs.Job, bool) {
 	now := time.Now().UTC()
 	row := s.pool.QueryRow(context.Background(), `
@@ -491,6 +504,13 @@ func (s *PostgresStore) ClusterSummary() ClusterSummary {
 			summary.Resources.Storage.TotalBytes += node.Resources.Storage.TotalBytes
 			summary.Resources.Storage.AllowedBytes += node.Resources.Storage.AllowedBytes
 			summary.Resources.Storage.FreeBytes += node.Resources.Storage.FreeBytes
+			summary.Resources.Storage.UsedByModelsBytes += node.Resources.Storage.UsedByModelsBytes
+			summary.Resources.Storage.UsedByRuntimesBytes += node.Resources.Storage.UsedByRuntimesBytes
+			summary.Resources.Storage.UsedByCacheBytes += node.Resources.Storage.UsedByCacheBytes
+			summary.Resources.Storage.PartialModelBytes += node.Resources.Storage.PartialModelBytes
+			summary.Resources.Storage.PartialModelFiles += node.Resources.Storage.PartialModelFiles
+			summary.Resources.Storage.OrphanModelBytes += node.Resources.Storage.OrphanModelBytes
+			summary.Resources.Storage.OrphanModelDirs += node.Resources.Storage.OrphanModelDirs
 			summary.GPUs += len(node.Resources.GPU)
 			for _, gpu := range node.Resources.GPU {
 				summary.VRAMTotalBytes += gpu.TotalVRAMBytes

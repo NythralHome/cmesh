@@ -96,6 +96,76 @@ func TestWorkerJoinAndClusterSummary(t *testing.T) {
 	}
 }
 
+func TestDashboardStatusEndpointReturnsSidebarCounters(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 4, CoresAllowed: 2},
+		Memory:  cluster.MemoryResources{TotalBytes: 8 * gb, AllowedBytes: 4 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 20 * gb, AllowedBytes: 10 * gb},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/status", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["workers_online"] != float64(1) || payload["workers_total"] != float64(1) {
+		t.Fatalf("expected worker counters, got %#v", payload)
+	}
+	if payload["readiness_status"] == "" || payload["jobs_total"] == nil || payload["ready_models"] == nil {
+		t.Fatalf("expected sidebar status fields, got %#v", payload)
+	}
+}
+
+func TestDashboardModelCatalogControls(t *testing.T) {
+	srv := NewServer(":0", NewState())
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`id="model-catalog-search"`,
+		`id="model-catalog-status"`,
+		`id="model-catalog-family"`,
+		`id="model-catalog-sort"`,
+		`id="model-catalog-capable"`,
+		`id="model-catalog-clear"`,
+		`id="model-catalog-empty"`,
+		`class="button model-detail"`,
+		`data-model-placement=`,
+		`data-placement-mode=`,
+		`Blocked`,
+		`id="model-detail-panel"`,
+		`class="model-detail-dialog" role="dialog" aria-modal="true"`,
+		`id="model-detail-placement"`,
+		`Placement plan`,
+		`id="model-detail-actions"`,
+		`model-detail-install`,
+		`modal-open`,
+		`/placement`,
+		`/v1/models/`,
+		`cmesh.modelCatalog.filters`,
+		`#models?`,
+		`applyModelCatalogFiltersFromHash`,
+		`No models match these filters`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected dashboard model catalog to contain %q", want)
+		}
+	}
+}
+
 func TestWorkerJoinRequiresTokenWhenConfigured(t *testing.T) {
 	srv := NewServerWithOptions(ServerOptions{
 		Addr:      ":0",
@@ -468,6 +538,75 @@ func TestModelDeleteCleansModelPersistence(t *testing.T) {
 	}
 }
 
+func TestModelDeleteKeepsPersistenceWhenAnotherWorkerHasModel(t *testing.T) {
+	state := NewState()
+	state.nodes["node-a"] = cluster.Node{
+		ID:     "node-a",
+		Name:   "worker-a",
+		Role:   cluster.NodeRoleWorker,
+		Status: cluster.NodeStatusOnline,
+		Resources: cluster.ResourceSnapshot{
+			Models: []cluster.ModelResource{{ID: "qwen2.5-0.5b-instruct-q4-k-m", Name: "Qwen2.5 0.5B Instruct", Ready: true}},
+		},
+	}
+	state.nodes["node-b"] = cluster.Node{
+		ID:     "node-b",
+		Name:   "worker-b",
+		Role:   cluster.NodeRoleWorker,
+		Status: cluster.NodeStatusOnline,
+		Resources: cluster.ResourceSnapshot{
+			Models: []cluster.ModelResource{{ID: "qwen2.5-0.5b-instruct-q4-k-m", Name: "Qwen2.5 0.5B Instruct", Ready: true}},
+		},
+	}
+	state.AppendConversationMessage("conv-test", "qwen2.5-0.5b-instruct-q4-k-m", "node-a", "system", models.ChatMessage{
+		Role:    "user",
+		Content: "My name is Sergiy.",
+	})
+	if len(state.Memories("qwen2.5-0.5b-instruct-q4-k-m")) != 1 {
+		t.Fatal("expected memory before delete")
+	}
+
+	input, err := json.Marshal(models.DeleteInput{ModelID: "qwen2.5-0.5b-instruct-q4-k-m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobDelete,
+		Input:       string(input),
+		RequestedBy: "dashboard-models",
+		AssignedTo:  "node-a",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.jobs[job.ID] = jobs.Job{
+		ID:         job.ID,
+		Type:       job.Type,
+		Status:     jobs.StatusRunning,
+		Input:      job.Input,
+		AssignedTo: "node-a",
+	}
+
+	completed, ok := state.CompleteJob(job.ID, jobs.CompleteRequest{NodeID: "node-a", Result: `{"removed":true,"freed_bytes":1024}`})
+	if !ok {
+		t.Fatal("expected delete completion to succeed")
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(completed.Result), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["deleted_memories"] != float64(0) || result["deleted_conversations"] != float64(0) {
+		t.Fatalf("expected no persistence cleanup while another worker has model, got %#v", result)
+	}
+	if got := state.Memories("qwen2.5-0.5b-instruct-q4-k-m"); len(got) != 1 {
+		t.Fatalf("expected memory to remain, got %#v", got)
+	}
+	if _, ok := state.Conversation("conv-test"); !ok {
+		t.Fatal("expected model conversation to remain")
+	}
+}
+
 func TestJobDetailSummarizesModelDeleteCleanup(t *testing.T) {
 	job := jobs.Job{
 		Type:   models.JobDelete,
@@ -505,8 +644,9 @@ func TestConversationAPIListsAndReadsGeneratedChatContext(t *testing.T) {
 			FreeBytes:    128 * gb,
 		},
 		Models: []cluster.ModelResource{{
-			ID:   "qwen2.5-0.5b-instruct-q4-k-m",
-			Name: "Qwen2.5 0.5B Instruct",
+			ID:    "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:  "Qwen2.5 0.5B Instruct",
+			Ready: true,
 		}},
 		Runtimes: []cluster.RuntimeResource{{
 			Name:  "llama.cpp",
@@ -555,6 +695,85 @@ func TestConversationAPIListsAndReadsGeneratedChatContext(t *testing.T) {
 	}
 }
 
+func TestModelGenerateUsesQualityPresetDefaults(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 4, CoresAllowed: 2},
+		Memory:  cluster.MemoryResources{TotalBytes: 64 * gb, AllowedBytes: 48 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 256 * gb, AllowedBytes: 64 * gb, FreeBytes: 128 * gb},
+		Models: []cluster.ModelResource{{
+			ID:    "qwen2.5-coder-7b-instruct-q4-k-m",
+			Name:  "Qwen2.5 Coder 7B Instruct",
+			Ready: true,
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+		}},
+	})
+
+	body := bytes.NewReader([]byte(`{"node_id":"` + worker.NodeID + `","prompt":"write a test"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-coder-7b-instruct-q4-k-m/generate", body)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var job jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	var input models.GenerateInput
+	if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
+		t.Fatal(err)
+	}
+	preset := models.QualityPresetFor(models.Model{ID: "qwen2.5-coder-7b-instruct-q4-k-m", Family: "Qwen"})
+	if input.Temperature != preset.Temperature || input.MaxTokens != preset.MaxTokens {
+		t.Fatalf("expected preset generation settings, got %#v preset %#v", input, preset)
+	}
+	if !strings.Contains(input.SystemPrompt, "precise code") {
+		t.Fatalf("expected coder system prompt, got %q", input.SystemPrompt)
+	}
+}
+
+func TestMemoryPreviewIncludesBudgetedPromptContext(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	state.AppendConversationMessage("conv-debug", "qwen2.5-0.5b-instruct-q4-k-m", "node-test", "Base prompt.", models.ChatMessage{
+		Role:    "user",
+		Content: strings.Repeat("old ", 3000),
+	})
+	state.AppendConversationMessage("conv-debug", "qwen2.5-0.5b-instruct-q4-k-m", "node-test", "Base prompt.", models.ChatMessage{
+		Role:    "assistant",
+		Content: strings.Repeat("older ", 3000),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/memories/preview?model_id=qwen2.5-0.5b-instruct-q4-k-m&conversation_id=conv-debug&prompt=latest-question&max_tokens=2048", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Context PromptContextPreview `json:"context"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Context.ModelID != "qwen2.5-0.5b-instruct-q4-k-m" {
+		t.Fatalf("expected model id in context, got %#v", payload.Context)
+	}
+	if payload.Context.DroppedMessages == 0 {
+		t.Fatalf("expected old messages to be dropped, got %#v", payload.Context)
+	}
+	if len(payload.Context.IncludedMessages) == 0 || payload.Context.IncludedMessages[len(payload.Context.IncludedMessages)-1].Content != "latest-question" {
+		t.Fatalf("expected draft prompt to be included last, got %#v", payload.Context.IncludedMessages)
+	}
+}
+
 func TestModelGenerateRejectsWorkerWithoutReadyRuntime(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
@@ -563,8 +782,9 @@ func TestModelGenerateRejectsWorkerWithoutReadyRuntime(t *testing.T) {
 		Memory:  cluster.MemoryResources{TotalBytes: 64 * gb, AllowedBytes: 48 * gb},
 		Storage: cluster.StorageResources{TotalBytes: 256 * gb, AllowedBytes: 64 * gb, FreeBytes: 128 * gb},
 		Models: []cluster.ModelResource{{
-			ID:   "qwen2.5-0.5b-instruct-q4-k-m",
-			Name: "Qwen2.5 0.5B Instruct",
+			ID:    "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:  "Qwen2.5 0.5B Instruct",
+			Ready: true,
 		}},
 		Runtimes: []cluster.RuntimeResource{{
 			Name:  "llama.cpp",
@@ -582,6 +802,58 @@ func TestModelGenerateRejectsWorkerWithoutReadyRuntime(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "runtime is not ready") {
 		t.Fatalf("expected runtime error, got %s", rec.Body.String())
+	}
+}
+
+func TestModelGenerateRejectsConcurrentConversationJob(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 4, CoresAllowed: 2},
+		Memory:  cluster.MemoryResources{TotalBytes: 64 * gb, AllowedBytes: 48 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 256 * gb, AllowedBytes: 64 * gb, FreeBytes: 128 * gb},
+		Models: []cluster.ModelResource{{
+			ID:    "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:  "Qwen2.5 0.5B Instruct",
+			Ready: true,
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+		}},
+	})
+
+	input, err := json.Marshal(models.GenerateInput{
+		ModelID:        "qwen2.5-0.5b-instruct-q4-k-m",
+		ConversationID: "conv-active",
+		Prompt:         "first",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerate,
+		Input:       string(input),
+		RequestedBy: "dashboard-chat",
+		AssignedTo:  worker.NodeID,
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Status != jobs.StatusScheduled {
+		t.Fatalf("expected scheduled active job, got %#v", active)
+	}
+
+	body := bytes.NewReader([]byte(`{"node_id":"` + worker.NodeID + `","conversation_id":"conv-active","prompt":"second"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/generate", body)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "active generate job") {
+		t.Fatalf("expected active generate conflict, got %q", rec.Body.String())
 	}
 }
 
@@ -1667,9 +1939,14 @@ func TestDashboardShowsWorkerHealthAndRuntimeInventory(t *testing.T) {
 		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
 		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
 		Models: []cluster.ModelResource{{
-			ID:    "qwen2.5-0.5b-instruct-q4-k-m",
-			Name:  "Qwen2.5 0.5B Instruct",
-			Bytes: 512 * 1024 * 1024,
+			ID:          "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:        "Qwen2.5 0.5B Instruct",
+			Family:      "Qwen",
+			Runtime:     "llama.cpp",
+			Path:        "/tmp/cmesh/models/qwen/model.gguf",
+			Bytes:       512 * 1024 * 1024,
+			Ready:       true,
+			InstalledAt: time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC),
 		}},
 		Runtimes: []cluster.RuntimeResource{{
 			Name:    "llama.cpp",
@@ -1691,6 +1968,10 @@ func TestDashboardShowsWorkerHealthAndRuntimeInventory(t *testing.T) {
 		"heartbeat",
 		"llama.cpp ready b9672",
 		"total 512 MB",
+		"Model Inventory",
+		"model ready",
+		"runtime ready",
+		"/tmp/cmesh/models/qwen/model.gguf",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("expected dashboard to contain %q", expected)
@@ -1705,7 +1986,7 @@ func TestClusterReadinessReadyWhenRuntimeAndModelAreReady(t *testing.T) {
 		Role:   cluster.NodeRoleWorker,
 		Status: cluster.NodeStatusOnline,
 		Resources: cluster.ResourceSnapshot{
-			Models: []cluster.ModelResource{{ID: "qwen-test", Name: "Qwen Test"}},
+			Models: []cluster.ModelResource{{ID: "qwen-test", Name: "Qwen Test", Ready: true}},
 			Runtimes: []cluster.RuntimeResource{{
 				Name:  "llama.cpp",
 				Ready: true,
@@ -1735,12 +2016,161 @@ func TestDashboardShowsReadinessTab(t *testing.T) {
 	body := rec.Body.String()
 	for _, expected := range []string{
 		"Cluster Readiness",
+		"Cluster model capacity",
+		"Next unlock",
+		"Short by",
+		"Worker capacity contributors",
+		"Capacity snapshots",
+		`id="capacity-save-snapshot"`,
 		"No workers are online.",
 		"data-tab-target=\"readiness\"",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("expected dashboard to contain %q", expected)
 		}
+	}
+}
+
+func TestCapacityEndpointSummarizesModelCapacity(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "capacity-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 12, CoresAllowed: 8},
+		Memory:  cluster.MemoryResources{TotalBytes: 64 * gb, AllowedBytes: 48 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 256 * gb, AllowedBytes: 80 * gb, FreeBytes: 120 * gb},
+		GPU: []cluster.GPUResources{{
+			Name:             "test-gpu",
+			AllowedVRAMBytes: 16 * gb,
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/capacity", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Summary  ClusterSummary  `json:"summary"`
+		Capacity CapacitySummary `json:"capacity"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Capacity.WorkersOnline != 1 || payload.Capacity.AllowedCPUCores != 8 {
+		t.Fatalf("expected aggregate worker capacity, got %#v", payload.Capacity)
+	}
+	if payload.Capacity.AllowedMemoryBytes != 48*gb || payload.Capacity.AllowedStorageBytes != 80*gb || payload.Capacity.AllowedVRAMBytes != 16*gb {
+		t.Fatalf("expected aggregate resource bytes, got %#v", payload.Capacity)
+	}
+	if payload.Capacity.CatalogModels == 0 || payload.Capacity.SingleWorkerRunnableModels == 0 {
+		t.Fatalf("expected runnable catalog capacity, got %#v", payload.Capacity)
+	}
+	if payload.Capacity.LargestSingleWorkerModel.ID == "" {
+		t.Fatalf("expected largest runnable model, got %#v", payload.Capacity)
+	}
+	if len(payload.Capacity.Workers) != 1 {
+		t.Fatalf("expected one worker contribution, got %#v", payload.Capacity.Workers)
+	}
+	contributor := payload.Capacity.Workers[0]
+	if contributor.Name != "capacity-worker" || contributor.AllowedMemoryBytes != 48*gb || contributor.RunnableModels == 0 {
+		t.Fatalf("expected worker contributor details, got %#v", contributor)
+	}
+	if contributor.LargestRunnableModel.ID == "" || contributor.MemorySharePercent != 100 {
+		t.Fatalf("expected largest model and share metrics, got %#v", contributor)
+	}
+	if payload.Summary.WorkersOnline != 1 {
+		t.Fatalf("expected summary payload, got %#v", payload.Summary)
+	}
+}
+
+func TestCapacityEndpointReportsNextUnlockTargets(t *testing.T) {
+	srv := NewServer(":0", NewState())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/capacity", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Capacity CapacitySummary `json:"capacity"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Capacity.BlockedModels == 0 {
+		t.Fatalf("expected blocked catalog models without workers, got %#v", payload.Capacity)
+	}
+	if len(payload.Capacity.UnlockTargets) == 0 {
+		t.Fatalf("expected blocked model unlock targets, got %#v", payload.Capacity)
+	}
+	target := payload.Capacity.UnlockTargets[0]
+	if target.Model.ID == "" || target.MemoryShortBytes == 0 || target.DiskShortBytes == 0 {
+		t.Fatalf("expected unlock target model shortfall, got %#v", target)
+	}
+}
+
+func TestCapacitySnapshotsCompareClusterGrowth(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/capacity/snapshots", bytes.NewReader([]byte(`{"label":"before"}`)))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected snapshot status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Snapshot CapacitySnapshot `json:"snapshot"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Snapshot.ID == "" || created.Snapshot.Label != "before" {
+		t.Fatalf("expected named snapshot, got %#v", created.Snapshot)
+	}
+
+	joinWorkerWithResourcesForTest(t, srv, "growth-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 12, CoresAllowed: 8},
+		Memory:  cluster.MemoryResources{TotalBytes: 64 * gb, AllowedBytes: 48 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 256 * gb, AllowedBytes: 80 * gb, FreeBytes: 120 * gb},
+	})
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/capacity?baseline="+created.Snapshot.ID, nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected capacity compare status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var compared struct {
+		Capacity CapacitySummary  `json:"capacity"`
+		Baseline CapacitySnapshot `json:"baseline"`
+		Delta    CapacityDelta    `json:"delta"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &compared); err != nil {
+		t.Fatal(err)
+	}
+	if compared.Delta.BaselineID != created.Snapshot.ID {
+		t.Fatalf("expected baseline id in delta, got %#v", compared.Delta)
+	}
+	if compared.Delta.WorkersOnlineDelta != 1 || compared.Delta.AllowedMemoryBytesDelta != int64(48*gb) {
+		t.Fatalf("expected worker and RAM growth, got %#v", compared.Delta)
+	}
+	if compared.Delta.SingleWorkerRunnableDelta <= 0 || len(compared.Delta.NewSingleWorkerRunnableModels) == 0 {
+		t.Fatalf("expected newly runnable model growth, got %#v", compared.Delta)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/capacity/snapshots", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected snapshot list status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), created.Snapshot.ID) {
+		t.Fatalf("expected snapshot list to include created snapshot, got %s", rec.Body.String())
 	}
 }
 
@@ -1816,6 +2246,117 @@ func TestModelCatalogAndInstallJob(t *testing.T) {
 	}
 }
 
+func TestModelCatalogEndpointSupportsFiltersAndSort(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "catalog-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 12, CoresAllowed: 8},
+		Memory:  cluster.MemoryResources{TotalBytes: 64 * gb, AllowedBytes: 48 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 256 * gb, AllowedBytes: 80 * gb, FreeBytes: 120 * gb},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?q=qwen&family=qwen&capable=true&sort=ram-desc", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Models  []ModelSummary      `json:"models"`
+		Total   int                 `json:"total"`
+		Count   int                 `json:"count"`
+		Filters ModelCatalogFilters `json:"filters"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Total <= payload.Count || payload.Count == 0 {
+		t.Fatalf("expected filtered subset, got total=%d count=%d", payload.Total, payload.Count)
+	}
+	if payload.Filters.Query != "qwen" || payload.Filters.Family != "qwen" || !payload.Filters.CapableOnly || payload.Filters.Sort != "ram-desc" {
+		t.Fatalf("expected response filters to echo query, got %#v", payload.Filters)
+	}
+	for i, summary := range payload.Models {
+		if !strings.Contains(strings.ToLower(summary.Model.ID+" "+summary.Model.Name+" "+summary.Model.Family), "qwen") {
+			t.Fatalf("expected qwen model, got %#v", summary.Model)
+		}
+		if summary.CapableNodes == 0 {
+			t.Fatalf("expected capable model, got %#v", summary)
+		}
+		if i > 0 && payload.Models[i-1].Model.MemoryBytes < summary.Model.MemoryBytes {
+			t.Fatalf("expected RAM desc sort, got %s before %s", payload.Models[i-1].Model.ID, summary.Model.ID)
+		}
+	}
+}
+
+func TestModelDetailEndpoint(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "detail-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 16 * gb, FreeBytes: 80 * gb},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Model ModelSummary `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Model.Model.ID != "qwen2.5-0.5b-instruct-q4-k-m" {
+		t.Fatalf("expected qwen model detail, got %#v", payload.Model.Model)
+	}
+	if len(payload.Model.Capabilities) == 0 || payload.Model.CapableNodes == 0 {
+		t.Fatalf("expected model detail capabilities, got %#v", payload.Model)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected status 405, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestModelPlacementEndpoint(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "placement-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 16 * gb, FreeBytes: 80 * gb},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/placement", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Placement ModelPlacementPlan `json:"placement"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Placement.ModelID != "qwen2.5-0.5b-instruct-q4-k-m" {
+		t.Fatalf("expected placement model id, got %#v", payload.Placement)
+	}
+	if payload.Placement.Mode != "single_worker" || !payload.Placement.RunnableNow {
+		t.Fatalf("expected runnable single-worker placement, got %#v", payload.Placement)
+	}
+}
+
 func TestModelInstallExplainsNoEligibleWorker(t *testing.T) {
 	state := NewState()
 	srv := NewServer(":0", state)
@@ -1831,9 +2372,24 @@ func TestModelInstallExplainsNoEligibleWorker(t *testing.T) {
 	if installRec.Code != http.StatusConflict {
 		t.Fatalf("expected status 409, got %d: %s", installRec.Code, installRec.Body.String())
 	}
-	body := installRec.Body.String()
-	if !strings.Contains(body, "no eligible worker") || !strings.Contains(body, "RAM short") || !strings.Contains(body, "disk short") {
-		t.Fatalf("expected actionable eligibility explanation, got %q", body)
+	if got := installRec.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("expected JSON conflict response, got %q", got)
+	}
+	var conflict modelInstallConflictResponse
+	if err := json.Unmarshal(installRec.Body.Bytes(), &conflict); err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Error != "no eligible worker for model install" {
+		t.Fatalf("expected structured install error, got %#v", conflict)
+	}
+	if !strings.Contains(conflict.Reason, "RAM short") || !strings.Contains(conflict.Reason, "disk short") {
+		t.Fatalf("expected actionable eligibility explanation, got %#v", conflict)
+	}
+	if conflict.Placement.ModelID != "gemma-3-12b-it-q4-k-m" || conflict.Placement.Feasible {
+		t.Fatalf("expected blocked placement response, got %#v", conflict.Placement)
+	}
+	if len(conflict.Placement.Blockers) == 0 {
+		t.Fatalf("expected placement blockers, got %#v", conflict.Placement)
 	}
 }
 
@@ -1852,8 +2408,245 @@ func TestModelInstallRejectsWorkerWithLowFreeDisk(t *testing.T) {
 	if installRec.Code != http.StatusConflict {
 		t.Fatalf("expected status 409, got %d: %s", installRec.Code, installRec.Body.String())
 	}
-	if !strings.Contains(installRec.Body.String(), "free disk short") {
-		t.Fatalf("expected free disk explanation, got %q", installRec.Body.String())
+	var conflict modelInstallConflictResponse
+	if err := json.Unmarshal(installRec.Body.Bytes(), &conflict); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(conflict.Reason, "free disk short") {
+		t.Fatalf("expected free disk explanation, got %#v", conflict)
+	}
+}
+
+func TestModelInstallRejectsAlreadyInstalledWorker(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 16 * gb, FreeBytes: 16 * gb},
+		Models: []cluster.ModelResource{{
+			ID:    "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:  "Qwen2.5 0.5B Instruct",
+			Ready: true,
+		}},
+	})
+
+	installReq := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/install", bytes.NewReader([]byte(`{"node_id":"`+worker.NodeID+`"}`)))
+	installRec := httptest.NewRecorder()
+	srv.ServeHTTP(installRec, installReq)
+	if installRec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", installRec.Code, installRec.Body.String())
+	}
+	if !strings.Contains(installRec.Body.String(), "already installed") {
+		t.Fatalf("expected already installed explanation, got %q", installRec.Body.String())
+	}
+}
+
+func TestModelInstallRejectsActiveSameModelJobOnWorker(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU:      cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:   cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage:  cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 16 * gb, FreeBytes: 16 * gb},
+		JobSlots: 2,
+	})
+	active, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobInstall,
+		Input:       `{"model_id":"qwen2.5-0.5b-instruct-q4-k-m"}`,
+		RequestedBy: "dashboard-models",
+		AssignedTo:  worker.NodeID,
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Status != jobs.StatusScheduled {
+		t.Fatalf("expected scheduled active job, got %#v", active)
+	}
+
+	installReq := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/install", bytes.NewReader([]byte(`{"node_id":"`+worker.NodeID+`"}`)))
+	installRec := httptest.NewRecorder()
+	srv.ServeHTTP(installRec, installReq)
+	if installRec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", installRec.Code, installRec.Body.String())
+	}
+	if !strings.Contains(installRec.Body.String(), "model job already active") {
+		t.Fatalf("expected active model job explanation, got %q", installRec.Body.String())
+	}
+}
+
+func TestModelRepairCreatesJobForInstalledWorker(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 16 * gb, FreeBytes: 16 * gb},
+		Models: []cluster.ModelResource{{
+			ID:    "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:  "Qwen2.5 0.5B Instruct",
+			Ready: true,
+		}},
+	})
+
+	repairReq := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/repair", bytes.NewReader([]byte(`{"node_id":"`+worker.NodeID+`"}`)))
+	repairRec := httptest.NewRecorder()
+	srv.ServeHTTP(repairRec, repairReq)
+	if repairRec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", repairRec.Code, repairRec.Body.String())
+	}
+	var job jobs.Job
+	if err := json.Unmarshal(repairRec.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if job.Type != models.JobRepair || job.AssignedTo != worker.NodeID {
+		t.Fatalf("unexpected repair job: %#v", job)
+	}
+	if !strings.Contains(job.Input, "qwen2.5-0.5b-instruct-q4-k-m") {
+		t.Fatalf("expected repair input to include model id, got %q", job.Input)
+	}
+}
+
+func TestJobProgressEndpointUpdatesRunningJob(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{})
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobInstall,
+		Input:       `{"model_id":"qwen2.5-0.5b-instruct-q4-k-m"}`,
+		RequestedBy: "test",
+		AssignedTo:  worker.NodeID,
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.NextJobForWorker(worker.NodeID); !ok {
+		t.Fatal("expected job to start")
+	}
+
+	progressReq := httptest.NewRequest(http.MethodPost, "/v1/jobs/"+job.ID+"/progress", bytes.NewReader([]byte(`{"node_id":"`+worker.NodeID+`","progress_bytes":1073741824,"total_bytes":2147483648,"progress_percent":50,"progress_label":"Downloading model"}`)))
+	progressRec := httptest.NewRecorder()
+	srv.ServeHTTP(progressRec, progressReq)
+	if progressRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", progressRec.Code, progressRec.Body.String())
+	}
+	updated, ok := state.Job(job.ID)
+	if !ok {
+		t.Fatal("expected job")
+	}
+	if !strings.Contains(jobDetail(updated), "Downloading model 50.0%") {
+		t.Fatalf("expected progress detail, got %q", jobDetail(updated))
+	}
+}
+
+func TestJobDetailSummarizesProgress(t *testing.T) {
+	job := jobs.Job{
+		Type:   models.JobInstall,
+		Status: jobs.StatusRunning,
+		Result: `{"kind":"job.progress","progress_bytes":1073741824,"total_bytes":2147483648,"progress_percent":50,"progress_label":"Downloading model"}`,
+	}
+	got := jobDetail(job)
+	if !strings.Contains(got, "Downloading model 50.0%") || !strings.Contains(got, "1.0 / 2.0 GB") {
+		t.Fatalf("expected progress detail, got %q", got)
+	}
+}
+
+func TestWorkerModelCleanupCreatesJob(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU: cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Storage: cluster.StorageResources{
+			PartialModelFiles: 1,
+			PartialModelBytes: 1024,
+			OrphanModelDirs:   1,
+			OrphanModelBytes:  2048,
+		},
+	})
+
+	cleanupReq := httptest.NewRequest(http.MethodPost, "/v1/workers/"+worker.NodeID+"/model-cleanup", bytes.NewReader([]byte(`{}`)))
+	cleanupRec := httptest.NewRecorder()
+	srv.ServeHTTP(cleanupRec, cleanupReq)
+	if cleanupRec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", cleanupRec.Code, cleanupRec.Body.String())
+	}
+	var job jobs.Job
+	if err := json.Unmarshal(cleanupRec.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if job.Type != models.JobCleanup || job.AssignedTo != worker.NodeID {
+		t.Fatalf("unexpected cleanup job: %#v", job)
+	}
+	if !strings.Contains(job.Input, "cache") {
+		t.Fatalf("expected cleanup scope in input, got %q", job.Input)
+	}
+}
+
+func TestModelDeleteRejectsMissingInstallOnWorker(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 16 * gb, FreeBytes: 16 * gb},
+	})
+
+	deleteReq := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/delete", bytes.NewReader([]byte(`{"node_id":"`+worker.NodeID+`"}`)))
+	deleteRec := httptest.NewRecorder()
+	srv.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if !strings.Contains(deleteRec.Body.String(), "not installed") {
+		t.Fatalf("expected not installed explanation, got %q", deleteRec.Body.String())
+	}
+}
+
+func TestModelDeleteRejectsActiveModelJobOnWorker(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 16 * gb, FreeBytes: 16 * gb},
+		Models: []cluster.ModelResource{{
+			ID:    "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:  "Qwen2.5 0.5B Instruct",
+			Ready: true,
+		}},
+	})
+	input, err := json.Marshal(models.GenerateInput{
+		ModelID:        "qwen2.5-0.5b-instruct-q4-k-m",
+		ConversationID: "conv-active",
+		Prompt:         "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := state.CreateJob(jobs.CreateRequest{
+		Type:        models.JobGenerate,
+		Input:       string(input),
+		RequestedBy: "dashboard-chat",
+		AssignedTo:  worker.NodeID,
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Status != jobs.StatusScheduled {
+		t.Fatalf("expected scheduled active job, got %#v", active)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/delete", bytes.NewReader([]byte(`{"node_id":"`+worker.NodeID+`"}`)))
+	deleteRec := httptest.NewRecorder()
+	srv.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if !strings.Contains(deleteRec.Body.String(), "active job") {
+		t.Fatalf("expected active job explanation, got %q", deleteRec.Body.String())
 	}
 }
 

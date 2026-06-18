@@ -7,6 +7,7 @@ import (
 
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
+	"github.com/cmesh/cmesh/internal/models"
 )
 
 const gb = 1024 * 1024 * 1024
@@ -113,6 +114,27 @@ func TestWorkerResourceGuardRejectsInsufficientMemory(t *testing.T) {
 		t.Fatal("expected memory guard error")
 	}
 	if !strings.Contains(err.Error(), "requires 4.0 GB RAM") {
+		t.Fatalf("unexpected error %q", err.Error())
+	}
+}
+
+func TestWorkerResourceGuardRejectsModelInstallOverQuota(t *testing.T) {
+	_, err := executeJobWithResources(jobs.Job{
+		Type: models.JobInstall,
+		Requirements: jobs.Requirements{
+			DiskBytes: 4 * gb,
+		},
+	}, cluster.ResourceSnapshot{
+		Storage: cluster.StorageResources{
+			AllowedBytes:      8 * gb,
+			UsedByModelsBytes: 6 * gb,
+			FreeBytes:         20 * gb,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected model quota guard error")
+	}
+	if !strings.Contains(err.Error(), "remaining model quota") {
 		t.Fatalf("unexpected error %q", err.Error())
 	}
 }

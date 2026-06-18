@@ -49,6 +49,14 @@ type CompleteRequest struct {
 	Error  string `json:"error"`
 }
 
+type ProgressRequest struct {
+	NodeID          string  `json:"node_id"`
+	ProgressBytes   int64   `json:"progress_bytes,omitempty"`
+	TotalBytes      int64   `json:"total_bytes,omitempty"`
+	ProgressPercent float64 `json:"progress_percent,omitempty"`
+	ProgressLabel   string  `json:"progress_label,omitempty"`
+}
+
 type Requirements struct {
 	CPUCores    int    `json:"cpu_cores,omitempty"`
 	MemoryBytes uint64 `json:"memory_bytes,omitempty"`

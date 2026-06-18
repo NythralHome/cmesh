@@ -1,11 +1,16 @@
 package models
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 const (
 	JobInstall  = "model.install"
 	JobDelete   = "model.delete"
 	JobGenerate = "model.generate"
+	JobRepair   = "model.repair"
+	JobCleanup  = "model.cleanup"
 )
 
 type Runtime string
@@ -30,6 +35,12 @@ type Model struct {
 	Description string  `json:"description"`
 }
 
+type QualityPreset struct {
+	Temperature  string `json:"temperature"`
+	MaxTokens    int    `json:"max_tokens"`
+	SystemPrompt string `json:"system_prompt"`
+}
+
 type InstallInput struct {
 	ModelID  string `json:"model_id"`
 	CacheDir string `json:"cache_dir,omitempty"`
@@ -38,6 +49,15 @@ type InstallInput struct {
 type DeleteInput struct {
 	ModelID  string `json:"model_id"`
 	CacheDir string `json:"cache_dir,omitempty"`
+}
+
+type RepairInput struct {
+	ModelID  string `json:"model_id"`
+	CacheDir string `json:"cache_dir,omitempty"`
+}
+
+type CleanupInput struct {
+	Scope string `json:"scope,omitempty"`
 }
 
 type GenerateInput struct {
@@ -54,6 +74,51 @@ type GenerateInput struct {
 type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+func QualityPresetFor(model Model) QualityPreset {
+	base := "You are CMesh's local AI assistant. Continue the conversation using the provided history. Answer the latest user message directly. If the user shared personal details earlier in this conversation, remember and use them. Do not print role names, chat template tokens, or hidden reasoning."
+	id := strings.ToLower(model.ID)
+	family := strings.ToLower(model.Family)
+	preset := QualityPreset{
+		Temperature:  "0.6",
+		MaxTokens:    512,
+		SystemPrompt: base,
+	}
+	if strings.Contains(id, "deepseek") {
+		preset.Temperature = "0.3"
+		preset.MaxTokens = 768
+		preset.SystemPrompt += " Return only the final answer unless the user explicitly asks for reasoning."
+		return preset
+	}
+	if strings.Contains(id, "coder") {
+		preset.Temperature = "0.2"
+		preset.MaxTokens = 768
+		preset.SystemPrompt += " Prefer precise code, commands, and short explanations."
+		return preset
+	}
+	switch family {
+	case "qwen":
+		preset.Temperature = "0.5"
+		preset.MaxTokens = 768
+		preset.SystemPrompt += " Prefer concise, natural answers."
+	case "gemma":
+		preset.Temperature = "0.7"
+		preset.MaxTokens = 512
+		preset.SystemPrompt += " Keep answers clear and conversational."
+	case "mistral":
+		preset.Temperature = "0.4"
+		preset.MaxTokens = 768
+		preset.SystemPrompt += " Be practical and concise."
+	case "phi":
+		preset.Temperature = "0.3"
+		preset.MaxTokens = 512
+		preset.SystemPrompt += " Keep answers short unless more detail is needed."
+	case "llama":
+		preset.Temperature = "0.6"
+		preset.MaxTokens = 512
+	}
+	return preset
 }
 
 const gb = 1024 * 1024 * 1024
