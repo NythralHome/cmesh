@@ -425,6 +425,29 @@ func (s *State) UpdateCDIPStageState(jobID string, next cdip.StageState, detail 
 	return job, true
 }
 
+func (s *State) CompleteCoordinatorJob(jobID string, result string, errText string) (jobs.Job, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, ok := s.jobs[jobID]
+	if !ok || job.Type != models.JobGenerateDistributed {
+		return jobs.Job{}, false
+	}
+	now := time.Now().UTC()
+	job.Result = strings.TrimSpace(result)
+	job.Error = strings.TrimSpace(errText)
+	job.UpdatedAt = now
+	job.FinishedAt = now
+	if job.Error != "" {
+		job.Status = jobs.StatusFailed
+		job.LastFailure = job.Error
+	} else {
+		job.Status = jobs.StatusSucceeded
+	}
+	s.jobs[job.ID] = job
+	return job, true
+}
+
 func jobProgressResult(req jobs.ProgressRequest, updatedAt time.Time) string {
 	payload := map[string]any{
 		"kind":             "job.progress",

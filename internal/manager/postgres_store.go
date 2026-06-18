@@ -542,6 +542,29 @@ RETURNING id, type, status, requested_by, assigned_to, input, requirements, resu
 	return scanJob(row)
 }
 
+func (s *PostgresStore) CompleteCoordinatorJob(jobID string, result string, errText string) (jobs.Job, bool) {
+	now := time.Now().UTC()
+	status := jobs.StatusSucceeded
+	lastFailure := ""
+	errText = strings.TrimSpace(errText)
+	if errText != "" {
+		status = jobs.StatusFailed
+		lastFailure = errText
+	}
+	row := s.pool.QueryRow(context.Background(), `
+UPDATE jobs
+SET status = $2,
+    result = $3,
+    error = $4,
+    last_failure = $5,
+    updated_at = $6,
+    finished_at = $6
+WHERE id = $1 AND type = $7
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
+`, jobID, string(status), strings.TrimSpace(result), errText, lastFailure, now, models.JobGenerateDistributed)
+	return scanJob(row)
+}
+
 func (s *PostgresStore) CancelJob(jobID string) (jobs.Job, bool) {
 	now := time.Now().UTC()
 	row := s.pool.QueryRow(context.Background(), `

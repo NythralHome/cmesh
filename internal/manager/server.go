@@ -78,6 +78,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/memories/", s.handleMemory)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/jobs/", s.handleJob)
+	mux.HandleFunc("/v1/cdip/jobs/", s.handleCDIPJob)
 	mux.HandleFunc("/v1/cdip/stages/", s.handleCDIPStage)
 	mux.HandleFunc("/v1/workers/", s.handleWorkerRoutes)
 	mux.HandleFunc("/v1/workers/join", s.handleWorkerJoin)
@@ -1441,6 +1442,28 @@ func (s *Server) handleCDIPStage(w http.ResponseWriter, r *http.Request) {
 		"job":        job,
 		"cdip_state": job.CDIPState,
 	})
+}
+
+func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/cdip/jobs/"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] != "mock-run" {
+		http.NotFound(w, r)
+		return
+	}
+	result, err := runCDIPMockCoordinator(s.state, parts[0])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func cdipStageAction(action string) (cdip.StageState, bool) {

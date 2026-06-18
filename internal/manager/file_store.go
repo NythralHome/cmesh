@@ -102,6 +102,14 @@ func (s *FileStore) UpdateCDIPStageState(jobID string, next cdip.StageState, det
 	return job, ok
 }
 
+func (s *FileStore) CompleteCoordinatorJob(jobID string, result string, errText string) (jobs.Job, bool) {
+	job, ok := s.State.CompleteCoordinatorJob(jobID, result, errText)
+	if ok {
+		_ = s.save()
+	}
+	return job, ok
+}
+
 func (s *FileStore) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, bool) {
 	job, ok := s.State.CompleteJob(jobID, req)
 	if ok {

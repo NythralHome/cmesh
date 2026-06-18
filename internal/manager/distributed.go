@@ -64,6 +64,76 @@ type DistributedLatencyModel struct {
 	PipelinePenaltyPct int    `json:"pipeline_penalty_pct"`
 }
 
+type CDIPMockRunResult struct {
+	ParentJob jobs.Job   `json:"parent_job"`
+	StageJobs []jobs.Job `json:"stage_jobs"`
+	Output    string     `json:"output"`
+}
+
+func runCDIPMockCoordinator(store Store, parentJobID string) (CDIPMockRunResult, error) {
+	parent, ok := store.Job(parentJobID)
+	if !ok || parent.Type != models.JobGenerateDistributed {
+		return CDIPMockRunResult{}, fmt.Errorf("distributed parent job not found")
+	}
+	if parent.Status == jobs.StatusSucceeded || parent.Status == jobs.StatusFailed || parent.Status == jobs.StatusCanceled {
+		return CDIPMockRunResult{}, fmt.Errorf("distributed parent job is already terminal")
+	}
+	stages := cdipStageJobsForParent(store.Jobs(), parent.ID)
+	if len(stages) < 2 {
+		return CDIPMockRunResult{}, fmt.Errorf("distributed parent job has no stage graph")
+	}
+	for _, stage := range stages {
+		if _, ok := store.UpdateCDIPStageState(stage.ID, cdip.StagePreparing, "mock coordinator preparing stage"); !ok {
+			return CDIPMockRunResult{}, fmt.Errorf("failed to prepare stage %s", stage.ID)
+		}
+		if _, ok := store.UpdateCDIPStageState(stage.ID, cdip.StageReady, "mock coordinator stage ready"); !ok {
+			return CDIPMockRunResult{}, fmt.Errorf("failed to mark stage ready %s", stage.ID)
+		}
+	}
+	for _, stage := range stages {
+		if _, ok := store.UpdateCDIPStageState(stage.ID, cdip.StagePrefill, "mock activation prefill"); !ok {
+			return CDIPMockRunResult{}, fmt.Errorf("failed prefill for stage %s", stage.ID)
+		}
+	}
+	for _, stage := range stages {
+		if _, ok := store.UpdateCDIPStageState(stage.ID, cdip.StageDecode, "mock activation decode"); !ok {
+			return CDIPMockRunResult{}, fmt.Errorf("failed decode for stage %s", stage.ID)
+		}
+	}
+	for _, stage := range stages {
+		if _, ok := store.UpdateCDIPStageState(stage.ID, cdip.StageCompleted, "mock stage completed"); !ok {
+			return CDIPMockRunResult{}, fmt.Errorf("failed complete for stage %s", stage.ID)
+		}
+	}
+	output := "CDIP mock distributed inference completed"
+	parent, ok = store.CompleteCoordinatorJob(parent.ID, output, "")
+	if !ok {
+		return CDIPMockRunResult{}, fmt.Errorf("failed to complete distributed parent job")
+	}
+	return CDIPMockRunResult{
+		ParentJob: parent,
+		StageJobs: cdipStageJobsForParent(store.Jobs(), parent.ID),
+		Output:    output,
+	}, nil
+}
+
+func cdipStageJobsForParent(in []jobs.Job, parentJobID string) []jobs.Job {
+	out := make([]jobs.Job, 0)
+	for _, job := range in {
+		if job.Type != models.JobGenerateStage || job.CDIPParentJobID != parentJobID {
+			continue
+		}
+		out = append(out, job)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CDIPStageIndex != out[j].CDIPStageIndex {
+			return out[i].CDIPStageIndex < out[j].CDIPStageIndex
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out
+}
+
 func distributedModelPlan(model models.Model, nodes []cluster.Node) DistributedModelPlan {
 	plan := DistributedModelPlan{
 		ModelID:             model.ID,

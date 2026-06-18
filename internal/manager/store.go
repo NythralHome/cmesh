@@ -22,6 +22,7 @@ type Store interface {
 	NextJobForWorker(nodeID string) (jobs.Job, bool)
 	UpdateJobProgress(jobID string, req jobs.ProgressRequest) (jobs.Job, bool)
 	UpdateCDIPStageState(jobID string, next cdip.StageState, detail string) (jobs.Job, bool)
+	CompleteCoordinatorJob(jobID string, result string, errText string) (jobs.Job, bool)
 	CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, bool)
 	CancelJob(jobID string) (jobs.Job, bool)
 	Nodes() []cluster.Node

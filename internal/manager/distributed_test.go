@@ -275,6 +275,64 @@ func TestCDIPStageLifecycleRejectsInvalidTransition(t *testing.T) {
 	}
 }
 
+func TestCDIPMockCoordinatorCompletesPlannedGraph(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	for _, name := range []string{"worker-a", "worker-b"} {
+		joinWorkerWithResourcesForTest(t, srv, name, cluster.ResourceSnapshot{
+			CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+			Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+			Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 8 * gb, FreeBytes: 64 * gb},
+			Runtimes: []cluster.RuntimeResource{{
+				Name:       string(models.RuntimeLlamaCPP),
+				Ready:      true,
+				Version:    "test",
+				BinaryPath: "/tmp/llama-cli",
+			}},
+			Models: []cluster.ModelResource{{
+				ID:      "qwen2.5-7b-instruct-q4-k-m",
+				Name:    "Qwen2.5 7B Instruct",
+				Runtime: string(models.RuntimeLlamaCPP),
+				Bytes:   5 * gb,
+				Ready:   true,
+			}},
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-7b-instruct-q4-k-m/distributed-generate", strings.NewReader(`{"prompt":"hello from distributed cluster"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected graph creation status 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created distributedGenerateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/cdip/jobs/"+created.Job.ID+"/mock-run", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected mock-run status 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var result CDIPMockRunResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ParentJob.Status != jobs.StatusSucceeded || !strings.Contains(result.Output, "CDIP mock") {
+		t.Fatalf("expected succeeded parent mock result, got %#v", result)
+	}
+	if len(result.StageJobs) != 2 {
+		t.Fatalf("expected two stage jobs, got %#v", result.StageJobs)
+	}
+	for _, stage := range result.StageJobs {
+		if stage.Status != jobs.StatusSucceeded || stage.CDIPState != cdip.StageCompleted {
+			t.Fatalf("expected completed stage, got %#v", stage)
+		}
+	}
+}
+
 func TestDistributedStageJobRequestsBuildPipelineTopology(t *testing.T) {
 	parent := jobs.Job{ID: "job-parent", Type: models.JobGenerateDistributed}
 	input := models.DistributedGenerateInput{
