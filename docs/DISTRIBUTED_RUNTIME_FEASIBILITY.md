@@ -11,7 +11,7 @@ The distributed direction is valid, but the next milestone is a runtime adapter 
 CMesh should keep CDIP as the protocol contract and implement real distributed inference behind it in stages:
 
 1. Manager-relayed activation frame transport.
-2. Runtime adapter interface for stage execution.
+2. Runtime adapter interface for stage execution. The initial code contract is `runtimes.DistributedStageRuntime`.
 3. llama.cpp stage feasibility prototype.
 4. Logical-to-physical model shard materialization.
 5. LAN-only latency and correctness benchmark.
@@ -46,7 +46,7 @@ That means current full-model generation remains valid, but real distributed gen
 
 ## Runtime Adapter Contract
 
-The first adapter should be intentionally narrow:
+The first adapter is intentionally narrow:
 
 ```text
 PrepareStage(model, shard) -> stage_ready
@@ -58,7 +58,8 @@ Abort(stage, reason) -> cleanup
 
 The adapter can initially run behind one implementation:
 
-- `llama.cpp-stage-experimental`
+- `logical-stage`, which validates CDIP stage contracts and reports stage readiness without real tensor execution.
+- `llama.cpp-stage-experimental`, which should become the first real layer-stage prototype.
 
 If llama.cpp cannot expose the needed hooks cleanly, the adapter boundary lets us test another runtime without replacing CDIP.
 

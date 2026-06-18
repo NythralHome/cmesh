@@ -917,32 +917,33 @@ func executeDistributedStageJob(input string, snapshot cluster.ResourceSnapshot)
 	if !workerModelReady(snapshot, req.ModelID) {
 		return "", fmt.Errorf("distributed stage model %s is not installed on this worker", req.ModelID)
 	}
-	msg := cdip.StagePrepare{
-		Envelope:         cdip.NewEnvelope(cdip.MessageStagePrepare),
+	stageRuntime := runtimes.NewLogicalStageRuntime(req.Shard.Runtime)
+	prepared, err := stageRuntime.PrepareStage(context.Background(), runtimes.StagePrepareRequest{
 		ParentJobID:      req.ParentJobID,
 		StageJobID:       "worker-local-stage-prepare",
 		ModelID:          req.ModelID,
-		Stage:            req.Shard.Stage,
+		Stage:            req.Stage,
+		Shard:            req.Shard,
 		UpstreamNodeID:   req.UpstreamNodeID,
 		DownstreamNodeID: req.DownstreamNodeID,
-	}
-	if err := msg.Validate(); err != nil {
-		return "", fmt.Errorf("invalid distributed stage prepare contract: %w", err)
+	})
+	if err != nil {
+		return "", err
 	}
 	result, err := json.Marshal(distributedStageResult{
-		Kind:               "cdip.stage_ready",
-		ParentJobID:        req.ParentJobID,
-		StageIndex:         req.Stage.Index,
-		ModelID:            req.ModelID,
-		Runtime:            req.Shard.Runtime,
-		LayerStart:         req.Shard.Stage.LayerStart,
-		LayerEnd:           req.Shard.Stage.LayerEnd,
-		UpstreamNodeID:     req.UpstreamNodeID,
-		DownstreamNodeID:   req.DownstreamNodeID,
-		Materialization:    string(req.Shard.Materialization),
-		SourceArtifact:     req.Shard.SourceArtifact,
-		TargetArtifact:     req.Shard.TargetArtifact,
-		ActivationProtocol: "activation-stream-v1",
+		Kind:               prepared.Kind,
+		ParentJobID:        prepared.ParentJobID,
+		StageIndex:         prepared.StageIndex,
+		ModelID:            prepared.ModelID,
+		Runtime:            prepared.Runtime,
+		LayerStart:         prepared.LayerStart,
+		LayerEnd:           prepared.LayerEnd,
+		UpstreamNodeID:     prepared.UpstreamNodeID,
+		DownstreamNodeID:   prepared.DownstreamNodeID,
+		Materialization:    prepared.Materialization,
+		SourceArtifact:     prepared.SourceArtifact,
+		TargetArtifact:     prepared.TargetArtifact,
+		ActivationProtocol: prepared.ActivationProtocol,
 	})
 	if err != nil {
 		return "", err
