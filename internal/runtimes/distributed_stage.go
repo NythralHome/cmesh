@@ -10,7 +10,24 @@ import (
 	"github.com/cmesh/cmesh/internal/transport"
 )
 
-const ActivationStreamV1 = "activation-stream-v1"
+const (
+	ActivationStreamV1             = "activation-stream-v1"
+	CapabilityPipelineStagePrepare = "pipeline-stage-prepare"
+	CapabilityPipelinePrefill      = "pipeline-prefill"
+	CapabilityPipelineDecode       = "pipeline-decode"
+	CapabilityLogicalStageRuntime  = "logical-stage-runtime"
+	CapabilityLlamaCPPStageRuntime = "llama.cpp-stage-runtime"
+)
+
+func LogicalStageCapabilities() []string {
+	return []string{
+		CapabilityPipelineStagePrepare,
+		CapabilityPipelinePrefill,
+		CapabilityPipelineDecode,
+		ActivationStreamV1,
+		CapabilityLogicalStageRuntime,
+	}
+}
 
 type StagePrepareRequest struct {
 	ParentJobID      string

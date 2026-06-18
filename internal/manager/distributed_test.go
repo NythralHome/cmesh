@@ -13,6 +13,7 @@ import (
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/models"
+	"github.com/cmesh/cmesh/internal/runtimes"
 	"github.com/cmesh/cmesh/internal/transport"
 )
 
@@ -30,6 +31,12 @@ func TestDistributedModelPlanBuildsPipelineStages(t *testing.T) {
 				Ready:      true,
 				Version:    "test",
 				BinaryPath: "/tmp/llama-cli",
+				Capabilities: []string{
+					runtimes.CapabilityPipelineStagePrepare,
+					runtimes.CapabilityPipelineDecode,
+					runtimes.ActivationStreamV1,
+					runtimes.CapabilityLogicalStageRuntime,
+				},
 			}},
 			Models: []cluster.ModelResource{{
 				ID:          "qwen2.5-14b-instruct-q4-k-m",
@@ -62,11 +69,50 @@ func TestDistributedModelPlanBuildsPipelineStages(t *testing.T) {
 	if !plan.Stages[0].RuntimeReady || !plan.Stages[0].Installed {
 		t.Fatalf("expected stage readiness metadata, got %#v", plan.Stages[0])
 	}
+	if !plan.Stages[0].StageRuntimeReady || plan.Stages[0].StageRuntime != "logical-stage" {
+		t.Fatalf("expected logical stage runtime readiness, got %#v", plan.Stages[0])
+	}
 	if plan.EstimatedLatency.PerOutputTokenMS <= 0 || plan.Network.InterStageHops != 1 {
 		t.Fatalf("expected latency and network estimates, got %#v", plan)
 	}
 	if !strings.Contains(strings.Join(plan.Blockers, " "), "distributed tensor runtime adapter") {
 		t.Fatalf("expected runtime adapter blocker, got %#v", plan.Blockers)
+	}
+}
+
+func TestDistributedModelPlanReportsMissingStageRuntimeCapability(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	for _, name := range []string{"worker-a", "worker-b"} {
+		joinWorkerWithResourcesForTest(t, srv, name, cluster.ResourceSnapshot{
+			CPU:     cluster.CPUResources{CoresTotal: 10, CoresAllowed: 6},
+			Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 12 * gb},
+			Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 8 * gb, FreeBytes: 80 * gb},
+			Runtimes: []cluster.RuntimeResource{{
+				Name:       string(models.RuntimeLlamaCPP),
+				Ready:      true,
+				Version:    "test",
+				BinaryPath: "/tmp/llama-cli",
+			}},
+		})
+	}
+	model, err := models.MustFind("qwen2.5-14b-instruct-q4-k-m")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan := distributedModelPlan(model, state.Nodes())
+	if len(plan.Stages) != 2 {
+		t.Fatalf("expected two stages, got %#v", plan.Stages)
+	}
+	if plan.Stages[0].StageRuntimeReady {
+		t.Fatalf("expected stage runtime to be blocked without capability, got %#v", plan.Stages[0])
+	}
+	if !strings.Contains(plan.Stages[0].StageRuntimeReason, "capability not reported") {
+		t.Fatalf("expected capability reason, got %#v", plan.Stages[0])
+	}
+	if !strings.Contains(strings.Join(plan.Warnings, " "), "distributed stage runtime capability") {
+		t.Fatalf("expected capability warning, got %#v", plan.Warnings)
 	}
 }
 

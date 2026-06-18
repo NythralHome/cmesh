@@ -52,13 +52,14 @@ type ModelResource struct {
 }
 
 type RuntimeResource struct {
-	Name       string `json:"name"`
-	Ready      bool   `json:"ready"`
-	Version    string `json:"version,omitempty"`
-	Platform   string `json:"platform,omitempty"`
-	BinaryPath string `json:"binary_path,omitempty"`
-	Source     string `json:"source,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Name         string   `json:"name"`
+	Ready        bool     `json:"ready"`
+	Version      string   `json:"version,omitempty"`
+	Platform     string   `json:"platform,omitempty"`
+	BinaryPath   string   `json:"binary_path,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Error        string   `json:"error,omitempty"`
 }
 
 type CPUResources struct {

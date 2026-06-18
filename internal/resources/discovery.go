@@ -156,14 +156,25 @@ func directorySize(path string) uint64 {
 func DiscoverRuntimes(cacheDir string) []cluster.RuntimeResource {
 	status := runtimes.LlamaCPPStatus(cacheDir)
 	return []cluster.RuntimeResource{{
-		Name:       status.Name,
-		Ready:      status.Ready,
-		Version:    status.Version,
-		Platform:   status.Platform,
-		BinaryPath: status.BinaryPath,
-		Source:     status.Source,
-		Error:      status.Error,
+		Name:         status.Name,
+		Ready:        status.Ready,
+		Version:      status.Version,
+		Platform:     status.Platform,
+		BinaryPath:   status.BinaryPath,
+		Source:       status.Source,
+		Capabilities: runtimeCapabilities(status),
+		Error:        status.Error,
 	}}
+}
+
+func runtimeCapabilities(status runtimes.RuntimeStatus) []string {
+	if !status.Ready {
+		return nil
+	}
+	if status.Name == runtimes.LlamaCPPName {
+		return runtimes.LogicalStageCapabilities()
+	}
+	return nil
 }
 
 func DiscoverInstalledModels(cacheDir string) []cluster.ModelResource {

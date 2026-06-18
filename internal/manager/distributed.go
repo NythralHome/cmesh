@@ -40,18 +40,22 @@ type DistributedModelPlan struct {
 }
 
 type DistributedPlanStage struct {
-	Index               int    `json:"index"`
-	NodeID              string `json:"node_id"`
-	NodeName            string `json:"node_name"`
-	LayerStart          int    `json:"layer_start"`
-	LayerEnd            int    `json:"layer_end"`
-	Layers              int    `json:"layers"`
-	MemoryBytes         uint64 `json:"memory_bytes"`
-	DiskBytes           uint64 `json:"disk_bytes"`
-	AllowedMemoryBytes  uint64 `json:"allowed_memory_bytes"`
-	AllowedStorageBytes uint64 `json:"allowed_storage_bytes"`
-	RuntimeReady        bool   `json:"runtime_ready"`
-	Installed           bool   `json:"installed"`
+	Index               int      `json:"index"`
+	NodeID              string   `json:"node_id"`
+	NodeName            string   `json:"node_name"`
+	LayerStart          int      `json:"layer_start"`
+	LayerEnd            int      `json:"layer_end"`
+	Layers              int      `json:"layers"`
+	MemoryBytes         uint64   `json:"memory_bytes"`
+	DiskBytes           uint64   `json:"disk_bytes"`
+	AllowedMemoryBytes  uint64   `json:"allowed_memory_bytes"`
+	AllowedStorageBytes uint64   `json:"allowed_storage_bytes"`
+	RuntimeReady        bool     `json:"runtime_ready"`
+	RuntimeCapabilities []string `json:"runtime_capabilities,omitempty"`
+	StageRuntime        string   `json:"stage_runtime,omitempty"`
+	StageRuntimeReady   bool     `json:"stage_runtime_ready"`
+	StageRuntimeReason  string   `json:"stage_runtime_reason,omitempty"`
+	Installed           bool     `json:"installed"`
 }
 
 type DistributedNetworkPlan struct {
@@ -542,6 +546,9 @@ func distributedModelPlan(model models.Model, nodes []cluster.Node) DistributedM
 	if !allStagesRuntimeReady(plan.Stages) {
 		plan.Warnings = append(plan.Warnings, "one or more selected workers do not report a ready runtime")
 	}
+	if !allStagesStageRuntimeReady(plan.Stages) {
+		plan.Warnings = append(plan.Warnings, "one or more selected workers do not report distributed stage runtime capability")
+	}
 	if !allStagesInstalled(plan.Stages) {
 		plan.Warnings = append(plan.Warnings, "model shards are not installed on all selected workers")
 	}
@@ -620,6 +627,8 @@ func buildDistributedStages(model models.Model, nodes []cluster.Node, totalLayer
 		layerStart := nextLayer
 		layerEnd := nextLayer + layers - 1
 		nextLayer += layers
+		runtimeStatus, runtimeReady := nodeRuntimeStatus(node, string(model.Runtime))
+		stageRuntime, stageRuntimeReady, stageRuntimeReason := nodeDistributedStageRuntime(runtimeStatus, runtimeReady)
 		stage := DistributedPlanStage{
 			Index:               index,
 			NodeID:              node.ID,
@@ -631,7 +640,11 @@ func buildDistributedStages(model models.Model, nodes []cluster.Node, totalLayer
 			DiskBytes:           proportionalBytes(model.DiskBytes, layers, totalLayers),
 			AllowedMemoryBytes:  node.Resources.Memory.AllowedBytes,
 			AllowedStorageBytes: effectiveNodeStorage(node),
-			RuntimeReady:        nodeRuntimeReady(node, string(model.Runtime)),
+			RuntimeReady:        runtimeReady,
+			RuntimeCapabilities: runtimeStatus.Capabilities,
+			StageRuntime:        stageRuntime,
+			StageRuntimeReady:   stageRuntimeReady,
+			StageRuntimeReason:  stageRuntimeReason,
 			Installed:           nodeHasModel(node, model.ID),
 		}
 		stages = append(stages, stage)
@@ -708,6 +721,15 @@ func allStagesRuntimeReady(stages []DistributedPlanStage) bool {
 	return len(stages) > 0
 }
 
+func allStagesStageRuntimeReady(stages []DistributedPlanStage) bool {
+	for _, stage := range stages {
+		if !stage.StageRuntimeReady {
+			return false
+		}
+	}
+	return true
+}
+
 func allStagesInstalled(stages []DistributedPlanStage) bool {
 	for _, stage := range stages {
 		if !stage.Installed {
@@ -715,6 +737,32 @@ func allStagesInstalled(stages []DistributedPlanStage) bool {
 		}
 	}
 	return len(stages) > 0
+}
+
+func nodeDistributedStageRuntime(runtimeStatus cluster.RuntimeResource, runtimeReady bool) (string, bool, string) {
+	if !runtimeReady {
+		reason := strings.TrimSpace(runtimeStatus.Error)
+		if reason == "" {
+			reason = "runtime is not ready"
+		}
+		return "", false, reason
+	}
+	if runtimeHasCapability(runtimeStatus, runtimes.CapabilityLlamaCPPStageRuntime) {
+		return "llama.cpp-stage-experimental", true, ""
+	}
+	if runtimeHasCapability(runtimeStatus, runtimes.CapabilityLogicalStageRuntime) {
+		return "logical-stage", true, ""
+	}
+	return "", false, "distributed stage runtime capability not reported"
+}
+
+func runtimeHasCapability(runtimeStatus cluster.RuntimeResource, capability string) bool {
+	for _, item := range runtimeStatus.Capabilities {
+		if item == capability {
+			return true
+		}
+	}
+	return false
 }
 
 func proportionalBytes(total uint64, part int, whole int) uint64 {

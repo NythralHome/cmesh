@@ -19,6 +19,8 @@ CMesh should keep CDIP as the protocol contract and implement real distributed i
 
 Until these exist, distributed plans must remain `executable_now: false`.
 
+Distributed plans negotiate stage runtime capability separately from normal model runtime readiness. A worker can be `llama.cpp` ready for single-worker generation while still reporting `stage_runtime_ready: false` until it advertises `logical-stage-runtime` or the future `llama.cpp-stage-runtime`.
+
 ## What llama.cpp Supports Today
 
 llama.cpp has official multi-GPU support for one host where multiple GPUs are visible to the same runtime process.
