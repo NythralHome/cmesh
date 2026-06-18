@@ -143,6 +143,7 @@ A distributed plan MUST include:
 - per-stage layer range
 - blockers and warnings
 - executable flag
+- stage runtime diagnostics
 
 Example:
 
@@ -155,6 +156,13 @@ Example:
   "mode": "pipeline_layers",
   "runtime": "llama.cpp",
   "executable_now": false,
+  "stage_runtime_diagnostics": {
+    "candidate_workers": 2,
+    "runtime_ready_workers": 2,
+    "stage_ready_workers": 2,
+    "logical_stage_workers": 2,
+    "llama_cpp_stage_workers": 0
+  },
   "stages": [
     {
       "index": 0,

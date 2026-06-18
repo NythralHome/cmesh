@@ -34,9 +34,25 @@ type DistributedModelPlan struct {
 	Stages                    []DistributedPlanStage  `json:"stages,omitempty"`
 	Network                   DistributedNetworkPlan  `json:"network"`
 	EstimatedLatency          DistributedLatencyModel `json:"estimated_latency"`
+	StageRuntimeDiagnostics   DistributedRuntimeDiag  `json:"stage_runtime_diagnostics"`
 	Blockers                  []string                `json:"blockers,omitempty"`
 	Warnings                  []string                `json:"warnings,omitempty"`
 	NextImplementationTargets []string                `json:"next_implementation_targets,omitempty"`
+}
+
+type DistributedRuntimeDiag struct {
+	CandidateWorkers       int                         `json:"candidate_workers"`
+	RuntimeReadyWorkers    int                         `json:"runtime_ready_workers"`
+	StageReadyWorkers      int                         `json:"stage_ready_workers"`
+	LogicalStageWorkers    int                         `json:"logical_stage_workers"`
+	LlamaCPPStageWorkers   int                         `json:"llama_cpp_stage_workers"`
+	MissingStageCapability []DistributedRuntimeMissing `json:"missing_stage_capability,omitempty"`
+}
+
+type DistributedRuntimeMissing struct {
+	NodeID   string `json:"node_id"`
+	NodeName string `json:"node_name"`
+	Reason   string `json:"reason"`
 }
 
 type DistributedPlanStage struct {
@@ -513,6 +529,7 @@ func distributedModelPlan(model models.Model, nodes []cluster.Node) DistributedM
 	}
 
 	candidates := distributedCandidates(model, nodes)
+	plan.StageRuntimeDiagnostics = distributedRuntimeDiagnostics(model, candidates)
 	for _, candidate := range candidates {
 		plan.AggregateMemoryBytes += candidate.Resources.Memory.AllowedBytes
 		plan.AggregateDiskBytes += effectiveNodeStorage(candidate)
@@ -579,6 +596,35 @@ func distributedCandidates(model models.Model, nodes []cluster.Node) []cluster.N
 		}
 		return nodeDisplayName(out[i]) < nodeDisplayName(out[j])
 	})
+	return out
+}
+
+func distributedRuntimeDiagnostics(model models.Model, candidates []cluster.Node) DistributedRuntimeDiag {
+	out := DistributedRuntimeDiag{
+		CandidateWorkers: len(candidates),
+	}
+	for _, node := range candidates {
+		runtimeStatus, runtimeReady := nodeRuntimeStatus(node, string(model.Runtime))
+		if runtimeReady {
+			out.RuntimeReadyWorkers++
+		}
+		stageRuntime, stageReady, reason := nodeDistributedStageRuntime(runtimeStatus, runtimeReady)
+		if stageReady {
+			out.StageReadyWorkers++
+			switch stageRuntime {
+			case "logical-stage":
+				out.LogicalStageWorkers++
+			case "llama.cpp-stage-experimental":
+				out.LlamaCPPStageWorkers++
+			}
+			continue
+		}
+		out.MissingStageCapability = append(out.MissingStageCapability, DistributedRuntimeMissing{
+			NodeID:   node.ID,
+			NodeName: nodeDisplayName(node),
+			Reason:   reason,
+		})
+	}
 	return out
 }
 

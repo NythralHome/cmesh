@@ -72,6 +72,9 @@ func TestDistributedModelPlanBuildsPipelineStages(t *testing.T) {
 	if !plan.Stages[0].StageRuntimeReady || plan.Stages[0].StageRuntime != "logical-stage" {
 		t.Fatalf("expected logical stage runtime readiness, got %#v", plan.Stages[0])
 	}
+	if plan.StageRuntimeDiagnostics.CandidateWorkers != 2 || plan.StageRuntimeDiagnostics.StageReadyWorkers != 2 || plan.StageRuntimeDiagnostics.LogicalStageWorkers != 2 {
+		t.Fatalf("expected stage runtime diagnostics, got %#v", plan.StageRuntimeDiagnostics)
+	}
 	if plan.EstimatedLatency.PerOutputTokenMS <= 0 || plan.Network.InterStageHops != 1 {
 		t.Fatalf("expected latency and network estimates, got %#v", plan)
 	}
@@ -113,6 +116,12 @@ func TestDistributedModelPlanReportsMissingStageRuntimeCapability(t *testing.T) 
 	}
 	if !strings.Contains(strings.Join(plan.Warnings, " "), "distributed stage runtime capability") {
 		t.Fatalf("expected capability warning, got %#v", plan.Warnings)
+	}
+	if plan.StageRuntimeDiagnostics.CandidateWorkers != 2 || plan.StageRuntimeDiagnostics.RuntimeReadyWorkers != 2 || plan.StageRuntimeDiagnostics.StageReadyWorkers != 0 {
+		t.Fatalf("expected blocked stage diagnostics, got %#v", plan.StageRuntimeDiagnostics)
+	}
+	if len(plan.StageRuntimeDiagnostics.MissingStageCapability) != 2 {
+		t.Fatalf("expected missing stage capability details, got %#v", plan.StageRuntimeDiagnostics)
 	}
 }
 
@@ -209,6 +218,9 @@ func TestModelDistributedPlanEndpoint(t *testing.T) {
 	}
 	if len(payload.Plan.Stages) != 2 {
 		t.Fatalf("expected two planned stages, got %#v", payload.Plan.Stages)
+	}
+	if payload.Plan.StageRuntimeDiagnostics.CandidateWorkers != 2 {
+		t.Fatalf("expected distributed runtime diagnostics in payload, got %#v", payload.Plan.StageRuntimeDiagnostics)
 	}
 	if payload.CDIPProposal.Protocol != "cdip" || payload.CDIPProposal.Version != "0.1" || payload.CDIPProposal.Type != "plan.proposal" {
 		t.Fatalf("expected cdip plan proposal, got %#v", payload.CDIPProposal)
