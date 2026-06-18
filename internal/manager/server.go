@@ -7957,6 +7957,39 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         setChatSubmitting(false);
       });
     }
+    function smokeRPCPoolForChat() {
+      if (modelStatus) modelStatus.innerText = "Checking RPC pool before distributed generate...";
+      return fetch("/v1/runtime/rpc-pool/smoke?timeout_ms=1000", {
+        method: "POST"
+      }).then(function(response) {
+        return response.json().then(function(payload) {
+          if (!response.ok || !payload.runnable_now) {
+            var details = (payload.results || []).map(function(result) {
+              if (result.ready) return (result.endpoint || "endpoint") + " ready";
+              return (result.endpoint || "endpoint") + " failed" + (result.error ? ": " + result.error : "");
+            }).join("; ");
+            throw new Error(details || "RPC pool is not reachable.");
+          }
+          return payload;
+        });
+      });
+    }
+    function submitChatGenerate(modelID, nodeID, prompt, useRPC, maxTokens) {
+      var generatePath = useRPC ? "/distributed-rpc-generate" : "/generate";
+      if (modelStatus) modelStatus.innerText = useRPC ? "Submitting distributed RPC model job..." : "Submitting model job...";
+      return fetch("/v1/models/" + encodeURIComponent(modelID) + generatePath, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          node_id: nodeID,
+          conversation_id: chatConversationID,
+          system_prompt: chatSystemPrompt ? chatSystemPrompt.value : "",
+          prompt: prompt,
+          max_tokens: maxTokens,
+          temperature: chatTemperature && chatTemperature.value ? chatTemperature.value : "0.7"
+        })
+      });
+    }
     if (chatModel) {
       chatModel.addEventListener("change", function() {
         syncChatNodes();
@@ -8184,26 +8217,15 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           modelStatus.innerText = "Prompt is required.";
           return;
         }
-        appendChatMessage("user", prompt);
-        chatForm.elements.prompt.value = "";
         setChatSubmitting(true);
         var useRPC = Boolean(chatUseRPC && chatUseRPC.checked && !chatUseRPC.disabled);
-        modelStatus.innerText = useRPC ? "Submitting distributed RPC model job..." : "Submitting model job...";
         var maxTokens = parseInt(chatMaxTokens && chatMaxTokens.value ? chatMaxTokens.value : "512", 10);
         if (!Number.isFinite(maxTokens) || maxTokens < 16) maxTokens = 512;
         if (maxTokens > 2048) maxTokens = 2048;
-        var generatePath = useRPC ? "/distributed-rpc-generate" : "/generate";
-        fetch("/v1/models/" + encodeURIComponent(modelID) + generatePath, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            node_id: nodeID,
-            conversation_id: chatConversationID,
-            system_prompt: chatSystemPrompt ? chatSystemPrompt.value : "",
-            prompt: prompt,
-            max_tokens: maxTokens,
-            temperature: chatTemperature && chatTemperature.value ? chatTemperature.value : "0.7"
-          })
+        (useRPC ? smokeRPCPoolForChat() : Promise.resolve(null)).then(function() {
+          appendChatMessage("user", prompt);
+          chatForm.elements.prompt.value = "";
+          return submitChatGenerate(modelID, nodeID, prompt, useRPC, maxTokens);
         }).then(function(response) {
           if (!response.ok) {
             return response.text().then(function(text) { throw new Error(text || response.statusText); });
