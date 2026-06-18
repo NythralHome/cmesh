@@ -5648,6 +5648,35 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       {{else}}
       <div class="empty">No RPC backend is active yet. Open Worker Desktop on a runtime-ready machine and start RPC backend from the AI runtime tab.</div>
       {{end}}
+      <form class="cluster-runner" id="rpc-prompt-smoke-form">
+        <div class="field span-2">
+          <label for="rpc-smoke-model">Model</label>
+          <select id="rpc-smoke-model" name="model_id">
+            {{if eq (generatableCount .Models) 0}}<option value="">Install a model first</option>{{end}}
+            {{range .Models}}{{if modelCanGenerate .}}{{$preset := modelPreset .Model}}<option value="{{.Model.ID}}" data-max-tokens="{{$preset.MaxTokens}}" data-temperature="{{$preset.Temperature}}">{{.Model.Name}}</option>{{end}}{{end}}
+          </select>
+        </div>
+        <div class="field span-2">
+          <label for="rpc-smoke-node">Coordinator worker</label>
+          <select id="rpc-smoke-node" name="node_id">
+            {{if eq (generatableCount .Models) 0}}<option value="">No installed model worker</option>{{end}}
+            {{range .Models}}{{$rpcModelID := .Model.ID}}{{range modelReadyNodeOptions $.NodesByID .}}<option value="{{.ID}}" data-model-id="{{$rpcModelID}}">{{.Name}}</option>{{end}}{{end}}
+          </select>
+        </div>
+        <div class="field">
+          <label for="rpc-smoke-max-tokens">Max tokens</label>
+          <input id="rpc-smoke-max-tokens" name="max_tokens" type="number" min="16" max="2048" step="16" value="128">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button class="button primary" type="submit" {{if or (eq .RPCPool.Endpoints 0) (eq (generatableCount .Models) 0)}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Run distributed prompt</button>
+        </div>
+        <div class="field span-6">
+          <label for="rpc-smoke-prompt">Prompt</label>
+          <textarea id="rpc-smoke-prompt" name="prompt" placeholder="Ask a short test question through the RPC pool">Reply with one sentence: what runtime path handled this request?</textarea>
+        </div>
+      </form>
+      <div class="runner-status" id="rpc-prompt-smoke-status">{{if eq .RPCPool.Endpoints 0}}Start at least one RPC backend before running a distributed prompt.{{else if eq (generatableCount .Models) 0}}Install a model before running a distributed prompt.{{else}}Ready to run a distributed prompt smoke test.{{end}}</div>
       {{if .RPCWorkers}}
       <div class="table-wrap">
         <table>
@@ -6443,6 +6472,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     });
     var rpcSmokeButton = document.getElementById("rpc-smoke-run");
     var rpcSmokeResult = document.getElementById("rpc-smoke-result");
+    var rpcPromptSmokeForm = document.getElementById("rpc-prompt-smoke-form");
+    var rpcPromptSmokeModel = document.getElementById("rpc-smoke-model");
+    var rpcPromptSmokeNode = document.getElementById("rpc-smoke-node");
+    var rpcPromptSmokeStatus = document.getElementById("rpc-prompt-smoke-status");
+    var rpcPromptSmokeSubmitting = false;
     function renderRPCSmokeReport(report) {
       if (!rpcSmokeResult) return;
       rpcSmokeResult.innerHTML = "";
@@ -6504,6 +6538,29 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           setButtonText(rpcSmokeButton, "Run RPC smoke test");
         });
       });
+    }
+    function syncRPCPromptSmokeNodes() {
+      if (!rpcPromptSmokeModel || !rpcPromptSmokeNode) return;
+      var modelID = rpcPromptSmokeModel.value;
+      var firstVisible = "";
+      Array.prototype.forEach.call(rpcPromptSmokeNode.options, function(option) {
+        var matches = !modelID || option.getAttribute("data-model-id") === modelID;
+        option.hidden = !matches;
+        option.disabled = !matches;
+        if (matches && !firstVisible) firstVisible = option.value;
+      });
+      if (firstVisible) rpcPromptSmokeNode.value = firstVisible;
+    }
+    function setRPCPromptSmokeSubmitting(isSubmitting) {
+      rpcPromptSmokeSubmitting = isSubmitting;
+      if (!rpcPromptSmokeForm) return;
+      var button = rpcPromptSmokeForm.querySelector('button[type="submit"]');
+      if (button) {
+        button.disabled = isSubmitting || !rpcPromptSmokeModel || !rpcPromptSmokeNode || !rpcPromptSmokeModel.value || !rpcPromptSmokeNode.value;
+        setButtonText(button, isSubmitting ? "Running..." : "Run distributed prompt");
+      }
+      if (rpcPromptSmokeModel) rpcPromptSmokeModel.disabled = isSubmitting;
+      if (rpcPromptSmokeNode) rpcPromptSmokeNode.disabled = isSubmitting;
     }
     function initialDashboardTab() {
       var fromHash = (window.location.hash || "").replace("#", "").split("?")[0];
@@ -8018,8 +8075,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         setChatSubmitting(false);
       });
     }
-    function checkDistributedRPCReadiness(modelID, nodeID) {
-      if (modelStatus) modelStatus.innerText = "Checking distributed RPC readiness...";
+    function checkDistributedRPCReadiness(modelID, nodeID, statusElement) {
+      var targetStatus = statusElement || modelStatus;
+      if (targetStatus) targetStatus.innerText = "Checking distributed RPC readiness...";
       var params = new URLSearchParams();
       if (nodeID) params.set("node_id", nodeID);
       return fetch("/v1/models/" + encodeURIComponent(modelID) + "/distributed-rpc-readiness?" + params.toString()).then(function(response) {
@@ -8035,7 +8093,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       });
     }
     function smokeRPCPoolForChat(modelID, nodeID) {
-      return checkDistributedRPCReadiness(modelID, nodeID).then(function() {
+      return checkDistributedRPCReadiness(modelID, nodeID, modelStatus).then(function() {
         if (modelStatus) modelStatus.innerText = "Checking RPC pool network reachability...";
         return fetch("/v1/runtime/rpc-pool/smoke?timeout_ms=1000", {
           method: "POST"
@@ -8053,6 +8111,55 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         });
       });
     }
+    function smokeRPCPoolForPromptSmoke(modelID, nodeID) {
+      return checkDistributedRPCReadiness(modelID, nodeID, rpcPromptSmokeStatus).then(function() {
+        if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Checking RPC pool network reachability...";
+        return fetch("/v1/runtime/rpc-pool/smoke?timeout_ms=1000", {
+          method: "POST"
+        });
+      }).then(function(response) {
+        return response.json().then(function(payload) {
+          if (!response.ok || !payload.runnable_now) {
+            var details = (payload.results || []).map(function(result) {
+              if (result.ready) return (result.endpoint || "endpoint") + " ready";
+              return (result.endpoint || "endpoint") + " failed" + (result.error ? ": " + result.error : "");
+            }).join("; ");
+            throw new Error(details || "RPC pool is not reachable.");
+          }
+          return payload;
+        });
+      });
+    }
+    function pollRPCPromptSmokeJob(jobID, attempt) {
+      if (!jobID) return;
+      fetch("/v1/jobs/" + encodeURIComponent(jobID)).then(function(response) {
+        if (!response.ok) {
+          return response.text().then(function(text) { throw new Error(text || response.statusText); });
+        }
+        return response.json();
+      }).then(function(job) {
+        if (job.status === "succeeded") {
+          if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Distributed prompt completed: " + modelJobText(job);
+          setRPCPromptSmokeSubmitting(false);
+          return;
+        }
+        if (job.status === "failed" || job.status === "canceled") {
+          if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Distributed prompt " + job.status + ": " + modelJobText(job);
+          setRPCPromptSmokeSubmitting(false);
+          return;
+        }
+        if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Running distributed prompt " + job.id + " (" + job.status + ")...";
+        if (attempt < 80) {
+          setTimeout(function() { pollRPCPromptSmokeJob(jobID, attempt + 1); }, 1500);
+        } else {
+          if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Distributed prompt is still running. Check Jobs for details.";
+          setRPCPromptSmokeSubmitting(false);
+        }
+      }).catch(function(error) {
+        if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Could not read distributed prompt job: " + error.message;
+        setRPCPromptSmokeSubmitting(false);
+      });
+    }
     function submitChatGenerate(modelID, nodeID, prompt, useRPC, maxTokens) {
       var generatePath = useRPC ? "/distributed-rpc-generate" : "/generate";
       if (modelStatus) modelStatus.innerText = useRPC ? "Submitting distributed RPC model job..." : "Submitting model job...";
@@ -8067,6 +8174,59 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           max_tokens: maxTokens,
           temperature: chatTemperature && chatTemperature.value ? chatTemperature.value : "0.7"
         })
+      });
+    }
+    if (rpcPromptSmokeModel) {
+      rpcPromptSmokeModel.addEventListener("change", syncRPCPromptSmokeNodes);
+      syncRPCPromptSmokeNodes();
+    }
+    if (rpcPromptSmokeForm) {
+      rpcPromptSmokeForm.addEventListener("submit", function(event) {
+        event.preventDefault();
+        if (rpcPromptSmokeSubmitting) {
+          if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "A distributed prompt smoke test is already running.";
+          return;
+        }
+        var modelID = rpcPromptSmokeModel ? String(rpcPromptSmokeModel.value || "").trim() : "";
+        var nodeID = rpcPromptSmokeNode ? String(rpcPromptSmokeNode.value || "").trim() : "";
+        var promptField = rpcPromptSmokeForm.elements.prompt;
+        var prompt = String(promptField && promptField.value ? promptField.value : "").trim();
+        var maxTokensField = rpcPromptSmokeForm.elements.max_tokens;
+        var maxTokens = parseInt(maxTokensField && maxTokensField.value ? maxTokensField.value : "128", 10);
+        if (!Number.isFinite(maxTokens) || maxTokens < 16) maxTokens = 128;
+        if (maxTokens > 2048) maxTokens = 2048;
+        if (!modelID || !nodeID) {
+          if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Install a model and select a coordinator worker first.";
+          return;
+        }
+        if (!prompt) {
+          if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Prompt is required.";
+          return;
+        }
+        setRPCPromptSmokeSubmitting(true);
+        smokeRPCPoolForPromptSmoke(modelID, nodeID).then(function() {
+          if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Submitting distributed prompt job...";
+          return fetch("/v1/models/" + encodeURIComponent(modelID) + "/distributed-rpc-generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              node_id: nodeID,
+              prompt: prompt,
+              max_tokens: maxTokens
+            })
+          });
+        }).then(function(response) {
+          if (!response.ok) {
+            return response.text().then(function(text) { throw new Error(text || response.statusText); });
+          }
+          return response.json();
+        }).then(function(job) {
+          if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Distributed prompt job " + job.id + " submitted.";
+          pollRPCPromptSmokeJob(job.id, 0);
+        }).catch(function(error) {
+          setRPCPromptSmokeSubmitting(false);
+          if (rpcPromptSmokeStatus) rpcPromptSmokeStatus.innerText = "Distributed prompt failed: " + error.message;
+        });
       });
     }
     if (chatModel) {
