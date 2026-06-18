@@ -470,11 +470,24 @@ func (s *Server) startLlamaCPPRPC() error {
 		return err
 	}
 	now := time.Now().UTC()
+	endpoint := rpcEndpoint(cfg)
 	s.rpcCmd = cmd
 	s.rpcStartedAt = &now
 	s.rpcExitCode = nil
 	s.rpcLastError = ""
-	s.logTail.WriteString(fmt.Sprintf("started llama.cpp rpc-server pid=%d endpoint=%s\n", cmd.Process.Pid, rpcEndpoint(cfg)))
+	if err := resources.WriteLlamaCPPRPCState(cfg.WorkerCacheDir, resources.LlamaCPPRPCState{
+		Running:   true,
+		Endpoint:  endpoint,
+		PID:       cmd.Process.Pid,
+		StartedAt: now,
+	}); err != nil {
+		_ = killWorkerProcess(cmd)
+		_ = cmd.Wait()
+		s.rpcCmd = nil
+		s.rpcStartedAt = nil
+		return err
+	}
+	s.logTail.WriteString(fmt.Sprintf("started llama.cpp rpc-server pid=%d endpoint=%s\n", cmd.Process.Pid, endpoint))
 	go s.copyOutput(stdout)
 	go s.copyOutput(stderr)
 	go s.waitLlamaCPPRPC(cmd)
@@ -484,8 +497,10 @@ func (s *Server) startLlamaCPPRPC() error {
 func (s *Server) stopLlamaCPPRPC() error {
 	s.mu.Lock()
 	cmd := s.rpcCmd
+	cacheDir := s.config.WorkerCacheDir
 	s.mu.Unlock()
 	if cmd == nil || cmd.Process == nil {
+		_ = resources.ClearLlamaCPPRPCState(cacheDir)
 		return nil
 	}
 	if err := interruptWorkerProcess(cmd); err != nil {
@@ -497,10 +512,12 @@ func (s *Server) stopLlamaCPPRPC() error {
 		running := s.rpcCmd == cmd
 		s.mu.Unlock()
 		if !running {
+			_ = resources.ClearLlamaCPPRPCState(cacheDir)
 			return nil
 		}
 		if time.Now().After(deadline) {
 			_ = killWorkerProcess(cmd)
+			_ = resources.ClearLlamaCPPRPCState(cacheDir)
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -543,6 +560,7 @@ func (s *Server) waitLlamaCPPRPC(cmd *exec.Cmd) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.rpcCmd == cmd {
+		_ = resources.ClearLlamaCPPRPCState(s.config.WorkerCacheDir)
 		s.rpcCmd = nil
 		s.rpcStartedAt = nil
 		s.rpcExitCode = &exitCode

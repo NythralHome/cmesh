@@ -238,6 +238,29 @@ GET /v1/runtime/stage-probes
 
 Returns worker-reported stage runtime diagnostics. These probes explain whether a worker has an experimental distributed stage runtime and why it is or is not ready. `llama.cpp-stage-experimental` currently reports `ready: false` when only public `llama-cli` is available because layer-stage activation hooks are not exposed yet.
 
+## Runtime RPC Pool
+
+```http
+GET /v1/runtime/rpc-pool
+```
+
+Returns online workers with active runtime RPC backends. For `llama.cpp-rpc`, the manager includes a ready-to-pass `llama_cli_rpc_arg` value for future `llama-cli --rpc` execution.
+
+Example:
+
+```json
+{
+  "summary": {
+    "workers": 2,
+    "runtime_ready_workers": 2,
+    "rpc_ready_workers": 1,
+    "endpoints": 1
+  },
+  "endpoints": ["10.0.0.10:50052"],
+  "llama_cli_rpc_arg": "10.0.0.10:50052"
+}
+```
+
 ## Cluster Benchmarks
 
 ```http

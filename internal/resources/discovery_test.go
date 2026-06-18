@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -186,5 +187,69 @@ func TestDiscoverRuntimesIncludesLlamaCPPStageProbe(t *testing.T) {
 	}
 	if probe.Ready {
 		t.Fatalf("llama.cpp stage runtime should remain blocked until hooks exist: %#v", probe)
+	}
+}
+
+func TestLlamaCPPRPCStateRoundTrip(t *testing.T) {
+	cacheDir := t.TempDir()
+	startedAt := time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC)
+	if err := WriteLlamaCPPRPCState(cacheDir, LlamaCPPRPCState{
+		Running:   true,
+		Endpoint:  "127.0.0.1:50052",
+		PID:       1234,
+		StartedAt: startedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := ReadLlamaCPPRPCState(cacheDir)
+	if !ok {
+		t.Fatal("expected rpc state")
+	}
+	if state.Endpoint != "127.0.0.1:50052" || state.PID != 1234 || !state.StartedAt.Equal(startedAt) || state.UpdatedAt.IsZero() {
+		t.Fatalf("unexpected rpc state: %#v", state)
+	}
+	if err := ClearLlamaCPPRPCState(cacheDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadLlamaCPPRPCState(cacheDir); ok {
+		t.Fatal("expected rpc state to be cleared")
+	}
+}
+
+func TestDiscoverRuntimesAdvertisesActiveLlamaCPPRPCState(t *testing.T) {
+	dir := t.TempDir()
+	cli := filepath.Join(dir, "llama-cli")
+	rpcServer := filepath.Join(dir, "rpc-server")
+	if runtime.GOOS == "windows" {
+		cli = filepath.Join(dir, "llama-cli.exe")
+		rpcServer = filepath.Join(dir, "rpc-server.exe")
+	}
+	if err := os.WriteFile(cli, []byte("cli"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rpcServer, []byte("server"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	cacheDir := filepath.Join(dir, "cache")
+	if err := WriteLlamaCPPRPCState(cacheDir, LlamaCPPRPCState{
+		Running:  true,
+		Endpoint: "127.0.0.1:50052",
+		PID:      1234,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	items := DiscoverRuntimes(cacheDir)
+	if len(items) != 1 || len(items[0].RPCRuntimes) != 1 {
+		t.Fatalf("expected one runtime with rpc probe, got %#v", items)
+	}
+	rpc := items[0].RPCRuntimes[0]
+	if !rpc.Ready || rpc.Endpoint != "127.0.0.1:50052" {
+		t.Fatalf("expected active rpc endpoint, got %#v", rpc)
+	}
+	if !slices.Contains(items[0].Capabilities, runtimes.CapabilityLlamaCPPRPCBackend) || !slices.Contains(items[0].Capabilities, runtimes.CapabilityLlamaCPPRPCClient) {
+		t.Fatalf("expected rpc capabilities, got %#v", items[0].Capabilities)
 	}
 }

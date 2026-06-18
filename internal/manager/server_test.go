@@ -2027,6 +2027,68 @@ func TestRuntimeStageProbesEndpointReportsWorkerDiagnostics(t *testing.T) {
 	}
 }
 
+func TestRuntimeRPCPoolEndpointReportsReadyEndpoints(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "rpc-worker-a", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:         "llama.cpp",
+			Ready:        true,
+			Capabilities: []string{"llama.cpp-rpc-client", "llama.cpp-rpc-backend"},
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:       "llama.cpp-rpc",
+				Ready:      true,
+				Endpoint:   "10.0.0.10:50052",
+				Protocol:   "llama.cpp-rpc",
+				ServerPath: "/tmp/rpc-server",
+			}},
+		}},
+	})
+	joinWorkerWithResourcesForTest(t, srv, "rpc-worker-b", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    false,
+				Endpoint: "10.0.0.11:50052",
+				Blockers: []string{"llama.cpp rpc-server is not running"},
+			}},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/runtime/rpc-pool", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Summary        RuntimeRPCPoolSummary  `json:"summary"`
+		Workers        []RuntimeRPCPoolWorker `json:"workers"`
+		Endpoints      []string               `json:"endpoints"`
+		LlamaCLIRPCArg string                 `json:"llama_cli_rpc_arg"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Summary.Workers != 2 || payload.Summary.RuntimeReadyWorkers != 2 || payload.Summary.RPCReadyWorkers != 1 || payload.Summary.Endpoints != 1 {
+		t.Fatalf("unexpected rpc pool summary: %#v", payload.Summary)
+	}
+	if len(payload.Workers) != 1 || payload.Workers[0].RPC.Endpoint != "10.0.0.10:50052" {
+		t.Fatalf("unexpected rpc pool workers: %#v", payload.Workers)
+	}
+	if len(payload.Endpoints) != 1 || payload.Endpoints[0] != "10.0.0.10:50052" || payload.LlamaCLIRPCArg != "10.0.0.10:50052" {
+		t.Fatalf("unexpected rpc endpoints: endpoints=%#v arg=%q", payload.Endpoints, payload.LlamaCLIRPCArg)
+	}
+}
+
 func TestClusterReadinessReadyWhenRuntimeAndModelAreReady(t *testing.T) {
 	node := cluster.Node{
 		ID:     "node-ready",

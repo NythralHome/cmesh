@@ -24,6 +24,14 @@ type DiscoveryOptions struct {
 	CacheDir string
 }
 
+type LlamaCPPRPCState struct {
+	Running   bool      `json:"running"`
+	Endpoint  string    `json:"endpoint"`
+	PID       int       `json:"pid,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 func DiscoverLocal(options DiscoveryOptions) cluster.ResourceSnapshot {
 	if options.CacheDir != "" {
 		_ = os.MkdirAll(options.CacheDir, 0o755)
@@ -59,6 +67,61 @@ func DiscoverLocal(options DiscoveryOptions) cluster.ResourceSnapshot {
 		Models:   DiscoverInstalledModels(options.CacheDir),
 		Runtimes: DiscoverRuntimes(options.CacheDir),
 	}
+}
+
+func LlamaCPPRPCStatePath(cacheDir string) string {
+	return filepath.Join(cacheDir, "runtimes", "llama.cpp-rpc.json")
+}
+
+func WriteLlamaCPPRPCState(cacheDir string, state LlamaCPPRPCState) error {
+	cacheDir = strings.TrimSpace(cacheDir)
+	if cacheDir == "" {
+		return nil
+	}
+	state.Endpoint = strings.TrimSpace(state.Endpoint)
+	state.UpdatedAt = time.Now().UTC()
+	path := LlamaCPPRPCStatePath(cacheDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	return os.WriteFile(path, body, 0o600)
+}
+
+func ClearLlamaCPPRPCState(cacheDir string) error {
+	cacheDir = strings.TrimSpace(cacheDir)
+	if cacheDir == "" {
+		return nil
+	}
+	err := os.Remove(LlamaCPPRPCStatePath(cacheDir))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func ReadLlamaCPPRPCState(cacheDir string) (LlamaCPPRPCState, bool) {
+	cacheDir = strings.TrimSpace(cacheDir)
+	if cacheDir == "" {
+		return LlamaCPPRPCState{}, false
+	}
+	body, err := os.ReadFile(LlamaCPPRPCStatePath(cacheDir))
+	if err != nil {
+		return LlamaCPPRPCState{}, false
+	}
+	var state LlamaCPPRPCState
+	if err := json.Unmarshal(body, &state); err != nil {
+		return LlamaCPPRPCState{}, false
+	}
+	state.Endpoint = strings.TrimSpace(state.Endpoint)
+	if !state.Running || state.Endpoint == "" {
+		return LlamaCPPRPCState{}, false
+	}
+	return state, true
 }
 
 type CMeshStorageUsage struct {
@@ -163,20 +226,20 @@ func DiscoverRuntimes(cacheDir string) []cluster.RuntimeResource {
 		Platform:      status.Platform,
 		BinaryPath:    status.BinaryPath,
 		Source:        status.Source,
-		Capabilities:  runtimeCapabilities(status),
-		RPCRuntimes:   runtimeRPCRuntimes(status),
+		Capabilities:  runtimeCapabilities(status, cacheDir),
+		RPCRuntimes:   runtimeRPCRuntimes(status, cacheDir),
 		StageRuntimes: runtimeStageRuntimes(status),
 		Error:         status.Error,
 	}}
 }
 
-func runtimeCapabilities(status runtimes.RuntimeStatus) []string {
+func runtimeCapabilities(status runtimes.RuntimeStatus, cacheDir string) []string {
 	if !status.Ready {
 		return nil
 	}
 	if status.Name == runtimes.LlamaCPPName {
 		capabilities := runtimes.LogicalStageCapabilities()
-		if runtimes.NewLlamaCPPRPCRuntime(status.BinaryPath, "").Probe(context.Background()).Ready {
+		if state, ok := ReadLlamaCPPRPCState(cacheDir); ok && runtimes.NewLlamaCPPRPCRuntime(status.BinaryPath, state.Endpoint).Probe(context.Background()).Ready {
 			capabilities = append(capabilities, runtimes.CapabilityLlamaCPPRPCClient, runtimes.CapabilityLlamaCPPRPCBackend)
 		}
 		return capabilities
@@ -184,18 +247,28 @@ func runtimeCapabilities(status runtimes.RuntimeStatus) []string {
 	return nil
 }
 
-func runtimeRPCRuntimes(status runtimes.RuntimeStatus) []cluster.RPCRuntimeResource {
+func runtimeRPCRuntimes(status runtimes.RuntimeStatus, cacheDir string) []cluster.RPCRuntimeResource {
 	if status.Name != runtimes.LlamaCPPName {
 		return nil
 	}
-	probe := runtimes.NewLlamaCPPRPCRuntime(status.BinaryPath, "").Probe(context.Background())
+	endpoint := ""
+	state, active := ReadLlamaCPPRPCState(cacheDir)
+	if active {
+		endpoint = state.Endpoint
+	}
+	probe := runtimes.NewLlamaCPPRPCRuntime(status.BinaryPath, endpoint).Probe(context.Background())
+	ready := active && probe.Ready
+	blockers := append([]string(nil), probe.Blockers...)
+	if probe.Ready && !active {
+		blockers = append(blockers, "llama.cpp rpc-server is not running")
+	}
 	return []cluster.RPCRuntimeResource{{
 		Name:       probe.Name,
-		Ready:      probe.Ready,
+		Ready:      ready,
 		ServerPath: probe.ServerPath,
 		Endpoint:   probe.Endpoint,
 		Protocol:   probe.Protocol,
-		Blockers:   append([]string(nil), probe.Blockers...),
+		Blockers:   blockers,
 	}}
 }
 

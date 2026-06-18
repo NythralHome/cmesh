@@ -82,6 +82,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/v1/capacity", s.handleCapacity)
 	mux.HandleFunc("/v1/dashboard/status", s.handleDashboardStatus)
 	mux.HandleFunc("/v1/runtime/stage-probes", s.handleRuntimeStageProbes)
+	mux.HandleFunc("/v1/runtime/rpc-pool", s.handleRuntimeRPCPool)
 	mux.HandleFunc("/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/v1/cluster-benchmarks", s.handleClusterBenchmarks)
@@ -601,6 +602,90 @@ func runtimeStageProbeReport(nodes []cluster.Node) (RuntimeStageProbeSummary, []
 		return workers[i].Runtime < workers[j].Runtime
 	})
 	return summary, workers
+}
+
+type RuntimeRPCPoolSummary struct {
+	Workers             int `json:"workers"`
+	RuntimeReadyWorkers int `json:"runtime_ready_workers"`
+	RPCReadyWorkers     int `json:"rpc_ready_workers"`
+	Endpoints           int `json:"endpoints"`
+}
+
+type RuntimeRPCPoolWorker struct {
+	NodeID       string                     `json:"node_id"`
+	NodeName     string                     `json:"node_name"`
+	Status       cluster.NodeStatus         `json:"status"`
+	Runtime      string                     `json:"runtime"`
+	RuntimeReady bool                       `json:"runtime_ready"`
+	RPC          cluster.RPCRuntimeResource `json:"rpc"`
+	Capabilities []string                   `json:"capabilities,omitempty"`
+}
+
+func (s *Server) handleRuntimeRPCPool(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	summary, workers, endpoints := runtimeRPCPoolReport(s.state.Nodes())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"summary":           summary,
+		"workers":           workers,
+		"endpoints":         endpoints,
+		"llama_cli_rpc_arg": strings.Join(endpoints, ","),
+	})
+}
+
+func runtimeRPCPoolReport(nodes []cluster.Node) (RuntimeRPCPoolSummary, []RuntimeRPCPoolWorker, []string) {
+	summary := RuntimeRPCPoolSummary{}
+	workers := make([]RuntimeRPCPoolWorker, 0)
+	endpoints := make([]string, 0)
+	seenEndpoint := map[string]bool{}
+	for _, node := range nodes {
+		if node.Role != cluster.NodeRoleWorker || node.Status != cluster.NodeStatusOnline {
+			continue
+		}
+		summary.Workers++
+		for _, runtimeStatus := range node.Resources.Runtimes {
+			if runtimeStatus.Ready {
+				summary.RuntimeReadyWorkers++
+			}
+			if !runtimeStatus.Ready {
+				continue
+			}
+			for _, rpc := range runtimeStatus.RPCRuntimes {
+				endpoint := strings.TrimSpace(rpc.Endpoint)
+				if !rpc.Ready || endpoint == "" {
+					continue
+				}
+				summary.RPCReadyWorkers++
+				if !seenEndpoint[endpoint] {
+					seenEndpoint[endpoint] = true
+					endpoints = append(endpoints, endpoint)
+				}
+				workers = append(workers, RuntimeRPCPoolWorker{
+					NodeID:       node.ID,
+					NodeName:     nodeDisplayName(node),
+					Status:       node.Status,
+					Runtime:      runtimeStatus.Name,
+					RuntimeReady: runtimeStatus.Ready,
+					RPC:          rpc,
+					Capabilities: append([]string(nil), runtimeStatus.Capabilities...),
+				})
+			}
+		}
+	}
+	sort.Strings(endpoints)
+	sort.Slice(workers, func(i, j int) bool {
+		if workers[i].NodeName != workers[j].NodeName {
+			return workers[i].NodeName < workers[j].NodeName
+		}
+		return workers[i].RPC.Endpoint < workers[j].RPC.Endpoint
+	})
+	summary.Endpoints = len(endpoints)
+	return summary, workers, endpoints
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {

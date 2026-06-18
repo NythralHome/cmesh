@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/cmesh/cmesh/internal/resources"
 )
 
 func TestConfigRoundTrip(t *testing.T) {
@@ -366,11 +368,18 @@ func TestStartStopLlamaCPPRPCServer(t *testing.T) {
 	if status.RPC.Endpoint != "127.0.0.1:50123" {
 		t.Fatalf("expected rpc endpoint, got %+v", status.RPC)
 	}
+	state, ok := resources.ReadLlamaCPPRPCState(server.config.WorkerCacheDir)
+	if !ok || state.Endpoint != "127.0.0.1:50123" || state.PID == 0 {
+		t.Fatalf("expected rpc state file, got ok=%v state=%+v", ok, state)
+	}
 	if err := server.stopLlamaCPPRPC(); err != nil {
 		t.Fatal(err)
 	}
 	if status := server.status(); status.RPC.Running {
 		t.Fatalf("expected rpc server stopped, got %+v", status.RPC)
+	}
+	if _, ok := resources.ReadLlamaCPPRPCState(server.config.WorkerCacheDir); ok {
+		t.Fatal("expected rpc state file to be cleared")
 	}
 }
 
