@@ -3,6 +3,8 @@ package models
 import (
 	"fmt"
 	"strings"
+
+	"github.com/cmesh/cmesh/internal/cdip"
 )
 
 const (
@@ -83,6 +85,7 @@ type DistributedGenerateInput struct {
 	Temperature    string                  `json:"temperature,omitempty"`
 	Mode           string                  `json:"mode"`
 	Stages         []DistributedStageInput `json:"stages"`
+	Shards         []cdip.ModelShard       `json:"shards,omitempty"`
 }
 
 type DistributedStageInput struct {
@@ -99,6 +102,7 @@ type DistributedStageJobInput struct {
 	ModelID          string                `json:"model_id"`
 	ConversationID   string                `json:"conversation_id,omitempty"`
 	Stage            DistributedStageInput `json:"stage"`
+	Shard            cdip.ModelShard       `json:"shard"`
 	UpstreamNodeID   string                `json:"upstream_node_id,omitempty"`
 	DownstreamNodeID string                `json:"downstream_node_id,omitempty"`
 	Prompt           string                `json:"prompt,omitempty"`

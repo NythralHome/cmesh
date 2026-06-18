@@ -245,6 +245,16 @@ func TestDistributedGenerateEndpointCreatesPlannedJobGraph(t *testing.T) {
 		if stageJob.LastFailure != "waiting for coordinator" {
 			t.Fatalf("expected stage job to wait for coordinator, got %#v", stageJob)
 		}
+		var stageInput models.DistributedStageJobInput
+		if err := json.Unmarshal([]byte(stageJob.Input), &stageInput); err != nil {
+			t.Fatal(err)
+		}
+		if stageInput.Shard.Stage.Index != stageInput.Stage.Index || stageInput.Shard.Stage.NodeID != stageInput.Stage.NodeID {
+			t.Fatalf("expected stage job input to include matching shard contract, got %#v", stageInput)
+		}
+		if stageInput.Shard.Runtime != string(models.RuntimeLlamaCPP) || stageInput.Shard.SourceArtifact == "" || stageInput.Shard.TargetArtifact == "" {
+			t.Fatalf("expected stage job input to include runtime and shard artifacts, got %#v", stageInput.Shard)
+		}
 	}
 	if len(state.Jobs()) != 3 {
 		t.Fatalf("expected parent plus two stage jobs, got %#v", state.Jobs())
@@ -392,6 +402,11 @@ func TestDistributedStageJobRequestsBuildPipelineTopology(t *testing.T) {
 			{Index: 1, NodeID: "node-b", NodeName: "B", LayerStart: 11, LayerEnd: 20, Layers: 10},
 			{Index: 2, NodeID: "node-c", NodeName: "C", LayerStart: 21, LayerEnd: 31, Layers: 11},
 		},
+		Shards: []cdip.ModelShard{
+			{Stage: cdip.Stage{Index: 0, NodeID: "node-a", NodeName: "A", LayerStart: 0, LayerEnd: 10}, Runtime: "llama.cpp", SourceArtifact: "https://example.test/model.gguf", TargetArtifact: "stage-0", Materialization: cdip.ShardLogicalLayers},
+			{Stage: cdip.Stage{Index: 1, NodeID: "node-b", NodeName: "B", LayerStart: 11, LayerEnd: 20}, Runtime: "llama.cpp", SourceArtifact: "https://example.test/model.gguf", TargetArtifact: "stage-1", Materialization: cdip.ShardLogicalLayers},
+			{Stage: cdip.Stage{Index: 2, NodeID: "node-c", NodeName: "C", LayerStart: 21, LayerEnd: 31}, Runtime: "llama.cpp", SourceArtifact: "https://example.test/model.gguf", TargetArtifact: "stage-2", Materialization: cdip.ShardLogicalLayers},
+		},
 	}
 
 	requests, err := distributedStageJobRequests(parent, input)
@@ -418,6 +433,9 @@ func TestDistributedStageJobRequestsBuildPipelineTopology(t *testing.T) {
 		if stageInput.ParentJobID != parent.ID || stageInput.ModelID != input.ModelID || stageInput.Stage.Index != index {
 			t.Fatalf("unexpected stage input %d: %#v", index, stageInput)
 		}
+		if stageInput.Shard.Stage.Index != index || stageInput.Shard.Runtime != "llama.cpp" || stageInput.Shard.TargetArtifact == "" {
+			t.Fatalf("expected shard contract in stage input %d: %#v", index, stageInput.Shard)
+		}
 		switch index {
 		case 0:
 			if stageInput.UpstreamNodeID != "" || stageInput.DownstreamNodeID != "node-b" {
@@ -441,6 +459,10 @@ func TestDistributedStageJobRequestsRejectsInvalidStageOrder(t *testing.T) {
 		Stages: []models.DistributedStageInput{
 			{Index: 0, NodeID: "node-a"},
 			{Index: 3, NodeID: "node-b"},
+		},
+		Shards: []cdip.ModelShard{
+			{Stage: cdip.Stage{Index: 0, NodeID: "node-a"}, Runtime: "llama.cpp", Materialization: cdip.ShardLogicalLayers},
+			{Stage: cdip.Stage{Index: 3, NodeID: "node-b"}, Runtime: "llama.cpp", Materialization: cdip.ShardLogicalLayers},
 		},
 	})
 	if err == nil {

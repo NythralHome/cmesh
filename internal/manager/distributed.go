@@ -391,6 +391,9 @@ func distributedStageJobRequests(parent jobs.Job, input models.DistributedGenera
 	if len(input.Stages) < 2 {
 		return nil, fmt.Errorf("distributed generate requires at least 2 stages")
 	}
+	if len(input.Shards) != len(input.Stages) {
+		return nil, fmt.Errorf("distributed generate requires one shard per stage")
+	}
 	out := make([]jobs.CreateRequest, 0, len(input.Stages))
 	for index, stage := range input.Stages {
 		if strings.TrimSpace(stage.NodeID) == "" {
@@ -399,11 +402,16 @@ func distributedStageJobRequests(parent jobs.Job, input models.DistributedGenera
 		if stage.Index != index {
 			return nil, fmt.Errorf("stage index mismatch: got %d at position %d", stage.Index, index)
 		}
+		shard := input.Shards[index]
+		if shard.Stage.Index != stage.Index || shard.Stage.NodeID != stage.NodeID || shard.Stage.LayerStart != stage.LayerStart || shard.Stage.LayerEnd != stage.LayerEnd {
+			return nil, fmt.Errorf("shard %d does not match stage %d", index, stage.Index)
+		}
 		stageInput := models.DistributedStageJobInput{
 			ParentJobID:    parent.ID,
 			ModelID:        input.ModelID,
 			ConversationID: input.ConversationID,
 			Stage:          stage,
+			Shard:          shard,
 			Prompt:         input.Prompt,
 			Messages:       input.Messages,
 			SystemPrompt:   input.SystemPrompt,

@@ -797,6 +797,7 @@ func (s *Server) handleModelDistributedGenerate(w http.ResponseWriter, r *http.R
 		Temperature:    temperature,
 		Mode:           plan.Mode,
 		Stages:         distributedStageInputs(plan.Stages),
+		Shards:         cdipShardManifest(model, plan).Shards,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
