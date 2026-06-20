@@ -4,7 +4,7 @@ This file is the release-track source of truth after the Linux production
 launch candidate. Update it after every meaningful release step and include the
 checklist in status reports.
 
-Last updated: 2026-06-20T17:18:00Z
+Last updated: 2026-06-20T15:35:00Z
 
 ## Checklist
 
@@ -20,14 +20,14 @@ Last updated: 2026-06-20T17:18:00Z
 - [DONE] R10. Demo deployment
 - [DONE] R11. Early adopter validation
 - [DONE] R12. Release announcement package
-- [IN PROGRESS] R13. Public release publish
-- [TODO] R14. Post-release monitoring
-- [TODO] R15. v0.1.1 stabilization plan
+- [DONE] R13. Public release publish
+- [DONE] R14. Post-release monitoring
+- [DONE] R15. v0.1.1 stabilization plan
 
 ## Current Focus
 
-R13 is in progress. Release announcement docs are ready; the next step is to
-publish the GitHub prerelease and verify public assets.
+R15 is closed. The public Linux RC release is published, post-release
+monitoring is documented, and the v0.1.1 stabilization backlog is ready.
 
 ## R1 Exit Criteria
 
@@ -344,11 +344,56 @@ R12 is closed by the announcement draft:
 - Signature verification instructions work from a clean shell.
 - Landing/docs links point to the release.
 
+## R13 Evidence
+
+R13 is closed by the published GitHub prerelease:
+
+- Release:
+  `https://github.com/NythralHome/cmesh/releases/tag/v0.1.0-linux-rc.1`
+- Branch:
+  `release/v0.1-linux`
+- Tag:
+  `v0.1.0-linux-rc.1`
+- Uploaded assets:
+  - `v0.1.0-linux-rc.1.tar.gz`
+  - `v0.1.0-linux-rc.1.tar.gz.sha256`
+  - `v0.1.0-linux-rc.1.tar.gz.sig`
+  - `v0.1.0-linux-rc.1.tar.gz.public-key.pem`
+- Public asset verification evidence:
+  `/tmp/cmesh-github-release-verify-EyVJTD`
+- Validation:
+  - public tarball downloaded from GitHub
+  - tarball SHA256 verified
+  - tarball signature verified
+  - internal `manifest.json.sig` verified
+  - internal `checksums.txt.sig` verified
+  - internal package checksums verified
+
 ## R14 Exit Criteria
 
 - Post-release monitoring checklist is active.
 - Broken links, install failures, first issues, and user reports are triaged.
 - Cloud resources created during release validation are confirmed cleaned up.
+
+## R14 Evidence
+
+R14 is closed by post-release monitoring docs and GitHub release inspection:
+
+- Monitoring checklist: `docs/POST_RELEASE_MONITORING.md`
+- Smoke: `scripts/post-release-monitoring-smoke.sh`
+- GitHub release:
+  `https://github.com/NythralHome/cmesh/releases/tag/v0.1.0-linux-rc.1`
+- Release state:
+  - tag: `v0.1.0-linux-rc.1`
+  - prerelease: `true`
+  - assets present:
+    - `v0.1.0-linux-rc.1.tar.gz`
+    - `v0.1.0-linux-rc.1.tar.gz.public-key.pem`
+    - `v0.1.0-linux-rc.1.tar.gz.sha256`
+    - `v0.1.0-linux-rc.1.tar.gz.sig`
+- Validation:
+  - `scripts/post-release-monitoring-smoke.sh` passed.
+  - `gh release view v0.1.0-linux-rc.1` returned the expected assets.
 
 ## R15 Exit Criteria
 
@@ -357,3 +402,15 @@ R12 is closed by the announcement draft:
 - Windows/macOS parity work is separated from Linux patch work.
 - Release automation can be stopped because the public release loop has a next
   patch plan.
+
+## R15 Evidence
+
+R15 is closed by the stabilization plan:
+
+- Plan: `docs/V0_1_1_STABILIZATION_PLAN.md`
+- Smoke: `scripts/stabilization-plan-smoke.sh`
+- Validation:
+  - `scripts/stabilization-plan-smoke.sh` passed.
+  - Linux v0.1.1 patch work is separated from Windows/macOS parity.
+  - deferred work explicitly excludes GPU, public marketplace, payments, and
+    arbitrary model slicing.
