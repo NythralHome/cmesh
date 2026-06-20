@@ -16,6 +16,7 @@ type JoinRequest struct {
 
 type JoinResponse struct {
 	NodeID         string        `json:"node_id"`
+	NodeAuthToken  string        `json:"node_auth_token,omitempty"`
 	ManagerPeers   []string      `json:"manager_peers"`
 	HeartbeatEvery time.Duration `json:"heartbeat_every"`
 }

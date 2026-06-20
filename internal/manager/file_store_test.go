@@ -58,6 +58,10 @@ func TestFileStorePersistsState(t *testing.T) {
 	if nodes[0].Resources.CPU.CoresAllowed != 2 {
 		t.Fatalf("expected restored CPU resources")
 	}
+	restoredToken, ok := restored.WorkerAuthToken(joinResp.NodeID)
+	if !ok || restoredToken == "" || restoredToken != joinResp.NodeAuthToken {
+		t.Fatalf("expected restored worker auth token")
+	}
 
 	summary := restored.BenchmarkSummaryByNode()[joinResp.NodeID]
 	if summary.TotalScore != 12.5 {

@@ -9,6 +9,9 @@ ARTIFACT_DIR="${CMESH_DRY_RUN_ARTIFACT_DIR:-$ROOT_DIR/dist/release-dry-run}"
 PORT="${CMESH_DRY_RUN_PORT:-18081}"
 SKIP_DESKTOP_BUILD="${CMESH_DRY_RUN_SKIP_DESKTOP_BUILD:-false}"
 SKIP_DMG="${CMESH_DRY_RUN_SKIP_DMG:-false}"
+SKIP_INSTALLER_SMOKE="${CMESH_DRY_RUN_SKIP_INSTALLER_SMOKE:-false}"
+SKIP_SECURITY_SMOKE="${CMESH_DRY_RUN_SKIP_SECURITY_SMOKE:-false}"
+SKIP_OBSERVABILITY_SMOKE="${CMESH_DRY_RUN_SKIP_OBSERVABILITY_SMOKE:-false}"
 
 BIN_DIR="$ROOT_DIR/bin"
 BIN="$BIN_DIR/cmesh"
@@ -25,6 +28,14 @@ fail() {
 
 need() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
+}
+
+file_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
 }
 
 cleanup() {
@@ -102,7 +113,7 @@ build_worker_desktop() {
       cp "$BIN" "$embedded"
       chmod +x "$embedded"
       [[ -x "$embedded" ]] || fail "embedded cmesh is not executable: $embedded"
-      "$embedded" version | grep -F "$VERSION" >/dev/null || fail "embedded cmesh version mismatch"
+      [[ "$(file_sha256 "$BIN")" == "$(file_sha256 "$embedded")" ]] || fail "embedded cmesh checksum mismatch"
       ditto "$app_bundle" "$ARTIFACT_DIR/CMesh Worker.app"
       if [[ "$SKIP_DMG" != "true" ]]; then
         step "Package macOS DMG" "$ROOT_DIR/scripts/package-macos-dmg.sh" "$app_bundle" "$ARTIFACT_DIR/CMesh-Worker-Apple-Silicon.dmg" "CMesh Worker $VERSION"
@@ -147,6 +158,34 @@ manager_smoke() {
   grep -F "qwen2.5-0.5b-instruct-q4-k-m" "$ARTIFACT_DIR/models.json" >/dev/null || fail "model catalog smoke failed"
 }
 
+installer_dry_run_smoke() {
+  if [[ "$SKIP_INSTALLER_SMOKE" == "true" ]]; then
+    echo "installer dry-run smoke skipped by CMESH_DRY_RUN_SKIP_INSTALLER_SMOKE=true"
+    return
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "installer dry-run smoke skipped because docker is not available"
+    return
+  fi
+  WORK_DIR="$ARTIFACT_DIR/installers-dry-run-smoke" "$ROOT_DIR/scripts/installers-dry-run-smoke.sh"
+}
+
+security_smoke() {
+  if [[ "$SKIP_SECURITY_SMOKE" == "true" ]]; then
+    echo "security smoke skipped by CMESH_DRY_RUN_SKIP_SECURITY_SMOKE=true"
+    return
+  fi
+  CMESH_PRODUCTION_SECURITY_SMOKE_DIR="$ARTIFACT_DIR/production-security-smoke" "$ROOT_DIR/scripts/production-security-smoke.sh"
+}
+
+observability_smoke() {
+  if [[ "$SKIP_OBSERVABILITY_SMOKE" == "true" ]]; then
+    echo "observability smoke skipped by CMESH_DRY_RUN_SKIP_OBSERVABILITY_SMOKE=true"
+    return
+  fi
+  CMESH_OBSERVABILITY_SMOKE_DIR="$ARTIFACT_DIR/observability-smoke" "$ROOT_DIR/scripts/observability-smoke.sh"
+}
+
 write_manifest() {
   {
     echo "artifacts:"
@@ -170,6 +209,9 @@ main() {
   step "Flutter worker tests" flutter_tests
   step "Build CMesh CLI" build_cli
   step "Build worker desktop" build_worker_desktop
+  step "Installer dry-run smoke" installer_dry_run_smoke
+  step "Production security smoke" security_smoke
+  step "Observability smoke" observability_smoke
   step "Manager dashboard/API smoke" manager_smoke
   write_manifest
 }

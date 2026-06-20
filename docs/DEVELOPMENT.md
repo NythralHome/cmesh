@@ -8,6 +8,10 @@ Terminal 1:
 go run ./cmd/cmesh manager start
 ```
 
+The development default listens on `127.0.0.1:8080`. If you bind the manager to
+a public interface, configure `CMESH_JOIN_TOKEN` and `CMESH_OPERATOR_TOKEN` or
+pass `--join-token` and `--operator-token`.
+
 Terminal 2:
 
 ```sh

@@ -165,6 +165,17 @@ type ModelArtifact struct {
 	Bytes      uint64 `json:"bytes,omitempty"`
 }
 
+type ShardArtifact struct {
+	Protocol              string `json:"protocol"`
+	Status                string `json:"status"`
+	LayerStart            int    `json:"layer_start"`
+	LayerEnd              int    `json:"layer_end"`
+	ExpectedBytes         uint64 `json:"expected_bytes,omitempty"`
+	Checksum              string `json:"checksum,omitempty"`
+	URI                   string `json:"uri,omitempty"`
+	PhysicalArtifactReady bool   `json:"physical_artifact_ready"`
+}
+
 type ModelShard struct {
 	Stage               Stage                `json:"stage"`
 	Runtime             string               `json:"runtime"`
@@ -172,6 +183,7 @@ type ModelShard struct {
 	RequiredDiskBytes   uint64               `json:"required_disk_bytes,omitempty"`
 	SourceArtifact      string               `json:"source_artifact,omitempty"`
 	TargetArtifact      string               `json:"target_artifact,omitempty"`
+	Artifact            ShardArtifact        `json:"artifact,omitempty"`
 	Materialization     ShardMaterialization `json:"materialization"`
 	Capabilities        []string             `json:"capabilities,omitempty"`
 }
@@ -221,6 +233,14 @@ func (m ShardManifest) Validate() error {
 		}
 		if shard.Stage.LayerEnd >= m.TotalLayers {
 			return fmt.Errorf("shard %d layer_end %d exceeds total_layers %d", i, shard.Stage.LayerEnd, m.TotalLayers)
+		}
+		if strings.TrimSpace(shard.Artifact.Protocol) != "" {
+			if shard.Artifact.LayerStart != shard.Stage.LayerStart || shard.Artifact.LayerEnd != shard.Stage.LayerEnd {
+				return fmt.Errorf("shard %d artifact layer range does not match stage", i)
+			}
+			if shard.Artifact.PhysicalArtifactReady && strings.TrimSpace(shard.Artifact.URI) == "" {
+				return fmt.Errorf("shard %d physical artifact is ready but uri is empty", i)
+			}
 		}
 		stages = append(stages, shard.Stage)
 	}

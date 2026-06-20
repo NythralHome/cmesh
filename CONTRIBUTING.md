@@ -17,7 +17,16 @@ go test ./...
 go run ./cmd/cmesh --help
 ```
 
-The web dashboard will live under `web/` once the frontend stack is introduced.
+Release-track changes should also run the relevant smoke:
+
+```sh
+scripts/linux-production-docs-smoke.sh
+scripts/linux-production-security-doc-smoke.sh
+scripts/linux-stable-release-smoke.sh
+```
+
+Do not commit generated release artifacts from `dist/`, private signing keys,
+local AWS evidence, or model weight files.
 
 ## Pull Requests
 
@@ -28,3 +37,9 @@ Good pull requests include:
 - tests for changed behavior when practical;
 - documentation updates for API or architecture changes.
 
+## Release Claims
+
+Keep public claims aligned with the release scope in
+`docs/RELEASE_SCOPE.md`. Do not claim Windows/macOS production support,
+arbitrary model slicing, public untrusted worker markets, or GPU production
+support until those paths have their own evidence and milestones.

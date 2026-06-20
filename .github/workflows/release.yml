@@ -7,6 +7,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  LLAMA_CPP_REF: b9704
 
 jobs:
   cli:
@@ -37,6 +38,43 @@ jobs:
           prerelease: true
           files: |
             dist/*
+
+  llama-cpp-runtime-linux-amd64:
+    name: Build llama.cpp RPC Runtime Linux amd64
+    runs-on: ubuntu-latest
+    needs: cli
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git
+
+      - name: Build runtime
+        run: |
+          scripts/build-llamacpp-runtime.sh
+          CMESH_LLAMA_CPP_STAGE_RUNNER=true scripts/build-llamacpp-runtime.sh
+
+      - name: Verify runtime artifacts
+        run: |
+          scripts/verify-llamacpp-runtime-artifact.sh dist/runtimes/llama.cpp-${LLAMA_CPP_REF}-linux-amd64-rpc.tar.gz
+          scripts/verify-llamacpp-runtime-artifact.sh dist/runtimes/llama.cpp-${LLAMA_CPP_REF}-linux-amd64-rpc-stage.tar.gz
+
+      - name: Checksums
+        run: |
+          cd dist/runtimes
+          sha256sum * > llama-cpp-runtime-checksums.txt
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: |
+            dist/runtimes/*
 
   worker-desktop-macos:
     name: Build Worker Desktop macOS (${{ matrix.goarch }})

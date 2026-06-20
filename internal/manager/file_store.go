@@ -21,13 +21,14 @@ type FileStore struct {
 }
 
 type fileStoreSnapshot struct {
-	StartedAt     time.Time                                                        `json:"started_at"`
-	Nodes         map[string]cluster.Node                                          `json:"nodes"`
-	Benchmarks    map[string]map[resources.BenchmarkKind]resources.BenchmarkResult `json:"benchmarks"`
-	RPCHealth     map[string]RPCHealthRecord                                       `json:"rpc_health,omitempty"`
-	Jobs          map[string]jobs.Job                                              `json:"jobs"`
-	Conversations map[string]Conversation                                          `json:"conversations,omitempty"`
-	Memories      map[string]Memory                                                `json:"memories,omitempty"`
+	StartedAt      time.Time                                                        `json:"started_at"`
+	Nodes          map[string]cluster.Node                                          `json:"nodes"`
+	NodeAuthTokens map[string]string                                                `json:"node_auth_tokens,omitempty"`
+	Benchmarks     map[string]map[resources.BenchmarkKind]resources.BenchmarkResult `json:"benchmarks"`
+	RPCHealth      map[string]RPCHealthRecord                                       `json:"rpc_health,omitempty"`
+	Jobs           map[string]jobs.Job                                              `json:"jobs"`
+	Conversations  map[string]Conversation                                          `json:"conversations,omitempty"`
+	Memories       map[string]Memory                                                `json:"memories,omitempty"`
 }
 
 func NewFileStore(path string) (*FileStore, error) {
@@ -103,8 +104,32 @@ func (s *FileStore) NextJobForWorker(nodeID string) (jobs.Job, bool) {
 	return job, ok
 }
 
+func (s *FileStore) RecoverStaleJobs(staleAfter time.Duration) []jobs.Job {
+	recovered := s.State.RecoverStaleJobs(staleAfter)
+	if len(recovered) > 0 {
+		_ = s.save()
+	}
+	return recovered
+}
+
 func (s *FileStore) UpdateCDIPStageState(jobID string, next cdip.StageState, detail string) (jobs.Job, bool) {
 	job, ok := s.State.UpdateCDIPStageState(jobID, next, detail)
+	if ok {
+		_ = s.save()
+	}
+	return job, ok
+}
+
+func (s *FileStore) UpdateCDIPStageStateWithWorkerResult(jobID string, next cdip.StageState, detail string, workerResult string) (jobs.Job, bool) {
+	job, ok := s.State.UpdateCDIPStageStateWithWorkerResult(jobID, next, detail, workerResult)
+	if ok {
+		_ = s.save()
+	}
+	return job, ok
+}
+
+func (s *FileStore) DispatchCDIPStageCommand(jobID string, input string, next cdip.StageState, detail string) (jobs.Job, bool) {
+	job, ok := s.State.DispatchCDIPStageCommand(jobID, input, next, detail)
 	if ok {
 		_ = s.save()
 	}
@@ -199,6 +224,13 @@ func (s *FileStore) load() error {
 	if snapshot.Nodes != nil {
 		s.nodes = snapshot.Nodes
 	}
+	for nodeID, token := range snapshot.NodeAuthTokens {
+		node, ok := s.nodes[nodeID]
+		if ok {
+			node.AuthToken = token
+			s.nodes[nodeID] = node
+		}
+	}
 	if snapshot.Benchmarks != nil {
 		s.benchmarks = snapshot.Benchmarks
 	}
@@ -220,13 +252,14 @@ func (s *FileStore) load() error {
 func (s *FileStore) save() error {
 	s.mu.RLock()
 	snapshot := fileStoreSnapshot{
-		StartedAt:     s.startedAt,
-		Nodes:         cloneNodes(s.nodes),
-		Benchmarks:    cloneBenchmarks(s.benchmarks),
-		RPCHealth:     cloneRPCHealth(s.rpcHealth),
-		Jobs:          cloneJobs(s.jobs),
-		Conversations: cloneConversations(s.conversations),
-		Memories:      cloneMemories(s.memories),
+		StartedAt:      s.startedAt,
+		Nodes:          cloneNodes(s.nodes),
+		NodeAuthTokens: cloneNodeAuthTokens(s.nodes),
+		Benchmarks:     cloneBenchmarks(s.benchmarks),
+		RPCHealth:      cloneRPCHealth(s.rpcHealth),
+		Jobs:           cloneJobs(s.jobs),
+		Conversations:  cloneConversations(s.conversations),
+		Memories:       cloneMemories(s.memories),
 	}
 	s.mu.RUnlock()
 
@@ -249,6 +282,19 @@ func cloneNodes(in map[string]cluster.Node) map[string]cluster.Node {
 	out := make(map[string]cluster.Node, len(in))
 	for key, value := range in {
 		out[key] = value
+	}
+	return out
+}
+
+func cloneNodeAuthTokens(nodes map[string]cluster.Node) map[string]string {
+	out := make(map[string]string)
+	for nodeID, node := range nodes {
+		if node.AuthToken != "" {
+			out[nodeID] = node.AuthToken
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

@@ -118,7 +118,19 @@ Future runtime features:
 
 The manager currently treats normal runtime readiness and distributed stage runtime readiness as separate checks. A worker can be `llama.cpp` ready for full-model generation while still lacking stage capability. `logical-stage-runtime` means the worker can validate stage contracts and exchange mock activation frames through CDIP. `llama.cpp-stage-runtime` is reserved for the first real layer-stage prototype.
 
-Worker heartbeats may also include `stage_runtimes` diagnostics. These diagnostics are not scheduling capability by themselves. For example, `llama.cpp-stage-experimental` can report that `llama-cli` exists while still returning `ready: false` because the public CLI does not expose CDIP layer-stage activation hooks yet.
+Worker heartbeats may also include `stage_runtimes` diagnostics. These diagnostics are not scheduling capability by themselves. For example, `llama.cpp-stage-experimental` can report that selected-tensor, Qwen2 hidden-input, file-based source-decode, relay-decode, terminal token export, worker dispatch, request-provided runner/model path wiring, planner relay dispatch hooks, token feedback, and file-backed sequence state hooks exist while still returning `ready: false` because automatic runner discovery, daemonized stage sessions, and remote multi-machine validation are not integrated yet.
+
+Stage workers can opt into the current llama.cpp bridge by receiving a `model.generate.distributed.stage` job with `stage_runner_bin` and `model_path`. The default `prepare` command invokes `cmesh-stage-runner prepare` when those paths are supplied and records real GGUF stage metadata; otherwise it uses the logical fallback. Workers can advertise a `cdip.stage-session-v1` daemon endpoint in their runtime resources. The manager carries that endpoint into the distributed plan and automatically writes it to each assigned stage job as `stage_daemon_url`; callers can still override it explicitly for local experiments. When `stage_daemon_url` is present, worker prepare creates a deterministic daemon session for that stage and returns it in the job result. Decode commands then post their tensor envelope to `/v1/sessions/{id}/decode`, so execution traces can prove that all token steps used the same resident stage-session contract. `source_decode` invokes the patched `cmesh-stage-runner source-decode` binary when a runner and model path are supplied, emits a prompt-to-hidden f32 activation frame into the manager relay, and falls back to deterministic mock activation data when no runner/model path is available. `relay_decode` reads an upstream activation frame from the manager relay, invokes the patched `cmesh-stage-runner decode` binary, wraps the output as a structured tensor envelope, and sends it to the configured downstream stage. `terminal_decode` reads the final upstream activation frame, invokes `cmesh-stage-runner terminal-decode`, and returns terminal token output. The terminal result contract supports both the first greedy token (`next_token_id`, `next_token_text`) and a multi-token sequence (`tokens`, `output`). `final:false` records a terminal chunk without completing the parent job; `final:true` completes the parent job with the accumulated output contract.
+
+The CDIP decode endpoint supports `{"mode":"relay_decode"}` as an experimental planner path. In that mode the manager dispatches the first stage back to its worker with `stage_command: "source_decode"`, dispatches middle stages with `stage_command: "relay_decode"`, and dispatches the final stage with `stage_command: "terminal_decode"`. The minimum topology is two stages: source and terminal. This proves manager-driven source-to-relay-to-terminal stage dispatch and parent completion from terminal token output, but it is not a complete chat loop until runner/model paths are discovered automatically and KV state is preserved across repeated real decode steps.
+
+The local worker-execution smoke validates the same path through actual worker job polling and completion using a deterministic fake stage runner. That smoke proves orchestration and transport behavior, not real model tensor correctness. Real tensor correctness is covered separately by the GGUF-local `llamacpp-stage-pipeline-e2e-smoke` when `CMESH_GGUF_MODEL_PATH` is supplied.
+
+The CDIP decode-loop endpoint (`POST /v1/cdip/jobs/{id}/decode-loop`) has two experimental modes. The default mode is a control-plane proof for repeated terminal token output: it emits deterministic terminal chunks with `final:false` semantics for intermediate chunks and completes the parent job on the final chunk. The response and parent result include a `trace` object with `session_id`, `kv_cache_key`, stage job IDs, terminal stage, and max token count so the real runner loop can attach KV ownership without changing the API shape.
+
+`{"mode":"dispatch","step":N}` dispatches one decode-loop wave to the real stage jobs without completing the parent. The manager rewrites each stage job input with `source_decode`, `relay_decode`, or `terminal_decode`, sets the requested `step`, and propagates the shared `kv_cache_key`. Workers can then poll those jobs and execute the existing activation relay path. When a previous terminal result exists, the next source stage receives `previous_token_id` and `previous_token_text`, and the llama.cpp stage runner can execute `source-decode` from that token instead of replaying the original prompt. When the worker supplies a stage work directory, CMesh also sets `CMESH_STAGE_SESSION_FILE` for each stage and the patched runner persists native llama.cpp sequence state with `llama_state_seq_save_file` / `llama_state_seq_load_file`. This validates repeated autoregressive token feedback plus file-backed per-stage KV continuity across runner process invocations. It is still not the final production runtime because the KV state is restored from disk per step instead of being owned by a long-lived stage daemon, and the path still needs remote multi-machine validation.
+
+When a terminal stage reports `cdip.stage_terminal_decode` with `final:false`, the manager keeps the parent job open and automatically schedules the next decode-loop step, as long as the parent `max_tokens` limit has not been reached. The next wave reuses the same `kv_cache_key`, carries the terminal `next_token_id` back to the source stage, and rewrites the existing stage jobs back to scheduled `source_decode` / `relay_decode` / `terminal_decode` commands for the next `step`.
 
 Worker heartbeats may also include `rpc_runtimes` diagnostics. `llama.cpp-rpc` is the first practical path for real multi-machine llama.cpp execution: CMesh can orchestrate workers and resource policy while llama.cpp performs the backend RPC execution. This is separate from CDIP layer-stage execution, which remains the protocol-native long-term path.
 
@@ -191,6 +203,23 @@ Example:
 
 Stage ranges MUST be contiguous and non-overlapping. Stage index order is execution order.
 
+When workers report installed model inventory, each ready model MAY include
+`layers`. The manager uses the reported positive layer count instead of the
+catalog estimate when building stage ranges. If workers disagree, the manager
+uses the smallest positive value so a stage range does not exceed a real model.
+For development and debugging, `distributed-generate` MAY still include
+`total_layers` as an explicit override. This keeps runner-driven development
+honest: layer ranges can come from real GGUF metadata, while the catalog estimate
+remains the fallback for planning previews.
+
+Stage placement is memory-aware. For each selected worker, CMesh treats usable
+stage capacity as `allowed_memory_bytes - stage_overhead_bytes`, then assigns
+contiguous layer ranges proportionally to that effective capacity. This means a
+model that needs 16 GB cannot safely be planned onto two workers that each offer
+8 GB if each stage also needs runtime/KV overhead; the planner will require a
+third worker or larger per-worker budgets. The plan exposes both raw
+`aggregate_memory_bytes` and overhead-aware `aggregate_stage_memory_bytes`.
+
 ## Shard Manifest
 
 A shard manifest turns a placement plan into the concrete model split contract that workers can prepare.
@@ -233,6 +262,14 @@ Example:
       "runtime": "llama.cpp",
       "source_artifact": "https://huggingface.co/.../qwen.gguf",
       "target_artifact": "qwen2.5-14b-instruct-q4-k-m.stage-0.layers-0-23",
+      "artifact": {
+        "protocol": "cdip.shard-artifact-v1",
+        "status": "planned",
+        "layer_start": 0,
+        "layer_end": 23,
+        "expected_bytes": 5368709120,
+        "physical_artifact_ready": false
+      },
       "materialization": "logical_layers",
       "capabilities": ["pipeline-stage-prepare", "pipeline-prefill", "pipeline-decode", "activation-stream-v1"]
     },
@@ -246,6 +283,14 @@ Example:
       "runtime": "llama.cpp",
       "source_artifact": "https://huggingface.co/.../qwen.gguf",
       "target_artifact": "qwen2.5-14b-instruct-q4-k-m.stage-1.layers-24-47",
+      "artifact": {
+        "protocol": "cdip.shard-artifact-v1",
+        "status": "planned",
+        "layer_start": 24,
+        "layer_end": 47,
+        "expected_bytes": 5368709120,
+        "physical_artifact_ready": false
+      },
       "materialization": "logical_layers",
       "capabilities": ["pipeline-stage-prepare", "pipeline-prefill", "pipeline-decode", "activation-stream-v1"]
     }
@@ -261,6 +306,8 @@ Shard manifest validation rules:
 - `model.model_id`, `model.runtime`, `mode`, and `materialization` are required.
 - `total_layers` MUST be positive.
 - every shard MUST have a runtime and materialization mode.
+- when `artifact.protocol` is set, its layer range MUST match the shard stage range.
+- if `artifact.physical_artifact_ready` is `true`, `artifact.uri` MUST point at the prepared shard artifact.
 - shard stages MUST be ordered by `stage.index`.
 - shard layer ranges MUST be contiguous and non-overlapping.
 - the first shard MUST start at layer `0`.
@@ -379,6 +426,11 @@ v0.1 activation transport requirements:
 - surface timeout and checksum errors
 
 ## Failure Semantics
+
+The concrete manager/worker/stage-daemon recovery contract is maintained in
+[`docs/protocol/cdip-reliability-recovery-v1.md`](protocol/cdip-reliability-recovery-v1.md).
+That document is the source of truth for stale jobs, daemon session recreation,
+cancel cascades, and resident session cleanup.
 
 Failures MUST include:
 

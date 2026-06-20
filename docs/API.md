@@ -18,6 +18,28 @@ GET /v1/cluster
 
 Returns aggregate worker counts and resource totals.
 
+## Observability
+
+```http
+GET /v1/observability
+```
+
+Returns a compact operator-facing production status report for external
+monitors and readiness gates. The endpoint is protected by the operator token
+when one is configured.
+
+The response includes:
+
+- cluster worker/resource counters;
+- job counters by status/type, active jobs, stale running jobs, and recent
+  failures;
+- CDIP parent/stage job counters and stage states;
+- RPC endpoint health, failed endpoints, and quarantined endpoints;
+- CDIP stage daemon readiness counters;
+- recovery loop configuration;
+- `status: "degraded"` plus `blockers` when the manager sees conditions that
+  should block production readiness.
+
 ## Nodes
 
 ```http
@@ -236,7 +258,7 @@ Operators may use `X-CMesh-Operator-Token`. Stage workers should use `X-CMesh-No
 GET /v1/runtime/stage-probes
 ```
 
-Returns worker-reported stage runtime diagnostics. These probes explain whether a worker has an experimental distributed stage runtime and why it is or is not ready. `llama.cpp-stage-experimental` currently reports `ready: false` when only public `llama-cli` is available because layer-stage activation hooks are not exposed yet.
+Returns worker-reported stage runtime diagnostics. These probes explain whether a worker has an experimental distributed stage runtime and why it is or is not ready. `llama.cpp-stage-experimental` currently reports `ready: false` because selected-tensor, Qwen2 hidden-input, file-based source-decode, relay-decode, terminal token export, worker dispatch, and planner relay dispatch hooks exist, but parent completion from terminal output, default source runner path wiring, multi-step decode, and per-stage KV state are not integrated yet.
 
 ## Runtime RPC Pool
 
@@ -260,6 +282,12 @@ Example:
   "llama_cli_rpc_arg": "10.0.0.10:50052"
 }
 ```
+
+```http
+POST /v1/runtime/rpc-pool/refresh?timeout_ms=1500
+```
+
+Runs TCP health checks for active RPC endpoints, stores endpoint health history, and returns the ranked endpoint pool.
 
 ## Cluster Benchmarks
 
@@ -369,6 +397,49 @@ Example:
 ```
 
 If `node_id` is omitted, the manager selects the first worker where the model is installed and generatable. If no RPC endpoints are active, the API returns `409 Conflict`.
+
+Distributed RPC jobs return an execution trace inside `result.execution_result`:
+
+```json
+{
+  "protocol": "cmesh.distributed-rpc",
+  "protocol_version": 1,
+  "plan_schema_version": 1,
+  "plan_id": "job-plan",
+  "kind": "model.generate.distributed_rpc",
+  "model_id": "qwen2.5-0.5b-instruct-q4-k-m",
+  "runtime": "llama.cpp",
+  "runtime_version": "llama.cpp-b9704-linux-amd64-rpc",
+  "worker_runtime": "linux/amd64",
+  "coordinator_node_id": "node-coordinator",
+  "backends": [
+    {
+      "node_id": "node-backend-a",
+      "node_name": "backend-a",
+      "runtime": "llama.cpp",
+      "runtime_version": "llama.cpp-b9704-linux-amd64-rpc",
+      "endpoint": "10.0.0.10:50052",
+      "health_status": "ready"
+    }
+  ],
+  "rpc_enabled": true,
+  "rpc_endpoint_count": 2,
+  "model_path": "/var/lib/cmesh/cache/models/qwen/model.gguf",
+  "model_bytes": 491400032,
+  "timings": {
+    "model_stat_ms": 1,
+    "runtime_prepare_ms": 0,
+    "llama_process_ms": 7204,
+    "total_ms": 7205
+  }
+}
+```
+
+```http
+GET /v1/models/{model_id}/distributed-rpc-readiness?node_id=node-abc123
+```
+
+Returns the executable distributed RPC plan and blockers. Readiness requires a model-ready coordinator, at least two schedulable backend endpoints outside the coordinator, endpoint health when requested by plan checks, and compatible runtime versions when workers report versions.
 
 ## Conversations
 

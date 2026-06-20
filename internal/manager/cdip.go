@@ -45,7 +45,16 @@ func cdipShardManifest(model models.Model, plan DistributedModelPlan) cdip.Shard
 			RequiredDiskBytes:   stage.DiskBytes,
 			SourceArtifact:      model.URL,
 			TargetArtifact:      fmt.Sprintf("%s.stage-%d.layers-%d-%d", model.ID, stage.Index, stage.LayerStart, stage.LayerEnd),
-			Materialization:     cdip.ShardLogicalLayers,
+			Artifact: cdip.ShardArtifact{
+				Protocol:              "cdip.shard-artifact-v1",
+				Status:                "planned",
+				LayerStart:            stage.LayerStart,
+				LayerEnd:              stage.LayerEnd,
+				ExpectedBytes:         stage.DiskBytes,
+				URI:                   "",
+				PhysicalArtifactReady: false,
+			},
+			Materialization: cdip.ShardLogicalLayers,
 			Capabilities: []string{
 				"pipeline-stage-prepare",
 				"pipeline-prefill",

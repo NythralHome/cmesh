@@ -29,7 +29,7 @@ V1 is not a promise that ten weak machines automatically become one large GPU. T
 - submit simple AI jobs;
 - schedule jobs to the best available worker.
 
-Distributed execution of one large model across multiple machines is a later milestone and will require explicit runtime support and strong network assumptions.
+Distributed execution of one large model across multiple machines is production-validated only for the documented Linux sliced-model path. See [docs/LINUX_PRODUCTION.md](docs/LINUX_PRODUCTION.md) for the current support matrix, install flow, evidence, and limitations.
 
 ## Architecture
 
@@ -149,6 +149,90 @@ Submit a first echo job:
 go run ./cmd/cmesh job submit --type echo --input "hello cluster"
 go run ./cmd/cmesh job list
 ```
+
+## Linux Production
+
+The current public release candidate is Linux-only:
+
+- one Linux manager service;
+- three Linux worker services with resident stage daemons;
+- pinned `llama.cpp-b9704-linux-amd64-rpc-stage` runtime;
+- Qwen2.5 14B Instruct Q4_K_M split into physical GGUF stage artifacts;
+- memory-aware placement across workers.
+
+Download and verify the release package:
+
+```sh
+VERSION=v0.1.0-linux-rc.1
+BASE_URL=https://github.com/NythralHome/cmesh/releases/download/$VERSION
+
+curl -fLO "$BASE_URL/$VERSION.tar.gz"
+curl -fLO "$BASE_URL/$VERSION.tar.gz.sha256"
+curl -fLO "$BASE_URL/$VERSION.tar.gz.sig"
+curl -fLO "$BASE_URL/$VERSION.tar.gz.public-key.pem"
+
+shasum -a 256 -c "$VERSION.tar.gz.sha256"
+openssl dgst -sha256 \
+  -verify "$VERSION.tar.gz.public-key.pem" \
+  -signature "$VERSION.tar.gz.sig" \
+  "$VERSION.tar.gz"
+
+tar -xzf "$VERSION.tar.gz"
+cd "$VERSION"
+openssl dgst -sha256 -verify release-signing-public-key.pem -signature manifest.json.sig manifest.json
+openssl dgst -sha256 -verify release-signing-public-key.pem -signature checksums.txt.sig checksums.txt
+shasum -a 256 -c checksums.txt
+```
+
+Expected GitHub release assets:
+
+- `v0.1.0-linux-rc.1.tar.gz`
+- `v0.1.0-linux-rc.1.tar.gz.sha256`
+- `v0.1.0-linux-rc.1.tar.gz.sig`
+- `v0.1.0-linux-rc.1.tar.gz.public-key.pem`
+
+Install a manager from the verified package:
+
+```sh
+sudo CMESH_BINARY_URL="file://$PWD/cmesh-linux-amd64" \
+  CMESH_NONINTERACTIVE=true \
+  CMESH_ADDR=0.0.0.0:18080 \
+  CMESH_PUBLIC_URL=http://MANAGER_HOST:18080 \
+  CMESH_JOIN_TOKEN=replace-with-generated-secret \
+  CMESH_OPERATOR_TOKEN=replace-with-generated-secret \
+  ./install-manager-linux.sh install
+```
+
+Install each worker from the same verified package:
+
+```sh
+sudo CMESH_BINARY_URL="file://$PWD/cmesh-linux-amd64" \
+  CMESH_MANAGER_URL=http://MANAGER_HOST:18080 \
+  CMESH_JOIN_TOKEN=replace-with-manager-join-token \
+  CMESH_CPU=2 \
+  CMESH_MEMORY_GB=6 \
+  CMESH_DISK_GB=40 \
+  CMESH_STAGE_DAEMON=true \
+  CMESH_STAGE_DAEMON_BACKEND=llama.cpp-resident \
+  CMESH_LLAMA_CPP_RUNTIME_AUTO=true \
+  CMESH_LLAMA_CPP_RUNTIME_URL="file://$PWD/llama.cpp-b9704-linux-amd64-rpc-stage.tar.gz" \
+  CMESH_LLAMA_CPP_RUNTIME_REQUIRE_CHECKSUM=true \
+  ./install-worker.sh install
+```
+
+Start with [docs/LINUX_PRODUCTION.md](docs/LINUX_PRODUCTION.md). The detailed
+operator runbooks are:
+
+- [docs/PRODUCTION_INSTALL.md](docs/PRODUCTION_INSTALL.md)
+- [docs/LINUX_SLICED_RUNBOOK.md](docs/LINUX_SLICED_RUNBOOK.md)
+- [docs/LINUX_MODEL_MATRIX.md](docs/LINUX_MODEL_MATRIX.md)
+- [docs/LINUX_SECURITY_HARDENING.md](docs/LINUX_SECURITY_HARDENING.md)
+- [docs/LINUX_OBSERVABILITY.md](docs/LINUX_OBSERVABILITY.md)
+- [docs/LINUX_BACKUP_RESTORE.md](docs/LINUX_BACKUP_RESTORE.md)
+
+Windows, macOS, desktop worker apps, GPU acceleration, arbitrary model slicing,
+and public untrusted worker marketplaces are not part of the current production
+support matrix.
 
 ## Alpha Deployment
 

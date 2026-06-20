@@ -83,8 +83,11 @@ func TestValidateDistributedRPCExecutionResult(t *testing.T) {
 		Output:            "hello",
 		Runtime:           "llama.cpp",
 		WorkerRuntime:     "darwin/arm64",
+		CoordinatorNodeID: plan.CoordinatorNodeID,
+		Backends:          plan.Backends,
 		RPCEndpoints:      plan.RPCEndpoints,
 		RPCEndpointCount:  len(plan.RPCEndpoints),
+		RPCEnabled:        true,
 		DurationMS:        42,
 	}
 	if err := ValidateDistributedRPCExecutionResult(result, plan); err != nil {
@@ -104,8 +107,11 @@ func TestValidateDistributedRPCExecutionResultRejectsEndpointOutsidePlan(t *test
 		Output:            "hello",
 		Runtime:           "llama.cpp",
 		WorkerRuntime:     "darwin/arm64",
+		CoordinatorNodeID: plan.CoordinatorNodeID,
+		Backends:          plan.Backends,
 		RPCEndpoints:      []string{"127.0.0.1:50053"},
 		RPCEndpointCount:  1,
+		RPCEnabled:        true,
 	}
 	if err := ValidateDistributedRPCExecutionResult(result, plan); err == nil {
 		t.Fatal("expected endpoint validation error")

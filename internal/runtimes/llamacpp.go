@@ -55,32 +55,62 @@ func LlamaCPPStatus(cacheDir string) RuntimeStatus {
 		Platform: platformKey(),
 		Source:   "cmesh-runtime-cache",
 	}
+	if !preferCachedLlamaCPP() {
+		if binary, err := FindSystemLlamaCPP(); err == nil {
+			status.Ready = true
+			status.BinaryPath = binary
+			status.Source = "system-path"
+			return status
+		}
+	}
+	binary, version, err := cachedLlamaCPPBinary(cacheDir)
+	if err == nil {
+		status.Ready = true
+		status.BinaryPath = binary
+		status.Version = version
+		return status
+	}
+	if preferCachedLlamaCPP() {
+		status.Error = err.Error()
+		return status
+	}
 	if binary, err := FindSystemLlamaCPP(); err == nil {
 		status.Ready = true
 		status.BinaryPath = binary
 		status.Source = "system-path"
 		return status
 	}
-	binary, version, err := cachedLlamaCPPBinary(cacheDir)
 	if err != nil {
 		status.Error = err.Error()
 		return status
 	}
-	status.Ready = true
-	status.BinaryPath = binary
-	status.Version = version
 	return status
 }
 
 func EnsureLlamaCPP(ctx context.Context, cacheDir string) (string, RuntimeStatus, error) {
-	if binary, err := FindSystemLlamaCPP(); err == nil {
-		return binary, RuntimeStatus{
-			Name:       LlamaCPPName,
-			Ready:      true,
-			Platform:   platformKey(),
-			BinaryPath: binary,
-			Source:     "system-path",
-		}, nil
+	if override, ok := llamaCPPRuntimeOverride(); ok {
+		if binary, err := cachedLlamaCPPBinaryVersion(cacheDir, override.Version); err == nil {
+			return binary, RuntimeStatus{
+				Name:       LlamaCPPName,
+				Ready:      true,
+				Version:    override.Version,
+				Platform:   platformKey(),
+				BinaryPath: binary,
+				Source:     "cmesh-runtime-override-cache",
+			}, nil
+		}
+		return ensureLlamaCPPAsset(ctx, cacheDir, override, "cmesh-runtime-override")
+	}
+	if !preferCachedLlamaCPP() {
+		if binary, err := FindSystemLlamaCPP(); err == nil {
+			return binary, RuntimeStatus{
+				Name:       LlamaCPPName,
+				Ready:      true,
+				Platform:   platformKey(),
+				BinaryPath: binary,
+				Source:     "system-path",
+			}, nil
+		}
 	}
 	if binary, version, err := cachedLlamaCPPBinary(cacheDir); err == nil {
 		return binary, RuntimeStatus{
@@ -102,6 +132,12 @@ func EnsureLlamaCPP(ctx context.Context, cacheDir string) (string, RuntimeStatus
 			Source:     "cmesh-runtime-cache-migrated",
 		}, nil
 	}
+	if preferCachedLlamaCPP() {
+		err := fmt.Errorf("runtime is not installed")
+		status := LlamaCPPStatus(cacheDir)
+		status.Error = err.Error()
+		return "", status, err
+	}
 	release, err := fetchLatestRelease(ctx)
 	if err != nil {
 		status := LlamaCPPStatus(cacheDir)
@@ -115,20 +151,44 @@ func EnsureLlamaCPP(ctx context.Context, cacheDir string) (string, RuntimeStatus
 		status.Error = err.Error()
 		return "", status, err
 	}
-	dir := runtimeDir(cacheDir, release.TagName)
+	return ensureLlamaCPPAsset(ctx, cacheDir, versionedAsset{Asset: selected, Version: release.TagName}, selected.URL)
+}
+
+type versionedAsset struct {
+	Asset   asset
+	Version string
+}
+
+func ensureLlamaCPPAsset(ctx context.Context, cacheDir string, selected versionedAsset, source string) (string, RuntimeStatus, error) {
+	version := strings.TrimSpace(selected.Version)
+	if version == "" {
+		version = "custom"
+	}
+	dir := runtimeDir(cacheDir, version)
 	if err := os.RemoveAll(dir); err != nil {
 		return "", RuntimeStatus{}, err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", RuntimeStatus{}, err
 	}
-	if err := downloadAndExtract(ctx, selected.URL, selected.Name, dir); err != nil {
+	if err := downloadAndExtract(ctx, selected.Asset.URL, selected.Asset.Name, dir); err != nil {
 		_ = os.RemoveAll(dir)
 		status := RuntimeStatus{
 			Name:     LlamaCPPName,
-			Version:  release.TagName,
+			Version:  version,
 			Platform: platformKey(),
-			Source:   selected.URL,
+			Source:   source,
+			Error:    err.Error(),
+		}
+		return "", status, err
+	}
+	if err := normalizeSharedLibraryLinks(dir); err != nil {
+		_ = os.RemoveAll(dir)
+		status := RuntimeStatus{
+			Name:     LlamaCPPName,
+			Version:  version,
+			Platform: platformKey(),
+			Source:   source,
 			Error:    err.Error(),
 		}
 		return "", status, err
@@ -138,9 +198,9 @@ func EnsureLlamaCPP(ctx context.Context, cacheDir string) (string, RuntimeStatus
 		_ = os.RemoveAll(dir)
 		status := RuntimeStatus{
 			Name:     LlamaCPPName,
-			Version:  release.TagName,
+			Version:  version,
 			Platform: platformKey(),
-			Source:   selected.URL,
+			Source:   source,
 			Error:    err.Error(),
 		}
 		return "", status, err
@@ -149,12 +209,50 @@ func EnsureLlamaCPP(ctx context.Context, cacheDir string) (string, RuntimeStatus
 	status := RuntimeStatus{
 		Name:       LlamaCPPName,
 		Ready:      true,
-		Version:    release.TagName,
+		Version:    version,
 		Platform:   platformKey(),
 		BinaryPath: binary,
-		Source:     selected.URL,
+		Source:     source,
 	}
 	return binary, status, nil
+}
+
+func llamaCPPRuntimeOverride() (versionedAsset, bool) {
+	url := strings.TrimSpace(os.Getenv("CMESH_LLAMA_CPP_RUNTIME_URL"))
+	if url == "" {
+		return versionedAsset{}, false
+	}
+	name := strings.TrimSpace(os.Getenv("CMESH_LLAMA_CPP_RUNTIME_NAME"))
+	if name == "" {
+		name = archiveNameFromURL(url)
+	}
+	version := strings.TrimSpace(os.Getenv("CMESH_LLAMA_CPP_RUNTIME_VERSION"))
+	if version == "" {
+		version = "custom-" + platformKey()
+	}
+	return versionedAsset{Asset: asset{Name: name, URL: url}, Version: version}, true
+}
+
+func preferCachedLlamaCPP() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CMESH_LLAMA_CPP_PREFER_CACHE"))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func archiveNameFromURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if i := strings.Index(rawURL, "?"); i >= 0 {
+		rawURL = rawURL[:i]
+	}
+	rawURL = strings.TrimRight(rawURL, "/")
+	name := filepath.Base(rawURL)
+	if strings.TrimSpace(name) == "" || name == "." || name == string(filepath.Separator) {
+		return "llama.cpp-runtime.tar.gz"
+	}
+	return name
 }
 
 func FindSystemLlamaCPP() (string, error) {
@@ -410,8 +508,63 @@ func extractTarGz(path string, dir string) error {
 			if closeErr != nil {
 				return closeErr
 			}
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			linkTarget := filepath.Clean(header.Linkname)
+			if filepath.IsAbs(linkTarget) || linkTarget == ".." || strings.HasPrefix(linkTarget, ".."+string(os.PathSeparator)) {
+				return fmt.Errorf("unsafe archive symlink %q -> %q", header.Name, header.Linkname)
+			}
+			_ = os.Remove(target)
+			if err := os.Symlink(header.Linkname, target); err != nil {
+				return err
+			}
 		}
 	}
+}
+
+func normalizeSharedLibraryLinks(root string) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		name := entry.Name()
+		idx := strings.Index(name, ".so.")
+		if idx < 0 {
+			return nil
+		}
+		suffix := name[idx+len(".so."):]
+		parts := strings.Split(suffix, ".")
+		if len(parts) == 0 || parts[0] == "" {
+			return nil
+		}
+		majorName := name[:idx+len(".so.")] + parts[0]
+		if err := ensureRelativeSymlink(filepath.Dir(path), majorName, name); err != nil {
+			return err
+		}
+		baseName := name[:idx+len(".so")]
+		return ensureRelativeSymlink(filepath.Dir(path), baseName, majorName)
+	})
+}
+
+func ensureRelativeSymlink(dir string, linkName string, targetName string) error {
+	linkPath := filepath.Join(dir, linkName)
+	if info, err := os.Lstat(linkPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Symlink(targetName, linkPath)
 }
 
 func safeArchivePath(root string, name string) (string, error) {
@@ -452,6 +605,18 @@ func cachedLlamaCPPBinary(cacheDir string) (string, string, error) {
 		}
 	}
 	return "", "", fmt.Errorf("runtime is not installed")
+}
+
+func cachedLlamaCPPBinaryVersion(cacheDir string, version string) (string, error) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return "", fmt.Errorf("runtime version is required")
+	}
+	binary, err := findBinary(runtimeDir(cacheDir, version), llamaBinaryName())
+	if err != nil {
+		return "", fmt.Errorf("runtime is not installed")
+	}
+	return binary, nil
 }
 
 func migrateCachedLlamaCPP(cacheDir string) (string, string, error) {

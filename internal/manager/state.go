@@ -55,6 +55,7 @@ func (s *State) RegisterWorker(req membership.JoinRequest) membership.JoinRespon
 		Role:      cluster.NodeRoleWorker,
 		Status:    cluster.NodeStatusOnline,
 		Endpoint:  req.Endpoint,
+		AuthToken: newWorkerAuthToken(),
 		Resources: req.Resources,
 		JoinedAt:  now,
 		UpdatedAt: now,
@@ -67,9 +68,20 @@ func (s *State) RegisterWorker(req membership.JoinRequest) membership.JoinRespon
 
 	return membership.JoinResponse{
 		NodeID:         nodeID,
+		NodeAuthToken:  node.AuthToken,
 		ManagerPeers:   []string{"http://127.0.0.1:8080"},
 		HeartbeatEvery: 10 * time.Second,
 	}
+}
+
+func (s *State) WorkerAuthToken(nodeID string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	node, ok := s.nodes[nodeID]
+	if !ok {
+		return "", false
+	}
+	return node.AuthToken, true
 }
 
 func (s *State) Heartbeat(hb membership.Heartbeat) bool {
@@ -397,6 +409,68 @@ func (s *State) NextJobForWorker(nodeID string) (jobs.Job, bool) {
 	return jobs.Job{}, false
 }
 
+func (s *State) RecoverStaleJobs(staleAfter time.Duration) []jobs.Job {
+	if staleAfter <= 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	cutoff := now.Add(-staleAfter)
+	recovered := make([]jobs.Job, 0)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id, job := range s.jobs {
+		if strings.TrimSpace(job.AssignedTo) == "" {
+			continue
+		}
+		if job.Status != jobs.StatusScheduled && job.Status != jobs.StatusRunning {
+			continue
+		}
+		staleAt := job.UpdatedAt
+		if staleAt.IsZero() {
+			staleAt = job.StartedAt
+		}
+		if staleAt.IsZero() || !staleAt.Before(cutoff) {
+			continue
+		}
+
+		reason := "job timed out waiting for worker progress"
+		failedNodeID := job.AssignedTo
+		job = s.rescheduleOrFailJobLocked(job, failedNodeID, now, reason)
+		if job.Status == jobs.StatusFailed && job.Type == models.JobGenerateStage {
+			job.CDIPState = cdip.StageFailed
+			job.Result = cdipStageResult(cdip.StageFailed, reason, now, "")
+			s.failCDIPParentJobLocked(job, now, reason)
+		}
+		s.jobs[id] = job
+		recovered = append(recovered, job)
+	}
+	return recovered
+}
+
+func (s *State) failCDIPParentJobLocked(stage jobs.Job, now time.Time, reason string) {
+	parentID := strings.TrimSpace(stage.CDIPParentJobID)
+	if parentID == "" {
+		return
+	}
+	parent, ok := s.jobs[parentID]
+	if !ok || parent.Type != models.JobGenerateDistributed {
+		return
+	}
+	if parent.Status == jobs.StatusSucceeded || parent.Status == jobs.StatusFailed || parent.Status == jobs.StatusCanceled {
+		return
+	}
+	parent.Status = jobs.StatusFailed
+	parent.Error = reason
+	parent.LastFailure = reason
+	parent.Result = ""
+	parent.UpdatedAt = now
+	parent.FinishedAt = now
+	s.jobs[parent.ID] = parent
+}
+
 func (s *State) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -446,6 +520,10 @@ func (s *State) UpdateJobProgress(jobID string, req jobs.ProgressRequest) (jobs.
 }
 
 func (s *State) UpdateCDIPStageState(jobID string, next cdip.StageState, detail string) (jobs.Job, bool) {
+	return s.UpdateCDIPStageStateWithWorkerResult(jobID, next, detail, "")
+}
+
+func (s *State) UpdateCDIPStageStateWithWorkerResult(jobID string, next cdip.StageState, detail string, workerResult string) (jobs.Job, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -462,7 +540,7 @@ func (s *State) UpdateCDIPStageState(jobID string, next cdip.StageState, detail 
 	}
 	now := time.Now().UTC()
 	job.CDIPState = next
-	job.Result = cdipStageResult(next, detail, now)
+	job.Result = cdipStageResult(next, detail, now, workerResult)
 	job.UpdatedAt = now
 	switch next {
 	case cdip.StagePreparing:
@@ -473,6 +551,11 @@ func (s *State) UpdateCDIPStageState(jobID string, next cdip.StageState, detail 
 				job.Attempts = 1
 			}
 		}
+	case cdip.StageReady, cdip.StageDecode:
+		job.Status = jobs.StatusSucceeded
+		job.Error = ""
+		job.LastFailure = ""
+		job.FinishedAt = now
 	case cdip.StageCompleted:
 		job.Status = jobs.StatusSucceeded
 		job.FinishedAt = now
@@ -485,6 +568,41 @@ func (s *State) UpdateCDIPStageState(jobID string, next cdip.StageState, detail 
 		job.Status = jobs.StatusCanceled
 		job.Error = strings.TrimSpace(detail)
 		job.FinishedAt = now
+	}
+	s.jobs[job.ID] = job
+	return job, true
+}
+
+func (s *State) DispatchCDIPStageCommand(jobID string, input string, next cdip.StageState, detail string) (jobs.Job, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, ok := s.jobs[jobID]
+	if !ok || job.Type != models.JobGenerateStage {
+		return jobs.Job{}, false
+	}
+	current := job.CDIPState
+	if current == "" {
+		current = cdip.StagePlanned
+	}
+	if !cdip.CanTransition(current, next) {
+		return jobs.Job{}, false
+	}
+	now := time.Now().UTC()
+	if strings.TrimSpace(input) != "" {
+		job.Input = input
+	}
+	job.CDIPState = next
+	job.Result = cdipStageResult(next, detail, now, "")
+	job.Status = jobs.StatusScheduled
+	job.Error = ""
+	job.LastFailure = ""
+	job.StartedAt = time.Time{}
+	job.FinishedAt = time.Time{}
+	job.UpdatedAt = now
+	job.Attempts++
+	if job.Attempts <= 0 {
+		job.Attempts = 1
 	}
 	s.jobs[job.ID] = job
 	return job, true
@@ -529,12 +647,21 @@ func jobProgressResult(req jobs.ProgressRequest, updatedAt time.Time) string {
 	return string(body)
 }
 
-func cdipStageResult(state cdip.StageState, detail string, updatedAt time.Time) string {
+func cdipStageResult(state cdip.StageState, detail string, updatedAt time.Time, workerResult string) string {
 	payload := map[string]any{
 		"kind":       "cdip.stage.state",
 		"state":      state,
 		"detail":     strings.TrimSpace(detail),
 		"updated_at": updatedAt,
+	}
+	workerResult = strings.TrimSpace(workerResult)
+	if workerResult != "" {
+		var parsed any
+		if err := json.Unmarshal([]byte(workerResult), &parsed); err == nil {
+			payload["worker_result"] = parsed
+		} else {
+			payload["worker_result"] = workerResult
+		}
 	}
 	body, _ := json.Marshal(payload)
 	return string(body)
@@ -838,13 +965,35 @@ func (s *State) CancelJob(jobID string) (jobs.Job, bool) {
 	job.UpdatedAt = now
 	job.FinishedAt = now
 	s.jobs[job.ID] = job
+	if job.Type == models.JobGenerateDistributed {
+		s.cancelCDIPStageJobsForParentLocked(job.ID, now)
+	}
 	s.scheduleQueuedJobsLocked(now)
 	return job, true
+}
+
+func (s *State) cancelCDIPStageJobsForParentLocked(parentJobID string, now time.Time) {
+	for id, stage := range s.jobs {
+		if stage.Type != models.JobGenerateStage || stage.CDIPParentJobID != parentJobID || !jobCanBeCanceled(stage) {
+			continue
+		}
+		stage.Status = jobs.StatusCanceled
+		stage.CDIPState = cdip.StageAborted
+		stage.Error = "canceled by operator"
+		stage.LastFailure = ""
+		stage.Result = cdipStageResult(cdip.StageAborted, "canceled by operator", now, "")
+		stage.UpdatedAt = now
+		stage.FinishedAt = now
+		s.jobs[id] = stage
+	}
 }
 
 func (s *State) scheduleQueuedJobsLocked(now time.Time) {
 	for id, job := range s.jobs {
 		if job.Status != jobs.StatusQueued || job.AssignedTo != "" {
+			continue
+		}
+		if !workerSchedulableJob(job.Type) {
 			continue
 		}
 		workerID := s.pickWorkerLocked(job.Requirements)
@@ -870,6 +1019,10 @@ func (s *State) scheduleQueuedJobsLocked(now time.Time) {
 		job.UpdatedAt = now
 		s.jobs[id] = job
 	}
+}
+
+func workerSchedulableJob(jobType string) bool {
+	return jobType != models.JobGenerateDistributed
 }
 
 func (s *State) pickWorkerLocked(req jobs.Requirements) string {
@@ -1065,6 +1218,14 @@ func newNodeID() string {
 		return "node-unknown"
 	}
 	return "node-" + hex.EncodeToString(buf[:])
+}
+
+func newWorkerAuthToken() string {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(buf[:])
 }
 
 func newJobID() string {

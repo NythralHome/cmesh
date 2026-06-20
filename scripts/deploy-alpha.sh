@@ -18,6 +18,9 @@ required_assets=(
   "CMesh-Worker-Apple-Silicon.dmg"
   "CMesh-Worker-linux-amd64.tar.gz"
   "CMesh-Worker-windows-amd64.zip"
+  "llama.cpp-b9704-linux-amd64-rpc.tar.gz"
+  "llama.cpp-b9704-linux-amd64-rpc-stage.tar.gz"
+  "llama-cpp-runtime-checksums.txt"
   "checksums.txt"
 )
 

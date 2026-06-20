@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/cluster"
 	"github.com/cmesh/cmesh/internal/jobs"
 	"github.com/cmesh/cmesh/internal/membership"
@@ -206,6 +207,51 @@ func TestWorkerJoinRequiresTokenWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestWorkerEndpointsRequireNodeAuthToken(t *testing.T) {
+	srv := NewServer(":0", NewState())
+	worker := joinWorkerForTest(t, srv, "auth-worker")
+	if worker.NodeAuthToken == "" {
+		t.Fatal("expected worker join to return node auth token")
+	}
+
+	hbBody, err := json.Marshal(membership.Heartbeat{NodeID: worker.NodeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/workers/heartbeat", bytes.NewReader(hbBody))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing worker token to be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/workers/heartbeat", bytes.NewReader(hbBody))
+	req.Header.Set("X-CMesh-Worker-Token", "wrong")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected wrong worker token to be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/workers/heartbeat", bytes.NewReader(hbBody))
+	req.Header.Set("X-CMesh-Worker-Token", worker.NodeAuthToken)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected correct worker token to pass, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	nodesReq := httptest.NewRequest(http.MethodGet, "/v1/nodes", nil)
+	nodesRec := httptest.NewRecorder()
+	srv.ServeHTTP(nodesRec, nodesReq)
+	if nodesRec.Code != http.StatusOK {
+		t.Fatalf("expected nodes endpoint 200, got %d: %s", nodesRec.Code, nodesRec.Body.String())
+	}
+	if strings.Contains(nodesRec.Body.String(), worker.NodeAuthToken) || strings.Contains(nodesRec.Body.String(), "node_auth_token") {
+		t.Fatalf("worker auth token leaked through nodes API: %s", nodesRec.Body.String())
+	}
+}
+
 func TestInvitePageRequiresOperatorToken(t *testing.T) {
 	srv := NewServerWithOptions(ServerOptions{
 		Addr:          ":0",
@@ -245,6 +291,12 @@ func TestInvitePageRequiresOperatorToken(t *testing.T) {
 	}
 	if !strings.Contains(body, "Install worker app") || !strings.Contains(body, "Manual invite link") {
 		t.Fatalf("expected invite page to contain installer-first worker flow")
+	}
+	if !strings.Contains(body, "Linux distributed RPC backend") || !strings.Contains(body, "CMESH_RPC=true") {
+		t.Fatalf("expected invite page to contain distributed RPC backend flow")
+	}
+	if !strings.Contains(body, "llama.cpp-b9704-linux-amd64-rpc.tar.gz") || !strings.Contains(body, "CMESH_LLAMA_CPP_PREFER_CACHE=true") {
+		t.Fatalf("expected invite page to contain pinned llama.cpp runtime configuration")
 	}
 	if !strings.Contains(body, "manager=https%3A%2F%2Fcmesh.example.com") {
 		t.Fatalf("expected invite page to contain encoded manager URL")
@@ -1053,6 +1105,140 @@ func TestReadAPIRequiresOperatorTokenWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestObservabilityEndpointRequiresOperatorToken(t *testing.T) {
+	srv := NewServerWithOptions(ServerOptions{
+		Addr:          ":0",
+		OperatorToken: "operator-secret",
+	}, NewState())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/observability", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/observability", nil)
+	req.Header.Set("X-CMesh-Operator-Token", "operator-secret")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestObservabilityEndpointReturnsProductionCounters(t *testing.T) {
+	state := NewState()
+	srv := NewServerWithOptions(ServerOptions{
+		Addr:                  ":0",
+		OperatorToken:         "operator-secret",
+		BackgroundJobRecovery: true,
+		JobRecoveryEvery:      5 * time.Second,
+		JobStaleAfter:         time.Minute,
+	}, state)
+	worker := joinWorkerWithResourcesForTest(t, srv, "stage-worker", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 4, CoresAllowed: 2},
+		Memory:  cluster.MemoryResources{TotalBytes: 8 * gb, AllowedBytes: 4 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 40 * gb, AllowedBytes: 20 * gb, FreeBytes: 30 * gb},
+		Runtimes: []cluster.RuntimeResource{
+			{
+				Name:  "llama.cpp",
+				Ready: true,
+				StageRuntimes: []cluster.StageRuntimeResource{
+					{Name: "cmesh-stage-daemon", Ready: true, Protocol: "cdip.stage-session-v1"},
+				},
+			},
+		},
+	})
+	queued, err := state.CreateJob(jobs.CreateRequest{Type: models.JobGenerateDistributed, RequestedBy: "test", NoAutoAssign: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageJob, err := state.CreateJob(jobs.CreateRequest{
+		Type:            models.JobGenerateStage,
+		RequestedBy:     "test",
+		AssignedTo:      worker.NodeID,
+		CDIPState:       cdip.StageDecode,
+		CDIPParentJobID: queued.ID,
+		CDIPStageIndex:  0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	stageJob.Status = jobs.StatusRunning
+	stageJob.UpdatedAt = time.Now().UTC().Add(-2 * time.Minute)
+	state.jobs[stageJob.ID] = stageJob
+	state.mu.Unlock()
+	state.PutRPCHealth(RPCHealthUpdate{
+		Endpoint:  "10.0.0.10:50052",
+		NodeID:    worker.NodeID,
+		NodeName:  "stage-worker",
+		Ready:     false,
+		Error:     "connection refused",
+		CheckedAt: time.Now().UTC(),
+	})
+	state.PutRPCHealth(RPCHealthUpdate{
+		Endpoint:  "10.0.0.10:50052",
+		NodeID:    worker.NodeID,
+		NodeName:  "stage-worker",
+		Ready:     false,
+		Error:     "connection refused",
+		CheckedAt: time.Now().UTC(),
+	})
+	state.PutRPCHealth(RPCHealthUpdate{
+		Endpoint:  "10.0.0.10:50052",
+		NodeID:    worker.NodeID,
+		NodeName:  "stage-worker",
+		Ready:     false,
+		Error:     "connection refused",
+		CheckedAt: time.Now().UTC(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/observability", nil)
+	req.Header.Set("X-CMesh-Operator-Token", "operator-secret")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload ObservabilityReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Status != "degraded" {
+		t.Fatalf("expected degraded observability status, got %#v", payload)
+	}
+	if payload.Cluster.WorkersOnline != 1 || payload.StageDaemons.Ready != 1 {
+		t.Fatalf("expected worker and stage daemon counters, got %#v", payload)
+	}
+	if len(payload.Workers) != 1 || payload.Workers[0].ID != worker.NodeID || len(payload.Workers[0].StageDaemons) != 1 {
+		t.Fatalf("expected worker stage-daemon detail, got %#v", payload.Workers)
+	}
+	if payload.Workers[0].StageDaemons[0].Protocol != "cdip.stage-session-v1" {
+		t.Fatalf("expected stage daemon protocol detail, got %#v", payload.Workers[0].StageDaemons)
+	}
+	if payload.Jobs.Total != 2 || payload.Jobs.Active != 2 || payload.Jobs.StaleRunning != 1 {
+		t.Fatalf("expected job counters, got %#v", payload.Jobs)
+	}
+	if len(payload.RecentDistributedJobs) != 2 {
+		t.Fatalf("expected recent distributed job summaries, got %#v", payload.RecentDistributedJobs)
+	}
+	if payload.CDIP.ParentJobsTotal != 1 || payload.CDIP.StageJobsTotal != 1 || payload.CDIP.ActiveStages != 1 || payload.CDIP.StageByState[string(cdip.StageDecode)] != 1 {
+		t.Fatalf("expected cdip counters, got %#v", payload.CDIP)
+	}
+	if payload.RPC.EndpointsTotal != 1 || payload.RPC.Quarantined != 1 {
+		t.Fatalf("expected rpc quarantine counters, got %#v", payload.RPC)
+	}
+	if !payload.Recovery.Enabled || payload.Recovery.StaleAfterMS != int64(time.Minute/time.Millisecond) {
+		t.Fatalf("expected recovery config, got %#v", payload.Recovery)
+	}
+	if !containsString(payload.Blockers, "stale running jobs detected") || !containsString(payload.Blockers, "rpc endpoints quarantined") {
+		t.Fatalf("expected production blockers, got %#v", payload.Blockers)
+	}
+}
+
 func TestWorkerHeartbeatUpdatesNodeAndOfflineStatus(t *testing.T) {
 	state := NewState()
 	state.heartbeatTimeout = time.Nanosecond
@@ -1105,7 +1291,7 @@ func TestWorkerHeartbeatUpdatesNodeAndOfflineStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hbReq := httptest.NewRequest(http.MethodPost, "/v1/workers/heartbeat", bytes.NewReader(hbBody))
+	hbReq := withWorkerAuthForTest(t, srv, httptest.NewRequest(http.MethodPost, "/v1/workers/heartbeat", bytes.NewReader(hbBody)), joinResp.NodeID)
 	hbRec := httptest.NewRecorder()
 	srv.ServeHTTP(hbRec, hbReq)
 	if hbRec.Code != http.StatusOK {
@@ -1163,7 +1349,7 @@ func TestWorkerLeaveMarksNodeOfflineAndRemovesActiveCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leaveReq := httptest.NewRequest(http.MethodPost, "/v1/workers/leave", bytes.NewReader(leaveBody))
+	leaveReq := withWorkerAuthForTest(t, srv, httptest.NewRequest(http.MethodPost, "/v1/workers/leave", bytes.NewReader(leaveBody)), joinResp.NodeID)
 	leaveRec := httptest.NewRecorder()
 	srv.ServeHTTP(leaveRec, leaveReq)
 	if leaveRec.Code != http.StatusOK {
@@ -1278,7 +1464,7 @@ func TestJobLifecycle(t *testing.T) {
 		t.Fatalf("expected job assigned to %s, got %s", worker.NodeID, created.AssignedTo)
 	}
 
-	nextReq := httptest.NewRequest(http.MethodGet, "/v1/workers/"+worker.NodeID+"/jobs/next", nil)
+	nextReq := withWorkerAuthForTest(t, srv, httptest.NewRequest(http.MethodGet, "/v1/workers/"+worker.NodeID+"/jobs/next", nil), worker.NodeID)
 	nextRec := httptest.NewRecorder()
 	srv.ServeHTTP(nextRec, nextReq)
 	if nextRec.Code != http.StatusOK {
@@ -1303,7 +1489,7 @@ func TestJobLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	completeHTTPReq := httptest.NewRequest(http.MethodPost, "/v1/jobs/"+created.ID+"/complete", bytes.NewReader(completeBody))
+	completeHTTPReq := withWorkerAuthForTest(t, srv, httptest.NewRequest(http.MethodPost, "/v1/jobs/"+created.ID+"/complete", bytes.NewReader(completeBody)), worker.NodeID)
 	completeRec := httptest.NewRecorder()
 	srv.ServeHTTP(completeRec, completeHTTPReq)
 	if completeRec.Code != http.StatusOK {
@@ -1805,6 +1991,262 @@ func TestStaleWorkerFailsActiveJob(t *testing.T) {
 	if failed.Error != "worker heartbeat timed out" {
 		t.Fatalf("unexpected error %q", failed.Error)
 	}
+}
+
+func TestRecoverStaleRunningJobReschedulesAwayFromStuckWorker(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	workerA := joinWorkerForTest(t, srv, "stuck-worker-a")
+	workerB := joinWorkerForTest(t, srv, "healthy-worker-b")
+
+	job, err := state.CreateJob(jobs.CreateRequest{
+		Type:        "echo",
+		Input:       "hello cluster",
+		AssignedTo:  workerA.NodeID,
+		MaxAttempts: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.NextJobForWorker(workerA.NodeID); !ok {
+		t.Fatal("expected worker A job to start")
+	}
+
+	markJobStaleForTest(t, state, job.ID, 10*time.Minute)
+	recovered := state.RecoverStaleJobs(time.Minute)
+	if len(recovered) != 1 {
+		t.Fatalf("expected one recovered job, got %d", len(recovered))
+	}
+
+	rescheduled, ok := state.Job(job.ID)
+	if !ok {
+		t.Fatal("expected job")
+	}
+	if rescheduled.Status != jobs.StatusScheduled {
+		t.Fatalf("expected rescheduled job, got %s", rescheduled.Status)
+	}
+	if rescheduled.AssignedTo != workerB.NodeID {
+		t.Fatalf("expected job moved to worker B, got %s", rescheduled.AssignedTo)
+	}
+	if rescheduled.Attempts != 2 {
+		t.Fatalf("expected second attempt, got %d", rescheduled.Attempts)
+	}
+	if !strings.Contains(rescheduled.LastFailure, "timed out") {
+		t.Fatalf("expected timeout failure reason, got %q", rescheduled.LastFailure)
+	}
+}
+
+func TestRecoverStaleCDIPStageFailsParentWhenAttemptsExhausted(t *testing.T) {
+	state := NewState()
+	worker := joinWorkerForTest(t, NewServer(":0", state), "stuck-stage-worker")
+
+	parent, err := state.CreateJob(jobs.CreateRequest{
+		Type:         models.JobGenerateDistributed,
+		NoAutoAssign: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := state.CreateJob(jobs.CreateRequest{
+		Type:            models.JobGenerateStage,
+		AssignedTo:      worker.NodeID,
+		MaxAttempts:     1,
+		CDIPState:       cdip.StageDecode,
+		CDIPParentJobID: parent.ID,
+		CDIPStageIndex:  1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.NextJobForWorker(worker.NodeID); !ok {
+		t.Fatal("expected stage job to start")
+	}
+
+	markJobStaleForTest(t, state, stage.ID, 10*time.Minute)
+	recovered := state.RecoverStaleJobs(time.Minute)
+	if len(recovered) != 1 {
+		t.Fatalf("expected one recovered job, got %d", len(recovered))
+	}
+
+	failedStage, ok := state.Job(stage.ID)
+	if !ok {
+		t.Fatal("expected stage job")
+	}
+	if failedStage.Status != jobs.StatusFailed {
+		t.Fatalf("expected failed stage, got %s", failedStage.Status)
+	}
+	if failedStage.CDIPState != cdip.StageFailed {
+		t.Fatalf("expected failed CDIP state, got %s", failedStage.CDIPState)
+	}
+
+	failedParent, ok := state.Job(parent.ID)
+	if !ok {
+		t.Fatal("expected parent job")
+	}
+	if failedParent.Status != jobs.StatusFailed {
+		t.Fatalf("expected failed parent, got %s", failedParent.Status)
+	}
+	if !strings.Contains(failedParent.Error, "timed out") {
+		t.Fatalf("expected timeout parent error, got %q", failedParent.Error)
+	}
+}
+
+func TestRecoveryCleanupClosesResidentStageDaemonSession(t *testing.T) {
+	deletedPath := ""
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		deletedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer daemon.Close()
+
+	state := NewState()
+	srv := NewServer(":0", state)
+	stageInput, err := json.Marshal(models.DistributedStageJobInput{
+		ParentJobID:    "job-parent",
+		StageJobID:     "job-stage",
+		ModelID:        "qwen-test",
+		KVCacheKey:     "kv-test",
+		Stage:          models.DistributedStageInput{Index: 2},
+		StageDaemonURL: daemon.URL,
+		StageSessionID: "stage-session-test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleaned := srv.cleanupResidentStageSessionsForRecoveredJobs(context.Background(), []jobs.Job{{
+		ID:    "job-stage",
+		Type:  models.JobGenerateStage,
+		Input: string(stageInput),
+	}})
+	if cleaned != 1 {
+		t.Fatalf("expected one cleaned session, got %d", cleaned)
+	}
+	if deletedPath != "/v1/sessions/stage-session-test" {
+		t.Fatalf("unexpected delete path %q", deletedPath)
+	}
+}
+
+func TestCancelDistributedParentCancelsStageJobs(t *testing.T) {
+	state := NewState()
+	worker := joinWorkerForTest(t, NewServer(":0", state), "stage-worker")
+
+	parent, err := state.CreateJob(jobs.CreateRequest{
+		Type:         models.JobGenerateDistributed,
+		NoAutoAssign: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := state.CreateJob(jobs.CreateRequest{
+		Type:            models.JobGenerateStage,
+		AssignedTo:      worker.NodeID,
+		CDIPState:       cdip.StageDecode,
+		CDIPParentJobID: parent.ID,
+		CDIPStageIndex:  0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.NextJobForWorker(worker.NodeID); !ok {
+		t.Fatal("expected stage job to start")
+	}
+
+	canceled, ok := state.CancelJob(parent.ID)
+	if !ok || canceled.Status != jobs.StatusCanceled {
+		t.Fatalf("expected canceled parent, got %#v ok=%v", canceled, ok)
+	}
+	canceledStage, ok := state.Job(stage.ID)
+	if !ok {
+		t.Fatal("expected stage")
+	}
+	if canceledStage.Status != jobs.StatusCanceled {
+		t.Fatalf("expected canceled stage, got %s", canceledStage.Status)
+	}
+	if canceledStage.CDIPState != cdip.StageAborted {
+		t.Fatalf("expected aborted CDIP state, got %s", canceledStage.CDIPState)
+	}
+}
+
+func TestCancelDistributedParentClosesResidentStageDaemonSession(t *testing.T) {
+	deletedPath := ""
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		deletedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer daemon.Close()
+
+	state := NewState()
+	srv := NewServer(":0", state)
+	worker := joinWorkerForTest(t, srv, "stage-worker")
+	parent, err := state.CreateJob(jobs.CreateRequest{
+		Type:         models.JobGenerateDistributed,
+		NoAutoAssign: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(models.DistributedStageJobInput{
+		ParentJobID:    parent.ID,
+		StageJobID:     "job-stage",
+		ModelID:        "qwen-test",
+		Stage:          models.DistributedStageInput{Index: 0},
+		StageDaemonURL: daemon.URL,
+		StageSessionID: "stage-session-cancel",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := state.CreateJob(jobs.CreateRequest{
+		Type:            models.JobGenerateStage,
+		AssignedTo:      worker.NodeID,
+		Input:           string(input),
+		CDIPState:       cdip.StageDecode,
+		CDIPParentJobID: parent.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.NextJobForWorker(worker.NodeID); !ok {
+		t.Fatal("expected stage job to start")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs/"+parent.ID+"/cancel", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if deletedPath != "/v1/sessions/stage-session-cancel" {
+		t.Fatalf("unexpected delete path %q", deletedPath)
+	}
+	canceledStage, ok := state.Job(stage.ID)
+	if !ok || canceledStage.Status != jobs.StatusCanceled {
+		t.Fatalf("expected stage canceled, got %#v ok=%v", canceledStage, ok)
+	}
+}
+
+func markJobStaleForTest(t *testing.T, state *State, jobID string, age time.Duration) {
+	t.Helper()
+	staleAt := time.Now().UTC().Add(-age)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	job, ok := state.jobs[jobID]
+	if !ok {
+		t.Fatalf("missing job %s", jobID)
+	}
+	job.UpdatedAt = staleAt
+	if !job.StartedAt.IsZero() {
+		job.StartedAt = staleAt
+	}
+	state.jobs[jobID] = job
 }
 
 func TestClusterBenchmarkCreatesJobPerOnlineWorker(t *testing.T) {
@@ -2419,6 +2861,12 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 	}
 	defer listener.Close()
 	go acceptAndCloseConnections(listener)
+	listenerB, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerB.Close()
+	go acceptAndCloseConnections(listenerB)
 
 	state := NewState()
 	srv := NewServer(":0", state)
@@ -2452,6 +2900,20 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 			}},
 		}},
 	})
+	joinWorkerWithResourcesForTest(t, srv, "rpc-backend-worker-b", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: listenerB.Addr().String(),
+			}},
+		}},
+	})
 
 	body := bytes.NewBufferString(`{"prompt":"hello","max_tokens":8}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/distributed-rpc-generate", body)
@@ -2471,7 +2933,7 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 	if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
 		t.Fatal(err)
 	}
-	if input.ModelID != "qwen2.5-0.5b-instruct-q4-k-m" || input.Prompt != "hello" || len(input.RPCEndpoints) != 1 || input.RPCEndpoints[0] != listener.Addr().String() {
+	if input.ModelID != "qwen2.5-0.5b-instruct-q4-k-m" || input.Prompt != "hello" || len(input.RPCEndpoints) != 2 {
 		t.Fatalf("unexpected distributed rpc input: %#v", input)
 	}
 	if input.ExecutionPlan.Protocol != protocol.DistributedRPCProtocol || input.ExecutionPlan.ProtocolVersion != protocol.DistributedRPCProtocolVersion || input.ExecutionPlan.PlanSchemaVersion != protocol.DistributedRPCPlanSchemaVersion {
@@ -2480,11 +2942,16 @@ func TestModelDistributedRPCGenerateCreatesWorkerJob(t *testing.T) {
 	if input.ExecutionPlan.Mode != "llama.cpp-rpc" || input.ExecutionPlan.ModelID != input.ModelID || input.ExecutionPlan.CoordinatorNodeID != job.AssignedTo {
 		t.Fatalf("unexpected distributed rpc execution plan: %#v", input.ExecutionPlan)
 	}
-	if !input.ExecutionPlan.HealthChecked || len(input.ExecutionPlan.RPCEndpoints) != 1 || input.ExecutionPlan.RPCEndpoints[0] != listener.Addr().String() {
+	if !input.ExecutionPlan.HealthChecked || len(input.ExecutionPlan.RPCEndpoints) != 2 {
 		t.Fatalf("expected health-checked execution endpoints, got %#v", input.ExecutionPlan)
 	}
-	if len(input.ExecutionPlan.Backends) != 1 || input.ExecutionPlan.Backends[0].Endpoint != listener.Addr().String() || input.ExecutionPlan.Backends[0].HealthStatus != "ready" {
+	if len(input.ExecutionPlan.Backends) != 2 {
 		t.Fatalf("unexpected distributed rpc execution backends: %#v", input.ExecutionPlan.Backends)
+	}
+	for _, backend := range input.ExecutionPlan.Backends {
+		if backend.HealthStatus != "ready" {
+			t.Fatalf("expected ready backend health, got %#v", input.ExecutionPlan.Backends)
+		}
 	}
 }
 
@@ -2553,14 +3020,14 @@ func TestModelDistributedRPCPlanHealthCheckExcludesFailedEndpoints(t *testing.T)
 	if err := json.Unmarshal(rec.Body.Bytes(), &plan); err != nil {
 		t.Fatal(err)
 	}
-	if !plan.ExecutableNow || !plan.HealthChecked {
-		t.Fatalf("expected executable health checked plan, got %#v", plan)
+	if plan.ExecutableNow || !plan.HealthChecked {
+		t.Fatalf("expected blocked health checked plan with one backend, got %#v", plan)
 	}
 	if len(plan.RPCEndpoints) != 1 || plan.RPCEndpoints[0] != listener.Addr().String() {
 		t.Fatalf("expected only healthy endpoint, got %#v", plan.RPCEndpoints)
 	}
-	if len(plan.Warnings) == 0 {
-		t.Fatalf("expected failed endpoint warning, got %#v", plan)
+	if len(plan.Warnings) == 0 || len(plan.Blockers) == 0 {
+		t.Fatalf("expected failed endpoint warning and minimum backend blocker, got %#v", plan)
 	}
 	var ready, failed bool
 	for _, backend := range plan.Backends {
@@ -2765,6 +3232,20 @@ func TestModelDistributedRPCPlanEndpoint(t *testing.T) {
 			}},
 		}},
 	})
+	backendB := joinWorkerWithResourcesForTest(t, srv, "rpc-plan-backend-b", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: "10.0.0.20:50052",
+			}},
+		}},
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/distributed-rpc-plan?node_id="+join.NodeID, nil)
 	rec := httptest.NewRecorder()
@@ -2779,10 +3260,10 @@ func TestModelDistributedRPCPlanEndpoint(t *testing.T) {
 	if !plan.ExecutableNow || plan.Mode != "llama.cpp-rpc" || plan.CoordinatorNodeID != join.NodeID {
 		t.Fatalf("unexpected plan: %#v", plan)
 	}
-	if len(plan.RPCEndpoints) != 1 || plan.RPCEndpoints[0] != "10.0.0.10:50052" {
+	if len(plan.RPCEndpoints) != 2 || plan.RPCEndpoints[0] != "10.0.0.10:50052" || plan.RPCEndpoints[1] != "10.0.0.20:50052" {
 		t.Fatalf("unexpected rpc endpoints: %#v", plan.RPCEndpoints)
 	}
-	if len(plan.Backends) != 1 || plan.Backends[0].NodeID != backend.NodeID || plan.Backends[0].Endpoint != "10.0.0.10:50052" {
+	if len(plan.Backends) != 2 || plan.Backends[0].NodeID != backend.NodeID || plan.Backends[0].Endpoint != "10.0.0.10:50052" || plan.Backends[1].NodeID != backendB.NodeID || plan.Backends[1].Endpoint != "10.0.0.20:50052" {
 		t.Fatalf("unexpected backends: %#v", plan.Backends)
 	}
 }
@@ -2820,6 +3301,20 @@ func TestModelDistributedRPCReadinessEndpoint(t *testing.T) {
 			}},
 		}},
 	})
+	joinWorkerWithResourcesForTest(t, srv, "rpc-ready-backend-b", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  "llama.cpp",
+			Ready: true,
+			RPCRuntimes: []cluster.RPCRuntimeResource{{
+				Name:     "llama.cpp-rpc",
+				Ready:    true,
+				Endpoint: "10.0.0.20:50052",
+			}},
+		}},
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/distributed-rpc-readiness", nil)
 	rec := httptest.NewRecorder()
@@ -2831,7 +3326,7 @@ func TestModelDistributedRPCReadinessEndpoint(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if !payload.Ready || payload.NodeID == "" || len(payload.RPCEndpoints) != 1 || len(payload.Blockers) != 0 {
+	if !payload.Ready || payload.NodeID == "" || len(payload.RPCEndpoints) != 2 || len(payload.Blockers) != 0 {
 		t.Fatalf("unexpected readiness: %#v", payload)
 	}
 }
@@ -2868,6 +3363,66 @@ func TestModelDistributedRPCReadinessReportsBlockers(t *testing.T) {
 	}
 	if payload.Ready || len(payload.Blockers) == 0 || !strings.Contains(strings.Join(payload.Blockers, " "), "no active llama.cpp rpc endpoints") {
 		t.Fatalf("expected rpc endpoint blocker, got %#v", payload)
+	}
+}
+
+func TestModelDistributedRPCReadinessBlocksRuntimeVersionMismatch(t *testing.T) {
+	state := NewState()
+	srv := NewServer(":0", state)
+	joinWorkerWithResourcesForTest(t, srv, "rpc-version-coordinator", cluster.ResourceSnapshot{
+		CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+		Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+		Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+		Models: []cluster.ModelResource{{
+			ID:      "qwen2.5-0.5b-instruct-q4-k-m",
+			Name:    "Qwen2.5 0.5B Instruct",
+			Runtime: "llama.cpp",
+			Path:    "/tmp/qwen.gguf",
+			Ready:   true,
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:    "llama.cpp",
+			Ready:   true,
+			Version: "llama.cpp-b9704-linux-amd64-rpc",
+		}},
+	})
+	for _, backend := range []struct {
+		name     string
+		endpoint string
+		version  string
+	}{
+		{name: "rpc-version-backend-a", endpoint: "10.0.0.10:50052", version: "llama.cpp-b9704-linux-amd64-rpc"},
+		{name: "rpc-version-backend-b", endpoint: "10.0.0.20:50052", version: "llama.cpp-other"},
+	} {
+		joinWorkerWithResourcesForTest(t, srv, backend.name, cluster.ResourceSnapshot{
+			CPU:     cluster.CPUResources{CoresTotal: 8, CoresAllowed: 4},
+			Memory:  cluster.MemoryResources{TotalBytes: 16 * gb, AllowedBytes: 8 * gb},
+			Storage: cluster.StorageResources{TotalBytes: 128 * gb, AllowedBytes: 64 * gb, FreeBytes: 32 * gb},
+			Runtimes: []cluster.RuntimeResource{{
+				Name:    "llama.cpp",
+				Ready:   true,
+				Version: backend.version,
+				RPCRuntimes: []cluster.RPCRuntimeResource{{
+					Name:     "llama.cpp-rpc",
+					Ready:    true,
+					Endpoint: backend.endpoint,
+				}},
+			}},
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/qwen2.5-0.5b-instruct-q4-k-m/distributed-rpc-readiness", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload ModelDistributedRPCReadiness
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Ready || !strings.Contains(strings.Join(payload.Blockers, " "), "runtime version mismatch") {
+		t.Fatalf("expected runtime version mismatch blocker, got %#v", payload)
 	}
 }
 
@@ -3600,6 +4155,24 @@ func joinWorkerWithResourcesForTest(t *testing.T, srv *Server, name string, reso
 		t.Fatal(err)
 	}
 	return resp
+}
+
+func containsString(in []string, want string) bool {
+	for _, item := range in {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func withWorkerAuthForTest(t *testing.T, srv *Server, req *http.Request, nodeID string) *http.Request {
+	t.Helper()
+	token, ok := srv.state.WorkerAuthToken(nodeID)
+	if ok && token != "" {
+		req.Header.Set("X-CMesh-Worker-Token", token)
+	}
+	return req
 }
 
 func acceptAndCloseConnections(listener net.Listener) {

@@ -24,6 +24,7 @@ type Node struct {
 	Role      NodeRole         `json:"role"`
 	Status    NodeStatus       `json:"status"`
 	Endpoint  string           `json:"endpoint"`
+	AuthToken string           `json:"-"`
 	Resources ResourceSnapshot `json:"resources"`
 	JoinedAt  time.Time        `json:"joined_at"`
 	UpdatedAt time.Time        `json:"updated_at"`
@@ -46,6 +47,7 @@ type ModelResource struct {
 	Runtime     string    `json:"runtime,omitempty"`
 	Path        string    `json:"path"`
 	Bytes       uint64    `json:"bytes"`
+	Layers      int       `json:"layers,omitempty"`
 	Ready       bool      `json:"ready"`
 	Error       string    `json:"error,omitempty"`
 	InstalledAt time.Time `json:"installed_at,omitempty"`
@@ -78,6 +80,8 @@ type StageRuntimeResource struct {
 	Ready         bool     `json:"ready"`
 	CLIReady      bool     `json:"cli_ready,omitempty"`
 	BinaryPath    string   `json:"binary_path,omitempty"`
+	Endpoint      string   `json:"endpoint,omitempty"`
+	Protocol      string   `json:"protocol,omitempty"`
 	RequiredHooks []string `json:"required_hooks,omitempty"`
 	Blockers      []string `json:"blockers,omitempty"`
 }

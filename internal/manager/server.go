@@ -3,6 +3,8 @@ package manager
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -40,6 +42,9 @@ type Server struct {
 	backgroundRPCHealth     bool
 	rpcHealthRefreshEvery   time.Duration
 	rpcHealthTimeout        time.Duration
+	backgroundJobRecovery   bool
+	jobRecoveryEvery        time.Duration
+	jobStaleAfter           time.Duration
 	cdipActivationTransport transport.ActivationTransport
 	mux                     *http.ServeMux
 	server                  *http.Server
@@ -48,7 +53,9 @@ type Server struct {
 }
 
 const rpcEndpointQuarantineConsecutiveFailures = 3
+const distributedRPCMinScheduledEndpoints = 2
 const distributedRPCMaxScheduledEndpoints = 8
+const llamaCPPRPCReleaseRuntimeVersion = "llama.cpp-b9704-linux-amd64-rpc"
 
 type ServerOptions struct {
 	Addr                  string
@@ -60,6 +67,9 @@ type ServerOptions struct {
 	BackgroundRPCHealth   bool
 	RPCHealthEvery        time.Duration
 	RPCHealthTimeout      time.Duration
+	BackgroundJobRecovery bool
+	JobRecoveryEvery      time.Duration
+	JobStaleAfter         time.Duration
 }
 
 func NewServer(addr string, state Store) *Server {
@@ -80,6 +90,14 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	if rpcHealthTimeout <= 0 {
 		rpcHealthTimeout = time.Second
 	}
+	jobRecoveryEvery := options.JobRecoveryEvery
+	if jobRecoveryEvery <= 0 {
+		jobRecoveryEvery = 10 * time.Second
+	}
+	jobStaleAfter := options.JobStaleAfter
+	if jobStaleAfter <= 0 {
+		jobStaleAfter = 2 * time.Minute
+	}
 	s := &Server{
 		addr:                    options.Addr,
 		state:                   state,
@@ -91,6 +109,9 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 		backgroundRPCHealth:     options.BackgroundRPCHealth,
 		rpcHealthRefreshEvery:   rpcHealthEvery,
 		rpcHealthTimeout:        rpcHealthTimeout,
+		backgroundJobRecovery:   options.BackgroundJobRecovery,
+		jobRecoveryEvery:        jobRecoveryEvery,
+		jobStaleAfter:           jobStaleAfter,
 		cdipActivationTransport: transport.NewMemoryActivationTransport(8),
 		mux:                     mux,
 		snapshots:               make(map[string]CapacitySnapshot),
@@ -100,6 +121,7 @@ func NewServerWithOptions(options ServerOptions, state Store) *Server {
 	mux.HandleFunc("/invite", s.handleInvite)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/cluster", s.handleCluster)
+	mux.HandleFunc("/v1/observability", s.handleObservability)
 	mux.HandleFunc("/v1/capacity/snapshots", s.handleCapacitySnapshots)
 	mux.HandleFunc("/v1/capacity", s.handleCapacity)
 	mux.HandleFunc("/v1/dashboard/status", s.handleDashboardStatus)
@@ -148,6 +170,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.backgroundRPCHealth {
 		go s.runRPCHealthRefreshLoop(ctx)
 	}
+	if s.backgroundJobRecovery {
+		go s.runJobRecoveryLoop(ctx)
+	}
 	go func() {
 		errCh <- s.server.ListenAndServe()
 	}()
@@ -163,6 +188,82 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		return err
 	}
+}
+
+func (s *Server) runJobRecoveryLoop(ctx context.Context) {
+	ticker := time.NewTicker(s.jobRecoveryEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			recovered := s.state.RecoverStaleJobs(s.jobStaleAfter)
+			s.cleanupResidentStageSessionsForRecoveredJobs(ctx, recovered)
+		}
+	}
+}
+
+func (s *Server) cleanupResidentStageSessionsForRecoveredJobs(ctx context.Context, recovered []jobs.Job) int {
+	if len(recovered) == 0 {
+		return 0
+	}
+	cleaned := 0
+	for _, job := range recovered {
+		if job.Type != models.JobGenerateStage {
+			continue
+		}
+		var input models.DistributedStageJobInput
+		if err := json.Unmarshal([]byte(job.Input), &input); err != nil {
+			continue
+		}
+		if s.closeStageDaemonSession(ctx, input, job.ID) {
+			cleaned++
+		}
+	}
+	return cleaned
+}
+
+func (s *Server) closeStageDaemonSession(ctx context.Context, input models.DistributedStageJobInput, stageJobID string) bool {
+	daemonURL := strings.TrimSpace(input.StageDaemonURL)
+	if daemonURL == "" {
+		return false
+	}
+	sessionID := distributedStageRecoverySessionID(input, stageJobID)
+	if sessionID == "" {
+		return false
+	}
+	endpoint, err := url.JoinPath(daemonURL, "/v1/sessions", sessionID)
+	if err != nil {
+		return false
+	}
+	cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cleanupCtx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300 || resp.StatusCode == http.StatusNotFound
+}
+
+func distributedStageRecoverySessionID(input models.DistributedStageJobInput, stageJobID string) string {
+	if id := strings.TrimSpace(input.StageSessionID); id != "" {
+		return id
+	}
+	seed := strings.Join([]string{
+		strings.TrimSpace(input.ParentJobID),
+		strings.TrimSpace(stageJobID),
+		strings.TrimSpace(input.ModelID),
+		strconv.Itoa(input.Stage.Index),
+		strings.TrimSpace(input.KVCacheKey),
+	}, "\x00")
+	sum := sha256.Sum256([]byte(seed))
+	return fmt.Sprintf("stage-%d-%s", input.Stage.Index, hex.EncodeToString(sum[:8]))
 }
 
 func (s *Server) runCDIPAdvanceLoop(ctx context.Context) {
@@ -297,6 +398,9 @@ func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 		DesktopInviteHref:   template.URL(desktopInviteURL(managerURL, s.joinToken)),
 		DownloadURL:         releaseDownloadBase(version.Version) + "CMesh-Worker-Apple-Silicon.dmg",
 		ReleaseDownloadBase: releaseDownloadBase(version.Version),
+		RuntimeURL:          releaseDownloadBase(version.Version) + llamaCPPRPCReleaseRuntimeVersion + ".tar.gz",
+		RuntimeName:         llamaCPPRPCReleaseRuntimeVersion + ".tar.gz",
+		RuntimeVersion:      llamaCPPRPCReleaseRuntimeVersion,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -352,6 +456,23 @@ func (s *Server) hasOperatorAuth(r *http.Request) bool {
 	return err == nil && cookie.Value == s.operatorToken
 }
 
+func (s *Server) requireWorkerAuth(w http.ResponseWriter, r *http.Request, nodeID string) bool {
+	expected, ok := s.state.WorkerAuthToken(nodeID)
+	if !ok || expected == "" {
+		return true
+	}
+	got := r.Header.Get("X-CMesh-Worker-Token")
+	if got == "" {
+		http.Error(w, "worker token required", http.StatusUnauthorized)
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+		http.Error(w, "invalid worker token", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
 func localManagerURL(r *http.Request) string {
 	proto := r.Header.Get("X-Forwarded-Proto")
 	if proto == "" {
@@ -371,6 +492,9 @@ type InvitePageData struct {
 	DesktopInviteHref   template.URL
 	DownloadURL         string
 	ReleaseDownloadBase string
+	RuntimeURL          string
+	RuntimeName         string
+	RuntimeVersion      string
 }
 
 type clusterBenchmarkRequest struct {
@@ -488,11 +612,302 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type ObservabilityReport struct {
+	Status                string                        `json:"status"`
+	GeneratedAt           time.Time                     `json:"generated_at"`
+	StartedAt             time.Time                     `json:"started_at"`
+	Cluster               ObservabilityCluster          `json:"cluster"`
+	Workers               []ObservabilityWorker         `json:"workers,omitempty"`
+	Jobs                  ObservabilityJobs             `json:"jobs"`
+	RecentDistributedJobs []ObservabilityDistributedJob `json:"recent_distributed_jobs,omitempty"`
+	CDIP                  ObservabilityCDIP             `json:"cdip"`
+	RPC                   ObservabilityRPC              `json:"rpc"`
+	StageDaemons          ObservabilityStageDaemons     `json:"stage_daemons"`
+	Recovery              ObservabilityRecovery         `json:"recovery"`
+	Blockers              []string                      `json:"blockers,omitempty"`
+}
+
+type ObservabilityCluster struct {
+	WorkersTotal   int                      `json:"workers_total"`
+	WorkersOnline  int                      `json:"workers_online"`
+	WorkersOffline int                      `json:"workers_offline"`
+	Resources      cluster.ResourceSnapshot `json:"resources"`
+}
+
+type ObservabilityJobs struct {
+	Total             int            `json:"total"`
+	ByStatus          map[string]int `json:"by_status"`
+	ByType            map[string]int `json:"by_type"`
+	Active            int            `json:"active"`
+	FailedLastHour    int            `json:"failed_last_hour"`
+	StaleRunning      int            `json:"stale_running"`
+	OldestActiveAgeMS int64          `json:"oldest_active_age_ms,omitempty"`
+}
+
+type ObservabilityWorker struct {
+	ID              string                     `json:"id"`
+	Name            string                     `json:"name"`
+	Status          cluster.NodeStatus         `json:"status"`
+	UpdatedAt       time.Time                  `json:"updated_at"`
+	HeartbeatAgeMS  int64                      `json:"heartbeat_age_ms,omitempty"`
+	Resources       cluster.ResourceSnapshot   `json:"resources"`
+	StageDaemons    []ObservabilityStageDaemon `json:"stage_daemons,omitempty"`
+	InstalledModels []cluster.ModelResource    `json:"installed_models,omitempty"`
+}
+
+type ObservabilityStageDaemon struct {
+	RuntimeName   string   `json:"runtime_name"`
+	Name          string   `json:"name"`
+	Ready         bool     `json:"ready"`
+	Endpoint      string   `json:"endpoint,omitempty"`
+	Protocol      string   `json:"protocol,omitempty"`
+	RequiredHooks []string `json:"required_hooks,omitempty"`
+	Blockers      []string `json:"blockers,omitempty"`
+}
+
+type ObservabilityDistributedJob struct {
+	ID              string          `json:"id"`
+	Type            string          `json:"type"`
+	Status          jobs.Status     `json:"status"`
+	AssignedTo      string          `json:"assigned_to,omitempty"`
+	CDIPParentJobID string          `json:"cdip_parent_job_id,omitempty"`
+	CDIPStageIndex  int             `json:"cdip_stage_index,omitempty"`
+	CDIPState       cdip.StageState `json:"cdip_state,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+	AgeMS           int64           `json:"age_ms,omitempty"`
+	Result          string          `json:"result,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	LastFailure     string          `json:"last_failure,omitempty"`
+}
+
+type ObservabilityCDIP struct {
+	ParentJobsTotal int            `json:"parent_jobs_total"`
+	StageJobsTotal  int            `json:"stage_jobs_total"`
+	StageByState    map[string]int `json:"stage_by_state"`
+	ActiveStages    int            `json:"active_stages"`
+	FailedStages    int            `json:"failed_stages"`
+}
+
+type ObservabilityRPC struct {
+	EndpointsTotal int `json:"endpoints_total"`
+	Ready          int `json:"ready"`
+	Failed         int `json:"failed"`
+	Quarantined    int `json:"quarantined"`
+}
+
+type ObservabilityStageDaemons struct {
+	WorkersTotal int `json:"workers_total"`
+	Ready        int `json:"ready"`
+	Blocked      int `json:"blocked"`
+}
+
+type ObservabilityRecovery struct {
+	Enabled      bool  `json:"enabled"`
+	EveryMS      int64 `json:"every_ms"`
+	StaleAfterMS int64 `json:"stale_after_ms"`
+}
+
+func buildObservabilityReport(summary ClusterSummary, nodes []cluster.Node, allJobs []jobs.Job, rpcHealth []RPCHealthRecord, now time.Time, server *Server) ObservabilityReport {
+	report := ObservabilityReport{
+		Status:      "ok",
+		GeneratedAt: now,
+		StartedAt:   summary.StartedAt,
+		Cluster: ObservabilityCluster{
+			WorkersTotal:   summary.WorkersTotal,
+			WorkersOnline:  summary.WorkersOnline,
+			WorkersOffline: summary.WorkersTotal - summary.WorkersOnline,
+			Resources:      summary.Resources,
+		},
+		Jobs: ObservabilityJobs{
+			ByStatus: make(map[string]int),
+			ByType:   make(map[string]int),
+		},
+		CDIP: ObservabilityCDIP{
+			StageByState: make(map[string]int),
+		},
+		Recovery: ObservabilityRecovery{
+			Enabled:      server.backgroundJobRecovery,
+			EveryMS:      server.jobRecoveryEvery.Milliseconds(),
+			StaleAfterMS: server.jobStaleAfter.Milliseconds(),
+		},
+	}
+
+	for _, node := range nodes {
+		if node.Role != cluster.NodeRoleWorker || node.Status != cluster.NodeStatusOnline {
+			continue
+		}
+		worker := ObservabilityWorker{
+			ID:              node.ID,
+			Name:            node.Name,
+			Status:          node.Status,
+			UpdatedAt:       node.UpdatedAt,
+			HeartbeatAgeMS:  now.Sub(node.UpdatedAt).Milliseconds(),
+			Resources:       node.Resources,
+			InstalledModels: readyModels(node.Resources.Models),
+		}
+		for _, runtime := range node.Resources.Runtimes {
+			for _, stage := range runtime.StageRuntimes {
+				if stage.Protocol != "cdip.stage-session-v1" {
+					continue
+				}
+				worker.StageDaemons = append(worker.StageDaemons, ObservabilityStageDaemon{
+					RuntimeName:   runtime.Name,
+					Name:          stage.Name,
+					Ready:         stage.Ready,
+					Endpoint:      stage.Endpoint,
+					Protocol:      stage.Protocol,
+					RequiredHooks: append([]string(nil), stage.RequiredHooks...),
+					Blockers:      append([]string(nil), stage.Blockers...),
+				})
+				report.StageDaemons.WorkersTotal++
+				if stage.Ready {
+					report.StageDaemons.Ready++
+				} else {
+					report.StageDaemons.Blocked++
+				}
+			}
+		}
+		report.Workers = append(report.Workers, worker)
+	}
+
+	var oldestActive time.Time
+	for _, job := range allJobs {
+		report.Jobs.Total++
+		report.Jobs.ByStatus[string(job.Status)]++
+		report.Jobs.ByType[job.Type]++
+		if isActiveJobStatus(job.Status) {
+			report.Jobs.Active++
+			if oldestActive.IsZero() || job.CreatedAt.Before(oldestActive) {
+				oldestActive = job.CreatedAt
+			}
+			if job.Status == jobs.StatusRunning && !job.UpdatedAt.IsZero() && now.Sub(job.UpdatedAt) > server.jobStaleAfter {
+				report.Jobs.StaleRunning++
+			}
+		}
+		if job.Status == jobs.StatusFailed && !job.FinishedAt.IsZero() && now.Sub(job.FinishedAt) <= time.Hour {
+			report.Jobs.FailedLastHour++
+		}
+		if job.Type == models.JobGenerateDistributed {
+			report.CDIP.ParentJobsTotal++
+		}
+		if job.Type == models.JobGenerateStage {
+			report.CDIP.StageJobsTotal++
+			if job.CDIPState != "" {
+				report.CDIP.StageByState[string(job.CDIPState)]++
+			}
+			if isActiveJobStatus(job.Status) {
+				report.CDIP.ActiveStages++
+			}
+			if job.Status == jobs.StatusFailed {
+				report.CDIP.FailedStages++
+			}
+		}
+	}
+	report.RecentDistributedJobs = recentObservabilityDistributedJobs(allJobs, now, 20)
+	if !oldestActive.IsZero() {
+		report.Jobs.OldestActiveAgeMS = now.Sub(oldestActive).Milliseconds()
+	}
+
+	for _, record := range rpcHealth {
+		report.RPC.EndpointsTotal++
+		if record.Ready {
+			report.RPC.Ready++
+		} else {
+			report.RPC.Failed++
+		}
+		if rpcEndpointQuarantined(record) {
+			report.RPC.Quarantined++
+		}
+	}
+
+	if report.Cluster.WorkersOnline == 0 {
+		report.Blockers = append(report.Blockers, "no online workers")
+	}
+	if report.Jobs.StaleRunning > 0 {
+		report.Blockers = append(report.Blockers, "stale running jobs detected")
+	}
+	if report.RPC.Quarantined > 0 {
+		report.Blockers = append(report.Blockers, "rpc endpoints quarantined")
+	}
+	if report.StageDaemons.WorkersTotal > 0 && report.StageDaemons.Ready == 0 {
+		report.Blockers = append(report.Blockers, "no ready stage daemons")
+	}
+	if len(report.Blockers) > 0 {
+		report.Status = "degraded"
+	}
+
+	return report
+}
+
+func readyModels(models []cluster.ModelResource) []cluster.ModelResource {
+	ready := make([]cluster.ModelResource, 0, len(models))
+	for _, model := range models {
+		if model.Ready {
+			ready = append(ready, model)
+		}
+	}
+	return ready
+}
+
+func recentObservabilityDistributedJobs(allJobs []jobs.Job, now time.Time, limit int) []ObservabilityDistributedJob {
+	filtered := make([]jobs.Job, 0)
+	for _, job := range allJobs {
+		if job.Type != models.JobGenerateDistributed && job.Type != models.JobGenerateStage {
+			continue
+		}
+		filtered = append(filtered, job)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].UpdatedAt.After(filtered[j].UpdatedAt)
+	})
+	if limit > 0 && len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+	summaries := make([]ObservabilityDistributedJob, 0, len(filtered))
+	for _, job := range filtered {
+		summaries = append(summaries, ObservabilityDistributedJob{
+			ID:              job.ID,
+			Type:            job.Type,
+			Status:          job.Status,
+			AssignedTo:      job.AssignedTo,
+			CDIPParentJobID: job.CDIPParentJobID,
+			CDIPStageIndex:  job.CDIPStageIndex,
+			CDIPState:       job.CDIPState,
+			CreatedAt:       job.CreatedAt,
+			UpdatedAt:       job.UpdatedAt,
+			AgeMS:           now.Sub(job.CreatedAt).Milliseconds(),
+			Result:          job.Result,
+			Error:           job.Error,
+			LastFailure:     job.LastFailure,
+		})
+	}
+	return summaries
+}
+
+func isActiveJobStatus(status jobs.Status) bool {
+	return status == jobs.StatusQueued || status == jobs.StatusScheduled || status == jobs.StatusRunning
+}
+
 func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperatorAuth(w, r, false) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.state.ClusterSummary())
+}
+
+func (s *Server) handleObservability(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAuth(w, r, false) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodes := s.state.Nodes()
+	allJobs := s.state.Jobs()
+	rpcHealth := s.state.RPCHealth()
+	writeJSON(w, http.StatusOK, buildObservabilityReport(s.state.ClusterSummary(), nodes, allJobs, rpcHealth, time.Now().UTC(), s))
 }
 
 func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
@@ -667,13 +1082,14 @@ type RuntimeRPCPoolSummary struct {
 }
 
 type RuntimeRPCPoolWorker struct {
-	NodeID       string                     `json:"node_id"`
-	NodeName     string                     `json:"node_name"`
-	Status       cluster.NodeStatus         `json:"status"`
-	Runtime      string                     `json:"runtime"`
-	RuntimeReady bool                       `json:"runtime_ready"`
-	RPC          cluster.RPCRuntimeResource `json:"rpc"`
-	Capabilities []string                   `json:"capabilities,omitempty"`
+	NodeID         string                     `json:"node_id"`
+	NodeName       string                     `json:"node_name"`
+	Status         cluster.NodeStatus         `json:"status"`
+	Runtime        string                     `json:"runtime"`
+	RuntimeVersion string                     `json:"runtime_version,omitempty"`
+	RuntimeReady   bool                       `json:"runtime_ready"`
+	RPC            cluster.RPCRuntimeResource `json:"rpc"`
+	Capabilities   []string                   `json:"capabilities,omitempty"`
 }
 
 type RuntimeRPCSmokeResult struct {
@@ -863,13 +1279,14 @@ func runtimeRPCPoolReport(nodes []cluster.Node) (RuntimeRPCPoolSummary, []Runtim
 					}
 				}
 				workers = append(workers, RuntimeRPCPoolWorker{
-					NodeID:       node.ID,
-					NodeName:     nodeDisplayName(node),
-					Status:       node.Status,
-					Runtime:      runtimeStatus.Name,
-					RuntimeReady: runtimeStatus.Ready,
-					RPC:          rpc,
-					Capabilities: append([]string(nil), runtimeStatus.Capabilities...),
+					NodeID:         node.ID,
+					NodeName:       nodeDisplayName(node),
+					Status:         node.Status,
+					Runtime:        runtimeStatus.Name,
+					RuntimeVersion: runtimeStatus.Version,
+					RuntimeReady:   runtimeStatus.Ready,
+					RPC:            rpc,
+					Capabilities:   append([]string(nil), runtimeStatus.Capabilities...),
 				})
 			}
 		}
@@ -988,6 +1405,17 @@ func cleanEndpointList(endpoints []string) []string {
 		}
 		seen[endpoint] = true
 		out = append(out, endpoint)
+	}
+	return out
+}
+
+func cleanStringList(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
 	}
 	return out
 }
@@ -1241,11 +1669,19 @@ func (s *Server) handleModelDistributedGenerate(w http.ResponseWriter, r *http.R
 		return
 	}
 	var req struct {
-		Prompt         string `json:"prompt"`
-		ConversationID string `json:"conversation_id"`
-		SystemPrompt   string `json:"system_prompt"`
-		MaxTokens      int    `json:"max_tokens"`
-		Temperature    string `json:"temperature"`
+		Prompt          string   `json:"prompt"`
+		ConversationID  string   `json:"conversation_id"`
+		SystemPrompt    string   `json:"system_prompt"`
+		MaxTokens       int      `json:"max_tokens"`
+		Temperature     string   `json:"temperature"`
+		StageRunnerBin  string   `json:"stage_runner_bin"`
+		StageDaemonURL  string   `json:"stage_daemon_url"`
+		ModelPath       string   `json:"model_path"`
+		StageModelPaths []string `json:"stage_model_paths"`
+		StageNodeIDs    []string `json:"stage_node_ids"`
+		WorkDir         string   `json:"work_dir"`
+		TimeoutMS       int      `json:"timeout_ms"`
+		TotalLayers     int      `json:"total_layers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -1255,7 +1691,15 @@ func (s *Server) handleModelDistributedGenerate(w http.ResponseWriter, r *http.R
 		http.Error(w, "prompt is required", http.StatusBadRequest)
 		return
 	}
-	plan := distributedModelPlan(model, s.state.Nodes())
+	plan := distributedModelPlanWithTotalLayers(model, s.state.Nodes(), req.TotalLayers)
+	if len(cleanStringList(req.StageNodeIDs)) > 0 {
+		pinned, err := pinDistributedPlanStageNodes(plan, cleanStringList(req.StageNodeIDs))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		plan = pinned
+	}
 	if !plan.Feasible {
 		reason := "distributed model execution is not ready"
 		if len(plan.Blockers) > 0 {
@@ -1295,15 +1739,23 @@ func (s *Server) handleModelDistributedGenerate(w http.ResponseWriter, r *http.R
 	effectiveSystemPrompt := systemPromptWithMemory(systemPrompt, model.ID, s.state)
 	budgetedMessages := budgetConversationMessages(model, effectiveSystemPrompt, conversation.Messages, maxTokens)
 	input, err := json.Marshal(models.DistributedGenerateInput{
-		ModelID:        model.ID,
-		Prompt:         req.Prompt,
-		Messages:       budgetedMessages,
-		SystemPrompt:   effectiveSystemPrompt,
-		ConversationID: conversation.ID,
-		MaxTokens:      maxTokens,
-		Temperature:    temperature,
-		Mode:           plan.Mode,
-		Stages:         distributedStageInputs(plan.Stages),
+		ModelID:         model.ID,
+		Prompt:          req.Prompt,
+		Messages:        budgetedMessages,
+		SystemPrompt:    effectiveSystemPrompt,
+		ConversationID:  conversation.ID,
+		MaxTokens:       maxTokens,
+		Temperature:     temperature,
+		Mode:            plan.Mode,
+		TotalLayers:     plan.TotalLayers,
+		Stages:          distributedStageInputs(plan.Stages),
+		StageRunnerBin:  strings.TrimSpace(req.StageRunnerBin),
+		StageDaemonURL:  strings.TrimSpace(req.StageDaemonURL),
+		ModelPath:       strings.TrimSpace(req.ModelPath),
+		StageModelPaths: cleanStringList(req.StageModelPaths),
+		StageNodeIDs:    cleanStringList(req.StageNodeIDs),
+		WorkDir:         strings.TrimSpace(req.WorkDir),
+		TimeoutMS:       req.TimeoutMS,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1327,16 +1779,24 @@ func (s *Server) handleModelDistributedGenerate(w http.ResponseWriter, r *http.R
 		return
 	}
 	stageRequests, err := distributedStageJobRequests(parent, models.DistributedGenerateInput{
-		ModelID:        model.ID,
-		Prompt:         req.Prompt,
-		Messages:       budgetedMessages,
-		SystemPrompt:   effectiveSystemPrompt,
-		ConversationID: conversation.ID,
-		MaxTokens:      maxTokens,
-		Temperature:    temperature,
-		Mode:           plan.Mode,
-		Stages:         distributedStageInputs(plan.Stages),
-		Shards:         cdipShardManifest(model, plan).Shards,
+		ModelID:         model.ID,
+		Prompt:          req.Prompt,
+		Messages:        budgetedMessages,
+		SystemPrompt:    effectiveSystemPrompt,
+		ConversationID:  conversation.ID,
+		MaxTokens:       maxTokens,
+		Temperature:     temperature,
+		Mode:            plan.Mode,
+		TotalLayers:     plan.TotalLayers,
+		Stages:          distributedStageInputs(plan.Stages),
+		Shards:          cdipShardManifest(model, plan).Shards,
+		StageRunnerBin:  strings.TrimSpace(req.StageRunnerBin),
+		StageDaemonURL:  strings.TrimSpace(req.StageDaemonURL),
+		ModelPath:       strings.TrimSpace(req.ModelPath),
+		StageModelPaths: cleanStringList(req.StageModelPaths),
+		StageNodeIDs:    cleanStringList(req.StageNodeIDs),
+		WorkDir:         strings.TrimSpace(req.WorkDir),
+		TimeoutMS:       req.TimeoutMS,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1645,13 +2105,14 @@ type ModelDistributedRPCReadiness struct {
 }
 
 type ModelDistributedRPCBackend struct {
-	NodeID       string `json:"node_id"`
-	NodeName     string `json:"node_name"`
-	Runtime      string `json:"runtime"`
-	Endpoint     string `json:"endpoint"`
-	HealthStatus string `json:"health_status,omitempty"`
-	LatencyMS    int64  `json:"latency_ms,omitempty"`
-	Error        string `json:"error,omitempty"`
+	NodeID         string `json:"node_id"`
+	NodeName       string `json:"node_name"`
+	Runtime        string `json:"runtime"`
+	RuntimeVersion string `json:"runtime_version,omitempty"`
+	Endpoint       string `json:"endpoint"`
+	HealthStatus   string `json:"health_status,omitempty"`
+	LatencyMS      int64  `json:"latency_ms,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type ModelDistributedRPCPlan struct {
@@ -1745,11 +2206,12 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 			continue
 		}
 		backend := ModelDistributedRPCBackend{
-			NodeID:       worker.NodeID,
-			NodeName:     worker.NodeName,
-			Runtime:      worker.Runtime,
-			Endpoint:     endpoint,
-			HealthStatus: "unchecked",
+			NodeID:         worker.NodeID,
+			NodeName:       worker.NodeName,
+			Runtime:        worker.Runtime,
+			RuntimeVersion: worker.RuntimeVersion,
+			Endpoint:       endpoint,
+			HealthStatus:   "unchecked",
 		}
 		if !plan.HealthChecked {
 			if record, ok := recordByEndpoint[endpoint]; ok && rpcEndpointQuarantined(record) {
@@ -1808,14 +2270,43 @@ func (s *Server) modelDistributedRPCPlan(ctx context.Context, model models.Model
 			plan.Blockers = append(plan.Blockers, "selected worker cannot generate this model")
 		}
 	}
+	if coordinatorVersion := modelRuntimeVersionOnNode(nodes, plan.CoordinatorNodeID, string(model.Runtime)); coordinatorVersion != "" {
+		for _, backend := range plan.Backends {
+			if backend.Runtime == string(model.Runtime) && backend.RuntimeVersion != "" && backend.RuntimeVersion != coordinatorVersion {
+				plan.Blockers = append(plan.Blockers, fmt.Sprintf("runtime version mismatch: coordinator has %s but backend %s has %s", coordinatorVersion, backend.NodeName, backend.RuntimeVersion))
+			}
+		}
+	}
 	scheduledEndpoints, schedulingWarnings := scheduleDistributedRPCEndpoints(plan.RPCEndpoints, workers, activeJobsByWorker(s.state.Jobs()), plan.CoordinatorNodeID, distributedRPCMaxScheduledEndpoints)
 	plan.RPCEndpoints = scheduledEndpoints
 	plan.Warnings = append(plan.Warnings, schedulingWarnings...)
 	if len(plan.RPCEndpoints) == 0 {
 		plan.Blockers = append(plan.Blockers, "no schedulable llama.cpp rpc endpoints are available")
+	} else if len(plan.RPCEndpoints) < distributedRPCMinScheduledEndpoints {
+		plan.Blockers = append(plan.Blockers, fmt.Sprintf("distributed rpc requires at least %d schedulable backend endpoints outside the coordinator; only %d available", distributedRPCMinScheduledEndpoints, len(plan.RPCEndpoints)))
 	}
 	plan.ExecutableNow = len(plan.Blockers) == 0
 	return plan
+}
+
+func modelRuntimeVersionOnNode(nodes []cluster.Node, nodeID string, runtimeName string) string {
+	nodeID = strings.TrimSpace(nodeID)
+	runtimeName = strings.TrimSpace(runtimeName)
+	if nodeID == "" || runtimeName == "" {
+		return ""
+	}
+	for _, node := range nodes {
+		if node.ID != nodeID {
+			continue
+		}
+		for _, runtimeStatus := range node.Resources.Runtimes {
+			if runtimeStatus.Name == runtimeName && runtimeStatus.Ready {
+				return strings.TrimSpace(runtimeStatus.Version)
+			}
+		}
+		return ""
+	}
+	return ""
 }
 
 func scheduleDistributedRPCEndpoints(endpoints []string, workers []RuntimeRPCPoolWorker, activeJobs map[string]int, coordinatorNodeID string, maxEndpoints int) ([]string, []string) {
@@ -1856,13 +2347,14 @@ func distributedRPCExecutionPlanForJob(plan ModelDistributedRPCPlan) protocol.Di
 			continue
 		}
 		backends = append(backends, protocol.DistributedRPCBackend{
-			NodeID:       backend.NodeID,
-			NodeName:     backend.NodeName,
-			Runtime:      backend.Runtime,
-			Endpoint:     backend.Endpoint,
-			HealthStatus: backend.HealthStatus,
-			LatencyMS:    backend.LatencyMS,
-			Error:        backend.Error,
+			NodeID:         backend.NodeID,
+			NodeName:       backend.NodeName,
+			Runtime:        backend.Runtime,
+			RuntimeVersion: backend.RuntimeVersion,
+			Endpoint:       backend.Endpoint,
+			HealthStatus:   backend.HealthStatus,
+			LatencyMS:      backend.LatencyMS,
+			Error:          backend.Error,
 		})
 	}
 	return protocol.DistributedRPCExecutionPlan{
@@ -2270,6 +2762,11 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request, jobID s
 		http.NotFound(w, r)
 		return
 	}
+	if job.Type == models.JobGenerateDistributed {
+		s.cleanupResidentStageSessionsForRecoveredJobs(r.Context(), cdipStageJobsForParent(s.state.Jobs(), job.ID))
+	} else if job.Type == models.JobGenerateStage {
+		s.cleanupResidentStageSessionsForRecoveredJobs(r.Context(), []jobs.Job{job})
+	}
 	writeJSON(w, http.StatusOK, job)
 }
 
@@ -2286,6 +2783,9 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request, jobID
 	}
 	if req.NodeID == "" {
 		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	if !s.requireWorkerAuth(w, r, req.NodeID) {
 		return
 	}
 
@@ -2309,6 +2809,23 @@ type cdipStageWorkerResult struct {
 	Kind string `json:"kind"`
 }
 
+type cdipStageTerminalWorkerResult struct {
+	Kind              string         `json:"kind"`
+	RunnerMode        string         `json:"runner_mode,omitempty"`
+	ParentJobID       string         `json:"parent_job_id"`
+	UpstreamStageID   string         `json:"upstream_stage_job_id"`
+	StageJobID        string         `json:"stage_job_id"`
+	StageIndex        int            `json:"stage_index"`
+	Step              uint64         `json:"step,omitempty"`
+	KVCacheKey        string         `json:"kv_cache_key,omitempty"`
+	NextTokenID       int            `json:"next_token_id"`
+	NextTokenText     string         `json:"next_token_text"`
+	Tokens            []int          `json:"tokens,omitempty"`
+	Output            string         `json:"output,omitempty"`
+	Final             *bool          `json:"final,omitempty"`
+	StageDaemonDecode map[string]any `json:"stage_daemon_decode,omitempty"`
+}
+
 func (s *Server) handleCDIPStageComplete(req jobs.CompleteRequest, jobID string) (jobs.Job, bool, bool) {
 	job, ok := s.state.Job(jobID)
 	if !ok || job.Type != models.JobGenerateStage || job.AssignedTo != req.NodeID {
@@ -2319,11 +2836,266 @@ func (s *Server) handleCDIPStageComplete(req jobs.CompleteRequest, jobID string)
 		return updated, true, ok
 	}
 	var result cdipStageWorkerResult
-	if err := json.Unmarshal([]byte(req.Result), &result); err != nil || result.Kind != "cdip.stage_ready" {
+	if err := json.Unmarshal([]byte(req.Result), &result); err != nil {
 		return jobs.Job{}, false, false
 	}
-	updated, ok := s.state.UpdateCDIPStageState(jobID, cdip.StageReady, "worker reported cdip.stage_ready")
+	next := cdip.StageState("")
+	switch result.Kind {
+	case "cdip.stage_ready":
+		next = cdip.StageReady
+	case "cdip.stage_decode", "cdip.stage_source_decode", "cdip.stage_relay_decode", "cdip.stage_terminal_decode":
+		next = cdip.StageDecode
+	case "cdip.stage_complete":
+		next = cdip.StageCompleted
+	default:
+		return jobs.Job{}, false, false
+	}
+	updated, ok := s.state.UpdateCDIPStageStateWithWorkerResult(jobID, next, "worker reported "+result.Kind, req.Result)
+	if !ok {
+		return updated, true, false
+	}
+	if result.Kind == "cdip.stage_terminal_decode" && strings.TrimSpace(job.CDIPParentJobID) != "" {
+		parentResult, err := cdipTerminalParentResult(req.Result, job)
+		if err != nil {
+			failed, failedOK := s.state.CompleteCoordinatorJob(job.CDIPParentJobID, "", err.Error())
+			if failedOK {
+				return failed, true, true
+			}
+			return updated, true, false
+		}
+		if !cdipTerminalResultIsFinal(req.Result) {
+			_, _ = s.dispatchNextCDIPDecodeLoopStepIfReady(job.CDIPParentJobID)
+			return updated, true, true
+		}
+		completed, completedOK := s.state.CompleteCoordinatorJob(job.CDIPParentJobID, parentResult, "")
+		if completedOK {
+			return completed, true, true
+		}
+		return updated, true, false
+	}
+	if isCDIPDecodeWorkerResultKind(result.Kind) && strings.TrimSpace(job.CDIPParentJobID) != "" {
+		_, _ = s.dispatchNextCDIPDecodeLoopStepIfReady(job.CDIPParentJobID)
+	}
 	return updated, true, ok
+}
+
+func isCDIPDecodeWorkerResultKind(kind string) bool {
+	switch strings.TrimSpace(kind) {
+	case "cdip.stage_decode", "cdip.stage_source_decode", "cdip.stage_relay_decode", "cdip.stage_terminal_decode":
+		return true
+	default:
+		return false
+	}
+}
+
+func cdipTerminalResultIsFinal(raw string) bool {
+	var terminal cdipStageTerminalWorkerResult
+	if err := json.Unmarshal([]byte(raw), &terminal); err != nil {
+		return true
+	}
+	return cdipTerminalResultIsFinalFromParsed(terminal)
+}
+
+func cdipTerminalResultIsFinalFromParsed(terminal cdipStageTerminalWorkerResult) bool {
+	if terminal.Final == nil {
+		return true
+	}
+	return *terminal.Final
+}
+
+func (s *Server) dispatchNextCDIPDecodeLoopStep(raw string, stage jobs.Job) (CDIPCommandResult, bool) {
+	var terminal cdipStageTerminalWorkerResult
+	if err := json.Unmarshal([]byte(raw), &terminal); err != nil {
+		return CDIPCommandResult{}, false
+	}
+	parentID := strings.TrimSpace(terminal.ParentJobID)
+	if parentID == "" {
+		parentID = strings.TrimSpace(stage.CDIPParentJobID)
+	}
+	if parentID == "" {
+		return CDIPCommandResult{}, false
+	}
+	parent, ok := s.state.Job(parentID)
+	if !ok {
+		return CDIPCommandResult{}, false
+	}
+	maxTokens := cdipParentMaxTokens(parent)
+	nextStep := terminal.Step + 1
+	if nextStep <= 1 {
+		nextStep = uint64(len(terminal.Tokens) + 1)
+	}
+	if nextStep == 0 {
+		nextStep = 1
+	}
+	if maxTokens > 0 && nextStep > uint64(maxTokens) {
+		return CDIPCommandResult{}, false
+	}
+	tokenID := terminal.NextTokenID
+	result, err := dispatchCDIPDecodeLoopStepWithTokenFeedback(s.state, parentID, nextStep, maxTokens, &tokenID, terminal.NextTokenText)
+	return result, err == nil
+}
+
+func (s *Server) dispatchNextCDIPDecodeLoopStepIfReady(parentID string) (CDIPCommandResult, bool) {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return CDIPCommandResult{}, false
+	}
+	parent, ok := s.state.Job(parentID)
+	if !ok || parent.Type != models.JobGenerateDistributed {
+		return CDIPCommandResult{}, false
+	}
+	stages := cdipStageJobsForParent(s.state.Jobs(), parentID)
+	if len(stages) < 2 {
+		return CDIPCommandResult{}, false
+	}
+	terminal, ok := cdipTerminalWorkerResultFromStageJob(stages[len(stages)-1])
+	if !ok || cdipTerminalResultIsFinalFromParsed(terminal) || terminal.Step == 0 {
+		return CDIPCommandResult{}, false
+	}
+	for _, stage := range stages {
+		if stage.Status != jobs.StatusSucceeded || stage.CDIPState != cdip.StageDecode {
+			return CDIPCommandResult{}, false
+		}
+		step, ok := cdipWorkerResultStepFromStageJob(stage)
+		if !ok || step != terminal.Step {
+			return CDIPCommandResult{}, false
+		}
+		var input models.DistributedStageJobInput
+		if err := json.Unmarshal([]byte(stage.Input), &input); err == nil && input.Step > terminal.Step {
+			return CDIPCommandResult{}, false
+		}
+	}
+	maxTokens := cdipParentMaxTokens(parent)
+	nextStep := terminal.Step + 1
+	if maxTokens > 0 && nextStep > uint64(maxTokens) {
+		return CDIPCommandResult{}, false
+	}
+	tokenID := terminal.NextTokenID
+	result, err := dispatchCDIPDecodeLoopStepWithTokenFeedback(s.state, parentID, nextStep, maxTokens, &tokenID, terminal.NextTokenText)
+	return result, err == nil
+}
+
+func cdipWorkerResultStepFromStageJob(stage jobs.Job) (uint64, bool) {
+	var wrapper struct {
+		WorkerResult json.RawMessage `json:"worker_result"`
+	}
+	if err := json.Unmarshal([]byte(stage.Result), &wrapper); err != nil || len(wrapper.WorkerResult) == 0 {
+		return 0, false
+	}
+	var result struct {
+		Step uint64 `json:"step"`
+	}
+	if err := json.Unmarshal(wrapper.WorkerResult, &result); err != nil || result.Step == 0 {
+		return 0, false
+	}
+	return result.Step, true
+}
+
+func cdipTerminalWorkerResultFromStageJob(stage jobs.Job) (cdipStageTerminalWorkerResult, bool) {
+	var wrapper struct {
+		WorkerResult json.RawMessage `json:"worker_result"`
+	}
+	if err := json.Unmarshal([]byte(stage.Result), &wrapper); err != nil || len(wrapper.WorkerResult) == 0 {
+		return cdipStageTerminalWorkerResult{}, false
+	}
+	var terminal cdipStageTerminalWorkerResult
+	if err := json.Unmarshal(wrapper.WorkerResult, &terminal); err != nil {
+		return cdipStageTerminalWorkerResult{}, false
+	}
+	if strings.TrimSpace(terminal.Kind) != "cdip.stage_terminal_decode" {
+		return cdipStageTerminalWorkerResult{}, false
+	}
+	return terminal, true
+}
+
+func cdipParentMaxTokens(parent jobs.Job) int {
+	var input models.DistributedGenerateInput
+	if err := json.Unmarshal([]byte(parent.Input), &input); err != nil {
+		return 0
+	}
+	return input.MaxTokens
+}
+
+func cdipTerminalParentResult(raw string, stage jobs.Job) (string, error) {
+	var terminal cdipStageTerminalWorkerResult
+	if err := json.Unmarshal([]byte(raw), &terminal); err != nil {
+		return "", fmt.Errorf("invalid terminal stage result: %w", err)
+	}
+	if strings.TrimSpace(terminal.Kind) != "cdip.stage_terminal_decode" {
+		return "", fmt.Errorf("unexpected terminal stage result kind %q", terminal.Kind)
+	}
+	parentID := strings.TrimSpace(terminal.ParentJobID)
+	if parentID == "" {
+		parentID = strings.TrimSpace(stage.CDIPParentJobID)
+	}
+	stageJobID := strings.TrimSpace(terminal.StageJobID)
+	if stageJobID == "" {
+		stageJobID = strings.TrimSpace(stage.ID)
+	}
+	tokens := append([]int(nil), terminal.Tokens...)
+	if len(tokens) == 0 {
+		tokens = []int{terminal.NextTokenID}
+	}
+	output := terminal.Output
+	if output == "" {
+		output = terminal.NextTokenText
+	}
+	guardrail := "terminal decode proof; file-backed per-stage KV continuity is supported, long-lived daemon KV ownership is still pending"
+	executionMode := "file-backed-stage-runner"
+	residentKV := false
+	if strings.TrimSpace(terminal.RunnerMode) == "llama.cpp-stage-daemon" {
+		executionMode = "resident-stage-daemon"
+		residentKV = mapBool(terminal.StageDaemonDecode, "persistent_kv_in_memory")
+		if residentKV && mapBool(terminal.StageDaemonDecode, "ready") {
+			guardrail = "terminal decode proof; resident stage daemon kept persistent model and KV session in memory"
+		} else {
+			guardrail = "terminal decode proof; resident stage daemon was used but persistent KV readiness was not reported"
+		}
+	}
+	body, err := json.Marshal(map[string]any{
+		"kind":                  "cdip.distributed_terminal_result",
+		"protocol":              cdip.Protocol,
+		"version":               cdip.Version,
+		"parent_job":            parentID,
+		"terminal_stage_job_id": stageJobID,
+		"terminal_stage_index":  terminal.StageIndex,
+		"upstream_stage_job_id": strings.TrimSpace(terminal.UpstreamStageID),
+		"step":                  terminal.Step,
+		"kv_cache_key":          strings.TrimSpace(terminal.KVCacheKey),
+		"next_token_id":         terminal.NextTokenID,
+		"next_token_text":       terminal.NextTokenText,
+		"tokens":                tokens,
+		"token_count":           len(tokens),
+		"output":                output,
+		"final":                 cdipTerminalResultIsFinal(raw),
+		"runner_mode":           strings.TrimSpace(terminal.RunnerMode),
+		"execution_mode":        executionMode,
+		"resident_kv_in_memory": residentKV,
+		"guardrail":             guardrail,
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func mapBool(in map[string]any, key string) bool {
+	if len(in) == 0 {
+		return false
+	}
+	value, ok := in[key]
+	if !ok {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+		return err == nil && parsed
+	default:
+		return false
+	}
 }
 
 func (s *Server) handleJobProgress(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -2430,11 +3202,50 @@ func (s *Server) handleCDIPJob(w http.ResponseWriter, r *http.Request) {
 	case "decode":
 		var req struct {
 			Step uint64 `json:"step"`
+			Mode string `json:"mode"`
 		}
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&req)
 		}
-		result, err := startCDIPDecode(s.state, s.cdipActivationTransport, parts[0], req.Step)
+		var result CDIPCommandResult
+		var err error
+		switch strings.TrimSpace(strings.ToLower(req.Mode)) {
+		case "relay_decode", "relay-decode":
+			result, err = startCDIPRelayDecode(s.state, parts[0], req.Step)
+		default:
+			result, err = startCDIPDecode(s.state, s.cdipActivationTransport, parts[0], req.Step)
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result)
+	case "decode-loop":
+		var req struct {
+			MaxTokens          int    `json:"max_tokens"`
+			Step               uint64 `json:"step"`
+			Mode               string `json:"mode"`
+			TerminalForceFinal *bool  `json:"terminal_force_final"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&req)
+		}
+		if strings.EqualFold(strings.TrimSpace(req.Mode), "dispatch") || strings.EqualFold(strings.TrimSpace(req.Mode), "worker-dispatch") {
+			var result CDIPCommandResult
+			var err error
+			if req.TerminalForceFinal != nil {
+				result, err = dispatchCDIPDecodeLoopStep(s.state, parts[0], req.Step, req.MaxTokens, *req.TerminalForceFinal)
+			} else {
+				result, err = dispatchCDIPDecodeLoopStep(s.state, parts[0], req.Step, req.MaxTokens)
+			}
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			writeJSON(w, http.StatusAccepted, result)
+			return
+		}
+		result, err := runCDIPDecodeLoop(s.state, parts[0], req.MaxTokens)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
@@ -2686,6 +3497,9 @@ func (s *Server) handleWorkerNextJob(w http.ResponseWriter, r *http.Request, nod
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.requireWorkerAuth(w, r, nodeID) {
+		return
+	}
 
 	job, ok := s.state.NextJobForWorker(nodeID)
 	if !ok {
@@ -2737,6 +3551,9 @@ func (s *Server) handleWorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node_id is required", http.StatusBadRequest)
 		return
 	}
+	if !s.requireWorkerAuth(w, r, hb.NodeID) {
+		return
+	}
 
 	if !s.state.Heartbeat(hb) {
 		http.Error(w, "unknown node", http.StatusNotFound)
@@ -2760,6 +3577,9 @@ func (s *Server) handleWorkerLeave(w http.ResponseWriter, r *http.Request) {
 
 	if req.NodeID == "" {
 		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	if !s.requireWorkerAuth(w, r, req.NodeID) {
 		return
 	}
 
@@ -3744,12 +4564,13 @@ func distributedStageInputs(stages []DistributedPlanStage) []models.DistributedS
 	out := make([]models.DistributedStageInput, 0, len(stages))
 	for _, stage := range stages {
 		out = append(out, models.DistributedStageInput{
-			Index:      stage.Index,
-			NodeID:     stage.NodeID,
-			NodeName:   stage.NodeName,
-			LayerStart: stage.LayerStart,
-			LayerEnd:   stage.LayerEnd,
-			Layers:     stage.Layers,
+			Index:          stage.Index,
+			NodeID:         stage.NodeID,
+			NodeName:       stage.NodeName,
+			LayerStart:     stage.LayerStart,
+			LayerEnd:       stage.LayerEnd,
+			Layers:         stage.Layers,
+			StageDaemonURL: stage.StageDaemonURL,
 		})
 	}
 	return out
@@ -5907,7 +6728,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <button class="tab-button active" type="button" data-tab-target="overview"><svg class="icon"><use href="#icon-workers"></use></svg><span>Overview</span></button>
               <button class="tab-button" type="button" data-tab-target="readiness"><svg class="icon"><use href="#icon-chart"></use></svg><span>Readiness</span><strong class="nav-badge {{.Readiness.Status}}" data-nav-badge="readiness">{{.Readiness.Status}}</strong></button>
               <button class="tab-button" type="button" data-tab-target="workers"><svg class="icon"><use href="#icon-workers"></use></svg><span>Workers</span><strong class="nav-badge" data-nav-badge="workers">{{.Summary.WorkersOnline}}/{{.Summary.WorkersTotal}}</strong></button>
-              <button class="tab-button" type="button" data-tab-target="rpc-pool"><svg class="icon"><use href="#icon-chart"></use></svg><span>RPC Pool</span><strong class="nav-badge {{if gt .RPCPool.Endpoints 0}}ready{{else}}blocked{{end}}">{{.RPCPool.Endpoints}}</strong></button>
+              <button class="tab-button" type="button" data-tab-target="rpc-pool"><svg class="icon"><use href="#icon-chart"></use></svg><span>RPC Pool</span><strong class="nav-badge {{if ge .RPCPool.Endpoints 2}}ready{{else}}blocked{{end}}">{{.RPCPool.Endpoints}}</strong></button>
               <button class="tab-button" type="button" data-tab-target="distributed-runs"><svg class="icon"><use href="#icon-terminal"></use></svg><span>Distributed Runs</span><strong class="nav-badge">{{len .DistributedRuns}}</strong></button>
               <button class="tab-button" type="button" data-tab-target="benchmarks"><svg class="icon"><use href="#icon-chart"></use></svg><span>Benchmarks</span></button>
             </div>
@@ -6226,7 +7047,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       </div>
       <div class="runner-status" id="rpc-smoke-result">Smoke test checks TCP reachability for active RPC endpoints before distributed inference.</div>
       {{else}}
-      <div class="empty">No RPC backend is active yet. Open Worker Desktop on a runtime-ready machine and start RPC backend from the AI runtime tab.</div>
+      <div class="empty">No RPC backend is active yet. Start at least two RPC backend workers outside the coordinator before running distributed inference.</div>
       {{end}}
       <form class="cluster-runner" id="rpc-prompt-smoke-form">
         <div class="field span-2">
@@ -6249,7 +7070,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         </div>
         <div class="field">
           <label>&nbsp;</label>
-          <button class="button primary" type="submit" {{if or (eq .RPCPool.Endpoints 0) (eq (generatableCount .Models) 0)}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Run distributed prompt</button>
+          <button class="button primary" type="submit" {{if or (lt .RPCPool.Endpoints 2) (eq (generatableCount .Models) 0)}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Run distributed prompt</button>
         </div>
         <div class="field span-6">
           <label for="rpc-smoke-prompt">Prompt</label>
@@ -6257,7 +7078,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         </div>
       </form>
       <div class="runner-status" id="rpc-execution-plan">Select a model and coordinator to inspect the distributed RPC execution plan.</div>
-      <div class="runner-status" id="rpc-prompt-smoke-status">{{if eq .RPCPool.Endpoints 0}}Start at least one RPC backend before running a distributed prompt.{{else if eq (generatableCount .Models) 0}}Install a model before running a distributed prompt.{{else}}Ready to run a distributed prompt smoke test.{{end}}</div>
+      <div class="runner-status" id="rpc-prompt-smoke-status">{{if lt .RPCPool.Endpoints 2}}Start at least two RPC backend workers outside the coordinator before running a distributed prompt.{{else if eq (generatableCount .Models) 0}}Install a model before running a distributed prompt.{{else}}Ready to run a distributed prompt smoke test.{{end}}</div>
       {{if .RPCWorkers}}
       <div class="table-wrap">
         <table>
@@ -6376,7 +7197,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         </table>
       </div>
       {{else}}
-      <div class="empty">No distributed RPC runs yet. Start an RPC backend, install a model, then run a distributed prompt from RPC Pool.</div>
+      <div class="empty">No distributed RPC runs yet. Start two RPC backends, install a model on a coordinator worker, then run a distributed prompt from RPC Pool.</div>
       {{end}}
     </section>
     </div>
@@ -6485,7 +7306,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 </select>
               </div>
               <label class="inline-toggle" title="Use active llama.cpp RPC endpoints from this cluster for distributed inference.">
-                <input id="chat-use-rpc" name="use_rpc" type="checkbox" {{if eq .RPCPool.Endpoints 0}}disabled{{end}}>
+                <input id="chat-use-rpc" name="use_rpc" type="checkbox" {{if lt .RPCPool.Endpoints 2}}disabled{{end}}>
                 <span>RPC pool</span>
                 <code>{{.RPCPool.Endpoints}} endpoint{{if ne .RPCPool.Endpoints 1}}s{{end}}</code>
               </label>
@@ -9553,6 +10374,29 @@ var inviteTemplate = template.Must(template.New("invite").Parse(`<!doctype html>
   CMESH_CPU=4 \
   CMESH_MEMORY_GB=8 \
   CMESH_DISK_GB=50 \
+  sh</code></pre>
+    </section>
+
+    <section class="full-span">
+      <div class="section-head">
+        <h2>Linux distributed RPC backend</h2>
+        <button type="button" data-copy="linux-rpc-service">Copy</button>
+      </div>
+      <p class="hint">Use this on VDS or EC2 workers that should add memory/compute to distributed llama.cpp RPC runs. Keep RPC reachable only inside a private VPC or VPN.</p>
+      <pre><code id="linux-rpc-service">curl -fsSL https://raw.githubusercontent.com/NythralHome/cmesh/main/scripts/install-worker.sh | \
+  sudo env CMESH_MANAGER_URL="{{.ManagerURL}}" \
+  CMESH_JOIN_TOKEN="{{.JoinToken}}" \
+  CMESH_INSTALL_SERVICE=true \
+  CMESH_CPU=4 \
+  CMESH_MEMORY_GB=8 \
+  CMESH_DISK_GB=50 \
+  CMESH_RPC=true \
+  CMESH_RPC_HOST="0.0.0.0" \
+  CMESH_RPC_PORT=50052 \
+  CMESH_LLAMA_CPP_RUNTIME_URL="{{.RuntimeURL}}" \
+  CMESH_LLAMA_CPP_RUNTIME_NAME="{{.RuntimeName}}" \
+  CMESH_LLAMA_CPP_RUNTIME_VERSION="{{.RuntimeVersion}}" \
+  CMESH_LLAMA_CPP_PREFER_CACHE=true \
   sh</code></pre>
     </section>
 

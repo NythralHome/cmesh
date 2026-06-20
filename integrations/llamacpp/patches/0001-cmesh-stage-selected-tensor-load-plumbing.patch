@@ -1,0 +1,255 @@
+diff --git a/include/llama.h b/include/llama.h
+index 27e480674..22452863e 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -315,6 +315,12 @@ extern "C" {
+         // override key-value pairs of the model meta data
+         const struct llama_model_kv_override * kv_overrides;
+
++        // [EXPERIMENTAL] CMesh stage loading: if non-NULL, only tensors named in this list are materialized.
++        const char * const * cmesh_stage_tensor_allowlist;
++        size_t cmesh_stage_tensor_allowlist_count;
++        int32_t cmesh_stage_layer_start; // [EXPERIMENTAL] inclusive layer start for staged graph execution, -1 disables
++        int32_t cmesh_stage_layer_end;   // [EXPERIMENTAL] inclusive layer end for staged graph execution, -1 disables
++
+         // Keep the booleans together to avoid misalignment during copy-by-value.
+         bool vocab_only;      // only load the vocabulary, no weights
+         bool use_mmap;        // use mmap if possible
+@@ -324,6 +330,7 @@ extern "C" {
+         bool use_extra_bufts; // use extra buffer types (used for weight repacking)
+         bool no_host;         // bypass host buffer allowing extra buffers to be used
+         bool no_alloc;        // only load metadata and simulate memory allocations
++        bool cmesh_stage_partial_load; // [EXPERIMENTAL] allow selected tensor load accounting
+     };
+
+     struct llama_sampler_seq_config {
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index 474cabdfc..09066d4b6 100644
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -1047,6 +1047,11 @@ static ggml_backend_buffer_type_t select_weight_buft(const llama_hparams & hpara
+ struct ggml_tensor * llama_model_loader::create_tensor(
+         const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
+         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
++    if (!cmesh_stage_tensor_selected(tn.str().c_str())) {
++        LLAMA_LOG_DEBUG("%s: cmesh stage load skipping tensor %s\n", __func__, tn.str().c_str());
++        return nullptr;
++    }
++
+     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
+         auto it = ctx_map.find(buft);
+         if (it == ctx_map.end()) {
+@@ -1286,6 +1291,13 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+     return tensor;
+ }
+
++bool llama_model_loader::cmesh_stage_tensor_selected(const char * name) const {
++    if (cmesh_stage_tensor_allowlist.empty()) {
++        return true;
++    }
++    return cmesh_stage_tensor_allowlist.find(name) != cmesh_stage_tensor_allowlist.end();
++}
++
+ struct ggml_tensor * llama_model_loader::create_tensor_as_view(struct ggml_context * ctx, struct ggml_tensor * base, const std::string & name, const std::initializer_list<int64_t> & ne, size_t offset, bool required) {
+     const struct ggml_tensor * cur = check_tensor_dims(name, ne, required);
+
+diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
+index c476026d3..c0cdf21bf 100644
+--- a/src/llama-model-loader.h
++++ b/src/llama-model-loader.h
+@@ -14,6 +14,7 @@
+ #include <map>
+ #include <stdexcept>
+ #include <unordered_map>
++#include <unordered_set>
+
+ using llama_buf_map = std::unordered_map<uint32_t, ggml_backend_buffer_t>;
+
+@@ -89,6 +90,8 @@ struct llama_model_loader {
+     std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
+     std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
+     const llama_model_tensor_buft_override * tensor_buft_overrides;
++    std::unordered_set<std::string> cmesh_stage_tensor_allowlist;
++    bool cmesh_stage_partial_load = false;
+
+     gguf_context_ptr metadata_ptr;
+     struct gguf_context * metadata; // either metadata_ptr.get() or externally set
+@@ -177,6 +180,7 @@ struct llama_model_loader {
+     struct ggml_tensor * require_tensor_meta(const std::string & name) const;
+
+     const struct ggml_tensor * check_tensor_dims(const std::string & name, const std::vector<int64_t> & ne, bool required) const;
++    bool cmesh_stage_tensor_selected(const char * name) const;
+
+     struct ggml_tensor * create_tensor(
+         const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index c52875533..a9044c396 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -1467,7 +1467,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+             }
+         }
+     }
+-    ml.done_getting_tensors();
++    ml.done_getting_tensors(ml.cmesh_stage_partial_load);
+
+     // Tied NVFP4 output is valid when no separate LM-head scale tensors are present.
+     // If sidecar scales exist, the output weight must be an actual output tensor.
+@@ -1965,6 +1965,28 @@ bool llama_model::has_tensor_overrides() const {
+     return pimpl->has_tensor_overrides;
+ }
+
++bool llama_model::cmesh_stage_enabled() const {
++    return params.cmesh_stage_layer_start >= 0 &&
++           params.cmesh_stage_layer_end >= params.cmesh_stage_layer_start &&
++           params.cmesh_stage_layer_end < (int32_t) hparams.n_layer_all;
++}
++
++int llama_model::cmesh_stage_layer_start() const {
++    return params.cmesh_stage_layer_start;
++}
++
++int llama_model::cmesh_stage_layer_end() const {
++    return params.cmesh_stage_layer_end;
++}
++
++bool llama_model::cmesh_stage_first() const {
++    return cmesh_stage_enabled() && params.cmesh_stage_layer_start == 0;
++}
++
++bool llama_model::cmesh_stage_terminal() const {
++    return cmesh_stage_enabled() && params.cmesh_stage_layer_end == (int32_t) hparams.n_layer_all - 1;
++}
++
+ const ggml_tensor * llama_model::get_tensor(const char * name) const {
+     auto it = std::find_if(tensors_by_name.begin(), tensors_by_name.end(),
+             [name](const std::pair<std::string, ggml_tensor *> & it) {
+@@ -2267,6 +2289,10 @@ llama_model_params llama_model_default_params() {
+         /*.progress_callback           =*/ nullptr,
+         /*.progress_callback_user_data =*/ nullptr,
+         /*.kv_overrides                =*/ nullptr,
++        /*.cmesh_stage_tensor_allowlist       =*/ nullptr,
++        /*.cmesh_stage_tensor_allowlist_count =*/ 0,
++        /*.cmesh_stage_layer_start     =*/ -1,
++        /*.cmesh_stage_layer_end       =*/ -1,
+         /*.vocab_only                  =*/ false,
+         /*.use_mmap                    =*/ true,
+         /*.use_direct_io               =*/ false,
+@@ -2275,6 +2301,7 @@ llama_model_params llama_model_default_params() {
+         /*.use_extra_bufts             =*/ true,
+         /*.no_host                     =*/ false,
+         /*.no_alloc                    =*/ false,
++        /*.cmesh_stage_partial_load    =*/ false,
+     };
+
+     return result;
+diff --git a/src/llama-model.h b/src/llama-model.h
+index f4718f6d5..22dbcd59c 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -632,6 +632,11 @@ struct llama_model {
+     ggml_backend_buffer_type_t select_buft(int il) const;
+
+     bool has_tensor_overrides() const;
++    bool cmesh_stage_enabled() const;
++    int cmesh_stage_layer_start() const;
++    int cmesh_stage_layer_end() const;
++    bool cmesh_stage_first() const;
++    bool cmesh_stage_terminal() const;
+
+     const struct ggml_tensor * get_tensor(const char * name) const;
+
+diff --git a/src/llama.cpp b/src/llama.cpp
+index 0de6048f2..f10f43c8d 100644
+--- a/src/llama.cpp
++++ b/src/llama.cpp
+@@ -281,6 +281,15 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
+     try {
+         llama_model_loader ml(metadata, set_tensor_data, set_tensor_data_ud, fname, splits, file, params.use_mmap, params.use_direct_io,
+             params.check_tensors, params.no_alloc, params.kv_overrides, params.tensor_buft_overrides);
++        if (params.cmesh_stage_tensor_allowlist != nullptr && params.cmesh_stage_tensor_allowlist_count > 0) {
++            for (size_t i = 0; i < params.cmesh_stage_tensor_allowlist_count; ++i) {
++                const char * name = params.cmesh_stage_tensor_allowlist[i];
++                if (name != nullptr && name[0] != '\0') {
++                    ml.cmesh_stage_tensor_allowlist.emplace(name);
++                }
++            }
++            ml.cmesh_stage_partial_load = params.cmesh_stage_partial_load || !ml.cmesh_stage_tensor_allowlist.empty();
++        }
+
+         ml.print_info();
+         std::unique_ptr<llama_model> model_ptr(llama_model_create(ml, params));
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 5b9051cbf..93e6fbbf1 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -113,7 +113,9 @@ void llm_graph_input_embd_h::set_input(const llama_ubatch * ubatch) {
+         GGML_ASSERT(ubatch->embd);
+         GGML_ASSERT(n_embd == embd->ne[0]);
+
+-        ggml_backend_tensor_set(embd, ubatch->embd, 0, n_tokens*n_embd*ggml_element_size(h));
++        if (embd->buffer != nullptr) {
++            ggml_backend_tensor_set(embd, ubatch->embd, 0, n_tokens*n_embd*ggml_element_size(h));
++        }
+     }
+
+     // TODO: extend llama_ubatch to differentiate between token embeddings and hidden states
+diff --git a/src/models/qwen2.cpp b/src/models/qwen2.cpp
+index e9c2ea80a..1c0b107a0 100644
+--- a/src/models/qwen2.cpp
++++ b/src/models/qwen2.cpp
+@@ -59,6 +59,29 @@ llama_model_qwen2::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+
+-    inpL = build_inp_embd(model.tok_embd);
++    const bool cmesh_stage = model.cmesh_stage_enabled();
++    const int layer_start = cmesh_stage ? model.cmesh_stage_layer_start() : 0;
++    const int layer_end   = cmesh_stage ? model.cmesh_stage_layer_end()   : n_layer - 1;
++
++    if (cmesh_stage && !model.cmesh_stage_first()) {
++        // CMesh stage handoff uses llama.cpp's existing hidden-state graph input path.
++        // The current upstream ubatch has no separate hidden-state pointer, so the
++        // stage runner must provide the upstream activation through ubatch.embd.
++        auto inp = std::make_unique<llm_graph_input_embd_h>(hparams.n_embd);
++
++        inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd, n_tokens);
++        ggml_set_input(inp->embd);
++        ggml_set_name(inp->embd, "cmesh_stage_hidden_embd");
++
++        inp->h = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd, n_tokens);
++        ggml_set_input(inp->h);
++        ggml_set_name(inp->h, "cmesh_stage_hidden_in");
++
++        inpL = inp->h;
++        res->add_input(std::move(inp));
++        cb(inpL, "cmesh_stage_hidden_in", layer_start);
++    } else {
++        inpL = build_inp_embd(model.tok_embd);
++    }
+
+     // inp_pos - contains the positions
+@@ -68,7 +76,7 @@ llama_model_qwen2::graph::graph(const llama_model & model, const llm_graph_param
+
+-    ggml_tensor * inp_out_ids = build_inp_out_ids();
++    ggml_tensor * inp_out_ids = (cmesh_stage && !model.cmesh_stage_terminal()) ? nullptr : build_inp_out_ids();
+
+-    for (int il = 0; il < n_layer; ++il) {
++    for (int il = layer_start; il <= layer_end; ++il) {
+         ggml_tensor * inpSA = inpL;
+
+         // norm
+@@ -134,6 +142,13 @@ llama_model_qwen2::graph::graph(const llama_model & model, const llm_graph_param
+     }
+     cur = inpL;
+
++    if (cmesh_stage && !model.cmesh_stage_terminal()) {
++        cb(cur, "cmesh_stage_hidden_out", layer_end);
++        res->t_embd = cur;
++        ggml_build_forward_expand(gf, cur);
++        return;
++    }
++
+     cur = build_norm(cur,
+             model.output_norm, NULL,
+             LLM_NORM_RMS, -1);

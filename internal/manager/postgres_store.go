@@ -103,6 +103,7 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS requirements JSONB NOT NULL DEFAULT '{
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdip_state TEXT NOT NULL DEFAULT '';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdip_parent_job_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdip_stage_index INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS auth_token TEXT NOT NULL DEFAULT '';
 `)
 	return err
 }
@@ -116,6 +117,7 @@ func (s *PostgresStore) RegisterWorker(req membership.JoinRequest) membership.Jo
 		Role:      cluster.NodeRoleWorker,
 		Status:    cluster.NodeStatusOnline,
 		Endpoint:  req.Endpoint,
+		AuthToken: newWorkerAuthToken(),
 		Resources: req.Resources,
 		JoinedAt:  now,
 		UpdatedAt: now,
@@ -123,13 +125,14 @@ func (s *PostgresStore) RegisterWorker(req membership.JoinRequest) membership.Jo
 
 	payload, _ := json.Marshal(node.Resources)
 	_, _ = s.pool.Exec(context.Background(), `
-INSERT INTO nodes (id, name, role, status, endpoint, resources, joined_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-`, node.ID, node.Name, string(node.Role), string(node.Status), node.Endpoint, payload, node.JoinedAt, node.UpdatedAt)
+INSERT INTO nodes (id, name, role, status, endpoint, auth_token, resources, joined_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+`, node.ID, node.Name, string(node.Role), string(node.Status), node.Endpoint, node.AuthToken, payload, node.JoinedAt, node.UpdatedAt)
 	s.scheduleQueuedJobs(now)
 
 	return membership.JoinResponse{
 		NodeID:         nodeID,
+		NodeAuthToken:  node.AuthToken,
 		ManagerPeers:   []string{"http://127.0.0.1:8080"},
 		HeartbeatEvery: 10 * time.Second,
 	}
@@ -502,6 +505,83 @@ RETURNING id, type, status, requested_by, assigned_to, input, requirements, resu
 	return scanJob(row)
 }
 
+func (s *PostgresStore) RecoverStaleJobs(staleAfter time.Duration) []jobs.Job {
+	if staleAfter <= 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	cutoff := now.Add(-staleAfter)
+	rows, err := s.pool.Query(context.Background(), `
+SELECT id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
+FROM jobs
+WHERE assigned_to <> '' AND status IN ($1, $2) AND updated_at < $3
+ORDER BY updated_at ASC
+`, string(jobs.StatusScheduled), string(jobs.StatusRunning), cutoff)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	recovered := make([]jobs.Job, 0)
+	for rows.Next() {
+		job, ok := scanJob(rows)
+		if !ok {
+			continue
+		}
+		reason := "job timed out waiting for worker progress"
+		failedNodeID := job.AssignedTo
+		job = s.rescheduleOrFailJob(job, failedNodeID, now, reason)
+		if job.Status == jobs.StatusFailed && job.Type == models.JobGenerateStage {
+			job.CDIPState = cdip.StageFailed
+			job.Result = cdipStageResult(cdip.StageFailed, reason, now, "")
+			s.failCDIPParentJob(job, now, reason)
+		}
+		updated, ok := s.updateRecoveredJob(job)
+		if ok {
+			recovered = append(recovered, updated)
+		}
+	}
+	return recovered
+}
+
+func (s *PostgresStore) updateRecoveredJob(job jobs.Job) (jobs.Job, bool) {
+	row := s.pool.QueryRow(context.Background(), `
+UPDATE jobs
+SET status = $2,
+    assigned_to = $3,
+    result = $4,
+    error = $5,
+    attempts = $6,
+    max_attempts = $7,
+    last_failure = $8,
+    updated_at = $9,
+    started_at = $10,
+    finished_at = $11,
+    cdip_state = $12
+WHERE id = $1
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
+`, job.ID, string(job.Status), job.AssignedTo, job.Result, job.Error, job.Attempts, job.MaxAttempts, job.LastFailure, job.UpdatedAt, nullableTime(job.StartedAt), nullableTime(job.FinishedAt), string(job.CDIPState))
+	return scanJob(row)
+}
+
+func (s *PostgresStore) failCDIPParentJob(stage jobs.Job, now time.Time, reason string) {
+	parentID := strings.TrimSpace(stage.CDIPParentJobID)
+	if parentID == "" {
+		return
+	}
+	_, _ = s.pool.Exec(context.Background(), `
+UPDATE jobs
+SET status = $2,
+    result = '',
+    error = $3,
+    last_failure = $3,
+    updated_at = $4,
+    finished_at = $4
+WHERE id = $1 AND type = $5 AND status NOT IN ($6, $7, $8)
+`, parentID, string(jobs.StatusFailed), reason, now, models.JobGenerateDistributed, string(jobs.StatusSucceeded), string(jobs.StatusFailed), string(jobs.StatusCanceled))
+}
+
 func (s *PostgresStore) CompleteJob(jobID string, req jobs.CompleteRequest) (jobs.Job, bool) {
 	now := time.Now().UTC()
 	selectRow := s.pool.QueryRow(context.Background(), `
@@ -563,6 +643,10 @@ RETURNING id, type, status, requested_by, assigned_to, input, requirements, resu
 }
 
 func (s *PostgresStore) UpdateCDIPStageState(jobID string, next cdip.StageState, detail string) (jobs.Job, bool) {
+	return s.UpdateCDIPStageStateWithWorkerResult(jobID, next, detail, "")
+}
+
+func (s *PostgresStore) UpdateCDIPStageStateWithWorkerResult(jobID string, next cdip.StageState, detail string, workerResult string) (jobs.Job, bool) {
 	now := time.Now().UTC()
 	current, ok := s.Job(jobID)
 	if !ok || current.Type != models.JobGenerateStage {
@@ -614,7 +698,45 @@ SET cdip_state = $2,
     finished_at = $9
 WHERE id = $1 AND type = $10
 RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
-`, jobID, string(next), string(status), cdipStageResult(next, detail, now), errorText, lastFailure, attempts, now, nullableTime(finishedAt), models.JobGenerateStage)
+`, jobID, string(next), string(status), cdipStageResult(next, detail, now, workerResult), errorText, lastFailure, attempts, now, nullableTime(finishedAt), models.JobGenerateStage)
+	return scanJob(row)
+}
+
+func (s *PostgresStore) DispatchCDIPStageCommand(jobID string, input string, next cdip.StageState, detail string) (jobs.Job, bool) {
+	now := time.Now().UTC()
+	current, ok := s.Job(jobID)
+	if !ok || current.Type != models.JobGenerateStage {
+		return jobs.Job{}, false
+	}
+	from := current.CDIPState
+	if from == "" {
+		from = cdip.StagePlanned
+	}
+	if !cdip.CanTransition(from, next) {
+		return jobs.Job{}, false
+	}
+	if strings.TrimSpace(input) == "" {
+		input = current.Input
+	}
+	attempts := current.Attempts + 1
+	if attempts <= 0 {
+		attempts = 1
+	}
+	row := s.pool.QueryRow(context.Background(), `
+UPDATE jobs
+SET input = $2,
+    cdip_state = $3,
+    status = $4,
+    result = $5,
+    error = '',
+    last_failure = '',
+    attempts = $6,
+    updated_at = $7,
+    started_at = NULL,
+    finished_at = NULL
+WHERE id = $1 AND type = $8
+RETURNING id, type, status, requested_by, assigned_to, input, requirements, result, error, attempts, max_attempts, last_failure, created_at, updated_at, started_at, finished_at, cdip_state, cdip_parent_job_id, cdip_stage_index
+`, jobID, input, string(next), string(jobs.StatusScheduled), cdipStageResult(next, detail, now, ""), attempts, now, models.JobGenerateStage)
 	return scanJob(row)
 }
 
@@ -655,14 +777,33 @@ RETURNING id, type, status, requested_by, assigned_to, input, requirements, resu
 `, jobID, string(jobs.StatusCanceled), "canceled by operator", now, string(jobs.StatusQueued), string(jobs.StatusScheduled), string(jobs.StatusRunning))
 	job, ok := scanJob(row)
 	if ok {
+		if job.Type == models.JobGenerateDistributed {
+			s.cancelCDIPStageJobsForParent(job.ID, now)
+		}
 		s.scheduleQueuedJobs(now)
 	}
 	return job, ok
 }
 
+func (s *PostgresStore) cancelCDIPStageJobsForParent(parentJobID string, now time.Time) {
+	_, _ = s.pool.Exec(context.Background(), `
+UPDATE jobs
+SET status = $2,
+    cdip_state = $3,
+    result = $4,
+    error = $5,
+    last_failure = '',
+    updated_at = $6,
+    finished_at = $6
+WHERE type = $7
+  AND cdip_parent_job_id = $1
+  AND status IN ($8, $9, $10)
+`, parentJobID, string(jobs.StatusCanceled), string(cdip.StageAborted), cdipStageResult(cdip.StageAborted, "canceled by operator", now, ""), "canceled by operator", now, models.JobGenerateStage, string(jobs.StatusQueued), string(jobs.StatusScheduled), string(jobs.StatusRunning))
+}
+
 func (s *PostgresStore) Nodes() []cluster.Node {
 	rows, err := s.pool.Query(context.Background(), `
-SELECT id, name, role, status, endpoint, resources, joined_at, updated_at
+SELECT id, name, role, status, endpoint, auth_token, resources, joined_at, updated_at
 FROM nodes
 ORDER BY joined_at ASC
 `)
@@ -678,7 +819,7 @@ ORDER BY joined_at ASC
 		var node cluster.Node
 		var role, status string
 		var payload []byte
-		if err := rows.Scan(&node.ID, &node.Name, &role, &status, &node.Endpoint, &payload, &node.JoinedAt, &node.UpdatedAt); err != nil {
+		if err := rows.Scan(&node.ID, &node.Name, &role, &status, &node.Endpoint, &node.AuthToken, &payload, &node.JoinedAt, &node.UpdatedAt); err != nil {
 			continue
 		}
 		node.Role = cluster.NodeRole(role)
@@ -702,6 +843,19 @@ WHERE id = $1
 		s.failActiveJobsForWorker(nodeID, now, "worker heartbeat timed out")
 	}
 	return nodes
+}
+
+func (s *PostgresStore) WorkerAuthToken(nodeID string) (string, bool) {
+	var token string
+	err := s.pool.QueryRow(context.Background(), `
+SELECT auth_token
+FROM nodes
+WHERE id = $1
+`, nodeID).Scan(&token)
+	if err != nil {
+		return "", false
+	}
+	return token, true
 }
 
 func (s *PostgresStore) ClusterSummary() ClusterSummary {

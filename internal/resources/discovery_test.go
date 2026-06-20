@@ -97,6 +97,9 @@ func TestDiscoverInstalledModelsReadsManifestMetadata(t *testing.T) {
 	if installed[0].Bytes != 5 {
 		t.Fatalf("expected manifest bytes, got %d", installed[0].Bytes)
 	}
+	if installed[0].Layers != 24 {
+		t.Fatalf("expected manifest layer estimate, got %d", installed[0].Layers)
+	}
 	if !installed[0].InstalledAt.Equal(installedAt) {
 		t.Fatalf("expected installed_at %s, got %s", installedAt, installed[0].InstalledAt)
 	}

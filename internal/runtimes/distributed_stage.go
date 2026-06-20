@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cmesh/cmesh/internal/cdip"
 	"github.com/cmesh/cmesh/internal/models"
@@ -33,6 +34,7 @@ type StagePrepareRequest struct {
 	ParentJobID      string
 	StageJobID       string
 	ModelID          string
+	ModelPath        string
 	Stage            models.DistributedStageInput
 	Shard            cdip.ModelShard
 	UpstreamNodeID   string
@@ -40,33 +42,39 @@ type StagePrepareRequest struct {
 }
 
 type StagePrepareResult struct {
-	Kind               string
-	ParentJobID        string
-	StageIndex         int
-	ModelID            string
-	Runtime            string
-	LayerStart         int
-	LayerEnd           int
-	UpstreamNodeID     string
-	DownstreamNodeID   string
-	Materialization    string
-	SourceArtifact     string
-	TargetArtifact     string
-	ActivationProtocol string
+	Kind                string
+	ParentJobID         string
+	StageIndex          int
+	ModelID             string
+	Runtime             string
+	LayerStart          int
+	LayerEnd            int
+	UpstreamNodeID      string
+	DownstreamNodeID    string
+	Materialization     string
+	SourceArtifact      string
+	TargetArtifact      string
+	Artifact            cdip.ShardArtifact
+	ActivationProtocol  string
+	MaterializationPlan *StageMaterializationPlan
+	PhysicalShardPlan   *PhysicalShardPlan
 }
 
 type StageCommandRequest struct {
-	ParentJobID         string
-	StageJobID          string
-	StageIndex          int
-	Step                uint64
-	ActivationTransport transport.ActivationTransport
-	DownstreamNodeID    string
-	ActivationPayload   []byte
-	ActivationEncoding  string
-	ActivationShape     []int
-	ActivationDType     string
-	ActivationChecksum  string
+	ParentJobID          string
+	StageJobID           string
+	StageIndex           int
+	Step                 uint64
+	ActivationTransport  transport.ActivationTransport
+	UpstreamStageJobID   string
+	DownstreamStageJobID string
+	DownstreamNodeID     string
+	ActivationPayload    []byte
+	ActivationEncoding   string
+	ActivationShape      []int
+	ActivationDType      string
+	ActivationChecksum   string
+	KVCacheKey           string
 }
 
 type StageCommandResult struct {
@@ -77,6 +85,8 @@ type StageCommandResult struct {
 	Step            uint64                `json:"step"`
 	ActivationFrame *cdip.ActivationChunk `json:"activation_frame,omitempty"`
 	ActivationBytes int                   `json:"activation_bytes,omitempty"`
+	TensorEnvelope  *TensorEnvelope       `json:"tensor_envelope,omitempty"`
+	Session         *StageSession         `json:"session,omitempty"`
 }
 
 type DistributedStageRuntime interface {
@@ -142,6 +152,7 @@ func (r LogicalStageRuntime) PrepareStage(ctx context.Context, req StagePrepareR
 		Materialization:    string(req.Shard.Materialization),
 		SourceArtifact:     req.Shard.SourceArtifact,
 		TargetArtifact:     req.Shard.TargetArtifact,
+		Artifact:           req.Shard.Artifact,
 		ActivationProtocol: ActivationStreamV1,
 	}, nil
 }
@@ -151,6 +162,7 @@ func (r LogicalStageRuntime) PrefillStage(ctx context.Context, req StageCommandR
 }
 
 func (r LogicalStageRuntime) DecodeStage(ctx context.Context, req StageCommandRequest) (StageCommandResult, error) {
+	started := time.Now()
 	result, err := stageCommandResult(ctx, "cdip.stage_decode", req)
 	if err != nil {
 		return StageCommandResult{}, err
@@ -188,6 +200,11 @@ func (r LogicalStageRuntime) DecodeStage(ctx context.Context, req StageCommandRe
 		},
 		Payload: req.ActivationPayload,
 	}
+	envelope := TensorEnvelopeFromActivation(frame.Header, frame.Payload, req.StageIndex, req.UpstreamStageJobID, req.DownstreamStageJobID, req.DownstreamNodeID, 0)
+	envelope.KVCacheKey = strings.TrimSpace(req.KVCacheKey)
+	if err := envelope.ValidatePayload(frame.Payload); err != nil {
+		return StageCommandResult{}, err
+	}
 	writer, err := req.ActivationTransport.OpenWriter(ctx, transport.StreamID{ParentJobID: req.ParentJobID, StageJobID: req.StageJobID}, req.DownstreamNodeID)
 	if err != nil {
 		return StageCommandResult{}, err
@@ -197,7 +214,34 @@ func (r LogicalStageRuntime) DecodeStage(ctx context.Context, req StageCommandRe
 	}
 	result.ActivationFrame = &frame.Header
 	result.ActivationBytes = len(frame.Payload)
+	envelope.TimingMS = time.Since(started).Milliseconds()
+	result.TensorEnvelope = &envelope
 	return result, nil
+}
+
+func (r LogicalStageRuntime) Prepare(ctx context.Context, req StagePrepareRequest) (StagePrepared, error) {
+	result, err := r.PrepareStage(ctx, req)
+	return StagePrepared{StagePrepareResult: result}, err
+}
+
+func (r LogicalStageRuntime) Prefill(ctx context.Context, req StageCommandRequest) (StagePrefillResult, error) {
+	result, err := r.PrefillStage(ctx, req)
+	return StagePrefillResult{StageCommandResult: result}, err
+}
+
+func (r LogicalStageRuntime) Decode(ctx context.Context, req StageCommandRequest) (StageDecodeResult, error) {
+	result, err := r.DecodeStage(ctx, req)
+	return StageDecodeResult{StageCommandResult: result}, err
+}
+
+func (r LogicalStageRuntime) Complete(ctx context.Context, req StageCommandRequest) (StageCompleteResult, error) {
+	result, err := r.CompleteStage(ctx, req)
+	return StageCompleteResult{StageCommandResult: result}, err
+}
+
+func (r LogicalStageRuntime) Abort(ctx context.Context, req StageCommandRequest) (StageAbortResult, error) {
+	result, err := r.AbortStage(ctx, req)
+	return StageAbortResult{StageCommandResult: result}, err
 }
 
 func (r LogicalStageRuntime) CompleteStage(ctx context.Context, req StageCommandRequest) (StageCommandResult, error) {

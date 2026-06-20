@@ -1,3 +1,6 @@
 CMesh
 Copyright 2026 CMesh contributors.
 
+This product includes release tooling and package metadata for the pinned
+llama.cpp runtime. See docs/THIRD_PARTY_NOTICES.md for runtime and model
+artifact notices.

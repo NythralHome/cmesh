@@ -331,6 +331,7 @@ func DiscoverInstalledModels(cacheDir string) []cluster.ModelResource {
 				resource.Family = firstNonEmpty(manifest.Family, resource.Family)
 				resource.Runtime = firstNonEmpty(manifest.Runtime, resource.Runtime)
 				resource.InstalledAt = manifest.InstalledAt
+				resource.Layers = manifest.Layers
 				if manifest.Bytes > 0 {
 					resource.Bytes = manifest.Bytes
 				}
@@ -354,6 +355,7 @@ func DiscoverInstalledModels(cacheDir string) []cluster.ModelResource {
 			Runtime:     resource.Runtime,
 			Path:        resource.Path,
 			Bytes:       resource.Bytes,
+			Layers:      resource.Layers,
 			Ready:       resource.Ready,
 			Error:       resource.Error,
 			InstalledAt: resource.InstalledAt,
@@ -375,6 +377,7 @@ type ModelManifest struct {
 	URL         string    `json:"url,omitempty"`
 	Path        string    `json:"path"`
 	Bytes       uint64    `json:"bytes"`
+	Layers      int       `json:"layers,omitempty"`
 	InstalledAt time.Time `json:"installed_at"`
 }
 
@@ -383,8 +386,15 @@ func ModelFilePath(cacheDir string, model models.Model) string {
 }
 
 func WriteModelManifest(cacheDir string, model models.Model, path string, bytes uint64, installedAt time.Time) error {
+	return WriteModelManifestWithLayers(cacheDir, model, path, bytes, installedAt, 0)
+}
+
+func WriteModelManifestWithLayers(cacheDir string, model models.Model, path string, bytes uint64, installedAt time.Time, layers int) error {
 	if installedAt.IsZero() {
 		installedAt = time.Now().UTC()
+	}
+	if layers <= 0 {
+		layers = modelLayerEstimate(model)
 	}
 	manifest := ModelManifest{
 		Schema:      "cmesh.model.v1",
@@ -397,6 +407,7 @@ func WriteModelManifest(cacheDir string, model models.Model, path string, bytes 
 		URL:         model.URL,
 		Path:        path,
 		Bytes:       bytes,
+		Layers:      layers,
 		InstalledAt: installedAt.UTC(),
 	}
 	body, err := json.MarshalIndent(manifest, "", "  ")
@@ -407,6 +418,29 @@ func WriteModelManifest(cacheDir string, model models.Model, path string, bytes 
 		return err
 	}
 	return os.WriteFile(ModelManifestPath(cacheDir, model.ID), append(body, '\n'), 0o644)
+}
+
+func modelLayerEstimate(model models.Model) int {
+	params := strings.ToUpper(strings.TrimSpace(model.Parameters))
+	params = strings.TrimSuffix(params, "B")
+	value, err := strconv.ParseFloat(params, 64)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	switch {
+	case value <= 1.5:
+		return 24
+	case value <= 4:
+		return 32
+	case value <= 8:
+		return 32
+	case value <= 15:
+		return 48
+	case value <= 28:
+		return 56
+	default:
+		return 64
+	}
 }
 
 func ModelManifestPath(cacheDir string, modelID string) string {

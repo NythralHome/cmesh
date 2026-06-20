@@ -90,6 +90,26 @@ func TestShardManifestValidation(t *testing.T) {
 	if err := msg.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	msg.Shards[0].Artifact = ShardArtifact{
+		Protocol:              "cdip.shard-artifact-v1",
+		Status:                "ready",
+		LayerStart:            0,
+		LayerEnd:              13,
+		ExpectedBytes:         1024,
+		PhysicalArtifactReady: true,
+	}
+	if err := msg.Validate(); err == nil || !strings.Contains(err.Error(), "uri is empty") {
+		t.Fatalf("expected ready artifact URI error, got %v", err)
+	}
+	msg.Shards[0].Artifact.URI = "file:///models/qwen.stage-0.gguf"
+	if err := msg.Validate(); err != nil {
+		t.Fatalf("expected valid physical artifact metadata, got %v", err)
+	}
+	msg.Shards[0].Artifact.LayerEnd = 12
+	if err := msg.Validate(); err == nil || !strings.Contains(err.Error(), "artifact layer range") {
+		t.Fatalf("expected artifact layer range error, got %v", err)
+	}
+	msg.Shards[0].Artifact = ShardArtifact{}
 	msg.Shards[1].Stage.LayerEnd = 26
 	if err := msg.Validate(); err == nil || !strings.Contains(err.Error(), "last shard") {
 		t.Fatalf("expected final layer coverage error, got %v", err)

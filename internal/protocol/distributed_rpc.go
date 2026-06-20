@@ -27,30 +27,48 @@ type DistributedRPCExecutionPlan struct {
 }
 
 type DistributedRPCBackend struct {
-	NodeID       string `json:"node_id"`
-	NodeName     string `json:"node_name"`
-	Runtime      string `json:"runtime"`
-	Endpoint     string `json:"endpoint"`
-	HealthStatus string `json:"health_status,omitempty"`
-	LatencyMS    int64  `json:"latency_ms,omitempty"`
-	Error        string `json:"error,omitempty"`
+	NodeID         string `json:"node_id"`
+	NodeName       string `json:"node_name"`
+	Runtime        string `json:"runtime"`
+	RuntimeVersion string `json:"runtime_version,omitempty"`
+	Endpoint       string `json:"endpoint"`
+	HealthStatus   string `json:"health_status,omitempty"`
+	LatencyMS      int64  `json:"latency_ms,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type DistributedRPCExecutionResult struct {
-	Protocol          string   `json:"protocol"`
-	ProtocolVersion   int      `json:"protocol_version"`
-	PlanSchemaVersion int      `json:"plan_schema_version"`
-	PlanID            string   `json:"plan_id,omitempty"`
-	Kind              string   `json:"kind"`
-	ModelID           string   `json:"model_id"`
-	Output            string   `json:"output"`
-	Runtime           string   `json:"runtime"`
-	RuntimeVersion    string   `json:"runtime_version,omitempty"`
-	WorkerRuntime     string   `json:"worker_runtime"`
-	RPCEndpoints      []string `json:"rpc_endpoints"`
-	RPCEndpointCount  int      `json:"rpc_endpoint_count"`
-	DurationMS        int64    `json:"duration_ms"`
-	CompletedAt       string   `json:"completed_at,omitempty"`
+	Protocol            string                  `json:"protocol"`
+	ProtocolVersion     int                     `json:"protocol_version"`
+	PlanSchemaVersion   int                     `json:"plan_schema_version"`
+	PlanID              string                  `json:"plan_id,omitempty"`
+	Kind                string                  `json:"kind"`
+	ModelID             string                  `json:"model_id"`
+	Output              string                  `json:"output"`
+	Runtime             string                  `json:"runtime"`
+	RuntimeVersion      string                  `json:"runtime_version,omitempty"`
+	WorkerRuntime       string                  `json:"worker_runtime"`
+	CoordinatorNodeID   string                  `json:"coordinator_node_id,omitempty"`
+	CoordinatorNodeName string                  `json:"coordinator_node_name,omitempty"`
+	Backends            []DistributedRPCBackend `json:"backends,omitempty"`
+	RPCEndpoints        []string                `json:"rpc_endpoints"`
+	RPCEndpointCount    int                     `json:"rpc_endpoint_count"`
+	RPCEnabled          bool                    `json:"rpc_enabled"`
+	ModelPath           string                  `json:"model_path,omitempty"`
+	ModelBytes          int64                   `json:"model_bytes,omitempty"`
+	Timings             DistributedRPCTimings   `json:"timings,omitempty"`
+	DurationMS          int64                   `json:"duration_ms"`
+	StartedAt           string                  `json:"started_at,omitempty"`
+	CompletedAt         string                  `json:"completed_at,omitempty"`
+}
+
+type DistributedRPCTimings struct {
+	ModelStatMS       int64 `json:"model_stat_ms,omitempty"`
+	RuntimePrepareMS  int64 `json:"runtime_prepare_ms,omitempty"`
+	LlamaProcessMS    int64 `json:"llama_process_ms,omitempty"`
+	TotalMS           int64 `json:"total_ms,omitempty"`
+	PromptEvalMS      int64 `json:"prompt_eval_ms,omitempty"`
+	TokenGenerationMS int64 `json:"token_generation_ms,omitempty"`
 }
 
 func ValidateDistributedRPCExecutionPlan(plan DistributedRPCExecutionPlan, modelID string, coordinatorNodeID string) error {
@@ -128,6 +146,12 @@ func ValidateDistributedRPCExecutionResult(result DistributedRPCExecutionResult,
 	if len(cleanRPCEndpoints(result.RPCEndpoints)) == 0 {
 		return fmt.Errorf("execution_result.rpc_endpoints is required")
 	}
+	if !result.RPCEnabled {
+		return fmt.Errorf("execution_result.rpc_enabled must be true")
+	}
+	if len(result.Backends) == 0 {
+		return fmt.Errorf("execution_result.backends is required")
+	}
 	if plan.ID != "" && result.PlanID != "" && result.PlanID != plan.ID {
 		return fmt.Errorf("execution_result.plan_id %q does not match plan id %q", result.PlanID, plan.ID)
 	}
@@ -142,6 +166,9 @@ func ValidateDistributedRPCExecutionResult(result DistributedRPCExecutionResult,
 		if !planEndpoints[endpoint] {
 			return fmt.Errorf("execution_result endpoint %q is not listed in execution plan", endpoint)
 		}
+	}
+	if result.CoordinatorNodeID != "" && plan.CoordinatorNodeID != "" && result.CoordinatorNodeID != plan.CoordinatorNodeID {
+		return fmt.Errorf("execution_result.coordinator_node_id %q does not match plan coordinator %q", result.CoordinatorNodeID, plan.CoordinatorNodeID)
 	}
 	return nil
 }

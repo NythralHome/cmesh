@@ -1,18 +1,23 @@
 #!/usr/bin/env sh
 set -eu
 
-CMESH_VERSION="${CMESH_VERSION:-v0.1.0-alpha.9}"
+ACTION="${1:-install}"
+CMESH_VERSION="${CMESH_VERSION:-latest}"
 CMESH_ADDR="${CMESH_ADDR:-127.0.0.1:8080}"
 CMESH_DOMAIN="${CMESH_DOMAIN:-}"
 CMESH_ADMIN_EMAIL="${CMESH_ADMIN_EMAIL:-}"
 CMESH_INSTALL_CADDY="${CMESH_INSTALL_CADDY:-}"
+CMESH_INSTALL_DRY_RUN="${CMESH_INSTALL_DRY_RUN:-false}"
 CMESH_NONINTERACTIVE="${CMESH_NONINTERACTIVE:-false}"
+CMESH_PRINT_SECRETS="${CMESH_PRINT_SECRETS:-false}"
 CMESH_JOIN_TOKEN="${CMESH_JOIN_TOKEN:-}"
 CMESH_OPERATOR_TOKEN="${CMESH_OPERATOR_TOKEN:-}"
 CMESH_PUBLIC_URL="${CMESH_PUBLIC_URL:-}"
 CMESH_STATE_PATH="${CMESH_STATE_PATH:-/var/lib/cmesh/cmesh-state.json}"
+CMESH_EXTRA_MANAGER_ARGS="${CMESH_EXTRA_MANAGER_ARGS:-}"
 DATABASE_URL="${DATABASE_URL:-}"
 CMESH_BIN_DIR="${CMESH_BIN_DIR:-/usr/local/bin}"
+CMESH_BINARY_URL="${CMESH_BINARY_URL:-}"
 
 prompt_if_empty() {
   var_name="$1"
@@ -71,6 +76,85 @@ detect_asset() {
   printf "cmesh-linux-%s" "$arch"
 }
 
+release_download_base_url() {
+  if [ "$CMESH_VERSION" = "latest" ]; then
+    printf "https://github.com/NythralHome/cmesh/releases/latest/download"
+  else
+    printf "https://github.com/NythralHome/cmesh/releases/download/%s" "$CMESH_VERSION"
+  fi
+}
+
+caddy_upstream_addr() {
+  case "$CMESH_ADDR" in
+    :*) printf "127.0.0.1%s" "$CMESH_ADDR" ;;
+    0.0.0.0:*) printf "127.0.0.1:%s" "${CMESH_ADDR##*:}" ;;
+    "[::]:"*) printf "127.0.0.1:%s" "${CMESH_ADDR##*:}" ;;
+    *) printf "%s" "$CMESH_ADDR" ;;
+  esac
+}
+
+manager_health_url() {
+  printf "http://%s/health" "$(caddy_upstream_addr)"
+}
+
+print_install_plan() {
+  asset="$(detect_asset)"
+  url="$(release_download_base_url)/$asset"
+  if [ -n "$CMESH_BINARY_URL" ]; then
+    url="$CMESH_BINARY_URL"
+  fi
+  public_url="$CMESH_PUBLIC_URL"
+  if [ -z "$public_url" ]; then
+    public_url="-"
+  fi
+  caddy="$CMESH_INSTALL_CADDY"
+  if [ -z "$caddy" ]; then
+    caddy="-"
+  fi
+  domain="$CMESH_DOMAIN"
+  if [ -z "$domain" ]; then
+    domain="-"
+  fi
+  admin_email="$CMESH_ADMIN_EMAIL"
+  if [ -z "$admin_email" ]; then
+    admin_email="-"
+  fi
+  database_url="-"
+  if [ -n "$DATABASE_URL" ]; then
+    database_url="configured"
+  fi
+  join_token_status="configured"
+  if [ -z "$CMESH_JOIN_TOKEN" ]; then
+    join_token_status="generated_on_install"
+  fi
+  operator_token_status="configured"
+  if [ -z "$CMESH_OPERATOR_TOKEN" ]; then
+    operator_token_status="generated_on_install"
+  fi
+
+  cat <<EOF
+CMesh manager install dry run
+version: $CMESH_VERSION
+binary_asset: $asset
+binary_url: $url
+bin_dir: $CMESH_BIN_DIR
+addr: $CMESH_ADDR
+domain: $domain
+public_url: $public_url
+admin_email: $admin_email
+install_caddy: $caddy
+caddy_upstream: $(caddy_upstream_addr)
+health_url: $(manager_health_url)
+state_path: $CMESH_STATE_PATH
+database_url: $database_url
+join_token: $join_token_status
+operator_token: $operator_token_status
+extra_manager_args: ${CMESH_EXTRA_MANAGER_ARGS:--}
+systemd_unit: /etc/systemd/system/cmesh.service
+env_file: /etc/cmesh/manager.env
+EOF
+}
+
 download() {
   url="$1"
   out="$2"
@@ -82,6 +166,26 @@ download() {
     echo "curl or wget is required" >&2
     exit 1
   fi
+}
+
+wait_for_manager_health() {
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is not available; skipping manager HTTP health check"
+    return
+  fi
+  health_url="$(manager_health_url)"
+  deadline=$(( $(date +%s) + 30 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if curl -fsS "$health_url" >/dev/null 2>&1; then
+      echo "CMesh manager health check passed: $health_url"
+      return
+    fi
+    sleep 1
+  done
+  echo "CMesh manager did not become healthy: $health_url" >&2
+  systemctl --no-pager status cmesh.service || true
+  journalctl -u cmesh.service --no-pager -n 120 || true
+  exit 1
 }
 
 install_caddy() {
@@ -141,7 +245,7 @@ configure_caddy() {
 
   cat > "$caddyfile" <<EOF
 ${email_block}$CMESH_DOMAIN {
-  reverse_proxy 127.0.0.1:8080
+  reverse_proxy $(caddy_upstream_addr)
 }
 EOF
 
@@ -150,18 +254,70 @@ EOF
   systemctl reload caddy.service || systemctl restart caddy.service
 }
 
+service_action() {
+  action="$1"
+  case "$action" in
+    status)
+      if ! command -v systemctl >/dev/null 2>&1; then
+        echo "systemd is required" >&2
+        exit 1
+      fi
+      systemctl --no-pager status cmesh.service || true
+      if command -v caddy >/dev/null 2>&1; then
+        systemctl --no-pager status caddy.service || true
+      fi
+      ;;
+    start)
+      systemctl start cmesh.service
+      systemctl --no-pager status cmesh.service || true
+      ;;
+    stop)
+      systemctl stop cmesh.service
+      echo "CMesh manager stopped"
+      ;;
+    restart)
+      systemctl restart cmesh.service
+      systemctl --no-pager status cmesh.service || true
+      ;;
+    uninstall)
+      systemctl disable --now cmesh.service >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/cmesh.service
+      systemctl daemon-reload
+      echo "CMesh manager service removed"
+      echo "State and tokens were left in /var/lib/cmesh and /etc/cmesh"
+      ;;
+    *)
+      echo "usage: install-manager-linux.sh [install|status|start|stop|restart|uninstall]" >&2
+      exit 1
+      ;;
+  esac
+}
+
 if [ "$(uname -s)" != "Linux" ]; then
   echo "manager installer currently supports Linux only" >&2
   exit 1
 fi
-if [ "$(id -u)" -ne 0 ]; then
-  echo "manager install requires root; rerun with sudo" >&2
-  exit 1
-fi
-if ! command -v systemctl >/dev/null 2>&1; then
-  echo "systemd is required" >&2
-  exit 1
-fi
+
+case "$ACTION" in
+  status)
+    service_action "$ACTION"
+    exit 0
+    ;;
+  start|stop|restart|uninstall)
+    if [ "$(id -u)" -ne 0 ]; then
+      echo "manager service action requires root; rerun with sudo" >&2
+      exit 1
+    fi
+    service_action "$ACTION"
+    exit 0
+    ;;
+  install)
+    ;;
+  *)
+    echo "usage: install-manager-linux.sh [install|status|start|stop|restart|uninstall]" >&2
+    exit 1
+    ;;
+esac
 
 if can_prompt; then
   echo "CMesh manager installer"
@@ -182,6 +338,11 @@ if is_yes "$CMESH_INSTALL_CADDY" && [ -z "$CMESH_DOMAIN" ]; then
   exit 1
 fi
 
+if is_yes "$CMESH_INSTALL_DRY_RUN"; then
+  print_install_plan
+  exit 0
+fi
+
 if [ -z "$CMESH_JOIN_TOKEN" ]; then
   if command -v openssl >/dev/null 2>&1; then
     CMESH_JOIN_TOKEN="$(openssl rand -hex 32)"
@@ -193,8 +354,20 @@ if [ -z "$CMESH_OPERATOR_TOKEN" ] && command -v openssl >/dev/null 2>&1; then
   CMESH_OPERATOR_TOKEN="$(openssl rand -hex 32)"
 fi
 
+if [ "$(id -u)" -ne 0 ]; then
+  echo "manager install requires root; rerun with sudo" >&2
+  exit 1
+fi
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "systemd is required" >&2
+  exit 1
+fi
+
 asset="$(detect_asset)"
-url="https://github.com/NythralHome/cmesh/releases/download/$CMESH_VERSION/$asset"
+url="$(release_download_base_url)/$asset"
+if [ -n "$CMESH_BINARY_URL" ]; then
+  url="$CMESH_BINARY_URL"
+fi
 tmp="${TMPDIR:-/tmp}/$asset.$$"
 
 download "$url" "$tmp"
@@ -203,6 +376,7 @@ rm -f "$tmp"
 
 id cmesh >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/cmesh --shell /usr/sbin/nologin cmesh 2>/dev/null || useradd --system --create-home --home-dir /var/lib/cmesh --shell /sbin/nologin cmesh
 install -d -m 0755 /etc/cmesh /var/lib/cmesh
+chown cmesh:cmesh /var/lib/cmesh
 
 cat > /etc/cmesh/manager.env <<EOF
 CMESH_JOIN_TOKEN="$CMESH_JOIN_TOKEN"
@@ -225,9 +399,14 @@ User=cmesh
 Group=cmesh
 WorkingDirectory=/var/lib/cmesh
 EnvironmentFile=/etc/cmesh/manager.env
-ExecStart=$CMESH_BIN_DIR/cmesh manager start --addr $CMESH_ADDR
+ExecStart=$CMESH_BIN_DIR/cmesh manager start --addr $CMESH_ADDR $CMESH_EXTRA_MANAGER_ARGS
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cmesh
 
 [Install]
 WantedBy=multi-user.target
@@ -235,6 +414,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now cmesh.service
+wait_for_manager_health
 
 if is_yes "$CMESH_INSTALL_CADDY"; then
   configure_caddy
@@ -249,5 +429,10 @@ else
 fi
 echo "manager tokens are stored in /etc/cmesh/manager.env"
 echo "manager state is stored in $CMESH_STATE_PATH"
-echo "operator token: $CMESH_OPERATOR_TOKEN"
-echo "join token: $CMESH_JOIN_TOKEN"
+if is_yes "$CMESH_PRINT_SECRETS"; then
+  echo "operator token: $CMESH_OPERATOR_TOKEN"
+  echo "join token: $CMESH_JOIN_TOKEN"
+else
+  echo "operator token: stored in /etc/cmesh/manager.env"
+  echo "join token: stored in /etc/cmesh/manager.env"
+fi

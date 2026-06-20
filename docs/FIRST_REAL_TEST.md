@@ -6,6 +6,11 @@ This runbook is for the first alpha test with real machines joining one private 
 
 Prove that several machines can join one manager, advertise resources, run benchmarks, install a local model, run a prompt, delete the model, and remain controllable from the donor desktop app.
 
+For distributed inference, also prove that one coordinator worker can run a
+model through multiple remote llama.cpp RPC backend workers. This is the
+current distributed baseline. It is real multi-machine inference, but it is not
+yet CMesh-native layer sharding.
+
 ## Test Shape
 
 - One manager: `https://cmesh.nythral.com` or another self-hosted manager.
@@ -48,6 +53,11 @@ Prove that several machines can join one manager, advertise resources, run bench
 - Model catalog shows why each model can or cannot install on each worker.
 - Installing a model creates a visible model job and eventually updates installed inventory.
 - Chat can generate a response against an installed model and selected worker.
+- A distributed RPC generate job can run with one coordinator and at least two
+  RPC backend workers.
+- The distributed job result records `rpc_enabled: true`, `rpc_endpoint_count`
+  of at least `2`, coordinator node, backend nodes, endpoint health, runtime
+  version, model path, model bytes, and timing evidence.
 - Conversation history persists across messages.
 - Manual model memory appears in prompt preview and affects future chat context.
 - Deleting a model removes it from worker inventory and reports freed bytes.
@@ -61,7 +71,9 @@ Prove that several machines can join one manager, advertise resources, run bench
 - macOS packages are distributed as DMG builds and should be signed/notarized when release secrets are configured.
 - Windows and Linux desktop packaging is still alpha-level.
 - Background service installation is still alpha-level and will move to signed installers or privileged helpers later.
-- Model execution currently runs one model on one selected worker. This test does not yet prove distributed inference for one model split across many machines.
+- CMesh has a working llama.cpp RPC distributed baseline across real machines.
+  It does not yet prove CMesh-native layer-stage sharding where GGUF layers,
+  activations, and KV cache are owned by separate CMesh stages.
 
 ## Evidence To Capture
 
@@ -75,3 +87,7 @@ Prove that several machines can join one manager, advertise resources, run bench
 - Chat screenshot showing selected model and worker.
 - Prompt Debug screenshot when manual memory is used.
 - Any donor OS warning or permission prompt.
+- Distributed RPC evidence directory when running the AWS E2E script, including
+  `distributed-result.json`, `rpc-plan.json`, `rpc-refresh.json`,
+  `generate-job-final.json`, `cleanup-started.json`, and
+  `cleanup-instances.json`.

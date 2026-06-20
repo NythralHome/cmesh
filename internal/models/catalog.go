@@ -24,21 +24,37 @@ type Runtime string
 const RuntimeLlamaCPP Runtime = "llama.cpp"
 
 type Model struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	Family      string  `json:"family"`
-	Runtime     Runtime `json:"runtime"`
-	Repo        string  `json:"repo"`
-	File        string  `json:"file"`
-	URL         string  `json:"url"`
-	Parameters  string  `json:"parameters"`
-	Quant       string  `json:"quant"`
-	Context     int     `json:"context"`
-	DiskBytes   uint64  `json:"disk_bytes"`
-	MemoryBytes uint64  `json:"memory_bytes"`
-	VRAMBytes   uint64  `json:"vram_bytes,omitempty"`
-	License     string  `json:"license"`
-	Description string  `json:"description"`
+	ID          string             `json:"id"`
+	Name        string             `json:"name"`
+	Family      string             `json:"family"`
+	Runtime     Runtime            `json:"runtime"`
+	Repo        string             `json:"repo"`
+	File        string             `json:"file"`
+	URL         string             `json:"url"`
+	SHA256      string             `json:"sha256,omitempty"`
+	Parameters  string             `json:"parameters"`
+	Quant       string             `json:"quant"`
+	Context     int                `json:"context"`
+	DiskBytes   uint64             `json:"disk_bytes"`
+	MemoryBytes uint64             `json:"memory_bytes"`
+	VRAMBytes   uint64             `json:"vram_bytes,omitempty"`
+	License     string             `json:"license"`
+	Description string             `json:"description"`
+	Production  *ProductionSupport `json:"production,omitempty"`
+}
+
+type ProductionSupport struct {
+	Status               string   `json:"status"`
+	Platforms            []string `json:"platforms"`
+	SlicedExecution      bool     `json:"sliced_execution"`
+	StageRuntime         string   `json:"stage_runtime"`
+	Layers               int      `json:"layers"`
+	MinStages            int      `json:"min_stages"`
+	RecommendedStages    int      `json:"recommended_stages"`
+	MinWorkerMemoryBytes uint64   `json:"min_worker_memory_bytes"`
+	MinWorkerDiskBytes   uint64   `json:"min_worker_disk_bytes"`
+	PlacementPolicy      string   `json:"placement_policy"`
+	Evidence             string   `json:"evidence"`
 }
 
 type QualityPreset struct {
@@ -78,16 +94,24 @@ type GenerateInput struct {
 }
 
 type DistributedGenerateInput struct {
-	ModelID        string                  `json:"model_id"`
-	Prompt         string                  `json:"prompt"`
-	Messages       []ChatMessage           `json:"messages,omitempty"`
-	SystemPrompt   string                  `json:"system_prompt,omitempty"`
-	ConversationID string                  `json:"conversation_id,omitempty"`
-	MaxTokens      int                     `json:"max_tokens,omitempty"`
-	Temperature    string                  `json:"temperature,omitempty"`
-	Mode           string                  `json:"mode"`
-	Stages         []DistributedStageInput `json:"stages"`
-	Shards         []cdip.ModelShard       `json:"shards,omitempty"`
+	ModelID         string                  `json:"model_id"`
+	Prompt          string                  `json:"prompt"`
+	Messages        []ChatMessage           `json:"messages,omitempty"`
+	SystemPrompt    string                  `json:"system_prompt,omitempty"`
+	ConversationID  string                  `json:"conversation_id,omitempty"`
+	MaxTokens       int                     `json:"max_tokens,omitempty"`
+	Temperature     string                  `json:"temperature,omitempty"`
+	Mode            string                  `json:"mode"`
+	TotalLayers     int                     `json:"total_layers,omitempty"`
+	Stages          []DistributedStageInput `json:"stages"`
+	Shards          []cdip.ModelShard       `json:"shards,omitempty"`
+	StageRunnerBin  string                  `json:"stage_runner_bin,omitempty"`
+	StageDaemonURL  string                  `json:"stage_daemon_url,omitempty"`
+	ModelPath       string                  `json:"model_path,omitempty"`
+	StageModelPaths []string                `json:"stage_model_paths,omitempty"`
+	StageNodeIDs    []string                `json:"stage_node_ids,omitempty"`
+	WorkDir         string                  `json:"work_dir,omitempty"`
+	TimeoutMS       int                     `json:"timeout_ms,omitempty"`
 }
 
 type DistributedRPCGenerateInput struct {
@@ -103,27 +127,43 @@ type DistributedRPCGenerateInput struct {
 }
 
 type DistributedStageInput struct {
-	Index      int    `json:"index"`
-	NodeID     string `json:"node_id"`
-	NodeName   string `json:"node_name,omitempty"`
-	LayerStart int    `json:"layer_start"`
-	LayerEnd   int    `json:"layer_end"`
-	Layers     int    `json:"layers"`
+	Index          int    `json:"index"`
+	NodeID         string `json:"node_id"`
+	NodeName       string `json:"node_name,omitempty"`
+	LayerStart     int    `json:"layer_start"`
+	LayerEnd       int    `json:"layer_end"`
+	Layers         int    `json:"layers"`
+	StageDaemonURL string `json:"stage_daemon_url,omitempty"`
 }
 
 type DistributedStageJobInput struct {
-	ParentJobID      string                `json:"parent_job_id"`
-	ModelID          string                `json:"model_id"`
-	ConversationID   string                `json:"conversation_id,omitempty"`
-	Stage            DistributedStageInput `json:"stage"`
-	Shard            cdip.ModelShard       `json:"shard"`
-	UpstreamNodeID   string                `json:"upstream_node_id,omitempty"`
-	DownstreamNodeID string                `json:"downstream_node_id,omitempty"`
-	Prompt           string                `json:"prompt,omitempty"`
-	Messages         []ChatMessage         `json:"messages,omitempty"`
-	SystemPrompt     string                `json:"system_prompt,omitempty"`
-	MaxTokens        int                   `json:"max_tokens,omitempty"`
-	Temperature      string                `json:"temperature,omitempty"`
+	ParentJobID        string                `json:"parent_job_id"`
+	StageJobID         string                `json:"stage_job_id,omitempty"`
+	StageCommand       string                `json:"stage_command,omitempty"`
+	Step               uint64                `json:"step,omitempty"`
+	KVCacheKey         string                `json:"kv_cache_key,omitempty"`
+	ModelID            string                `json:"model_id"`
+	ConversationID     string                `json:"conversation_id,omitempty"`
+	Stage              DistributedStageInput `json:"stage"`
+	Shard              cdip.ModelShard       `json:"shard"`
+	UpstreamStageID    string                `json:"upstream_stage_id,omitempty"`
+	DownstreamStageID  string                `json:"downstream_stage_id,omitempty"`
+	UpstreamNodeID     string                `json:"upstream_node_id,omitempty"`
+	DownstreamNodeID   string                `json:"downstream_node_id,omitempty"`
+	StageRunnerBin     string                `json:"stage_runner_bin,omitempty"`
+	StageDaemonURL     string                `json:"stage_daemon_url,omitempty"`
+	StageSessionID     string                `json:"stage_session_id,omitempty"`
+	ModelPath          string                `json:"model_path,omitempty"`
+	WorkDir            string                `json:"work_dir,omitempty"`
+	TimeoutMS          int                   `json:"timeout_ms,omitempty"`
+	Prompt             string                `json:"prompt,omitempty"`
+	PreviousTokenID    *int                  `json:"previous_token_id,omitempty"`
+	PreviousTokenText  string                `json:"previous_token_text,omitempty"`
+	Messages           []ChatMessage         `json:"messages,omitempty"`
+	SystemPrompt       string                `json:"system_prompt,omitempty"`
+	MaxTokens          int                   `json:"max_tokens,omitempty"`
+	Temperature        string                `json:"temperature,omitempty"`
+	TerminalForceFinal *bool                 `json:"terminal_force_final,omitempty"`
 }
 
 type ChatMessage struct {
@@ -331,6 +371,7 @@ var catalog = []Model{
 		Repo:        "bartowski/Qwen2.5-14B-Instruct-GGUF",
 		File:        "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
 		URL:         "https://huggingface.co/bartowski/Qwen2.5-14B-Instruct-GGUF/resolve/main/Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+		SHA256:      "d989c91de35f32c18bdb8bec96a4b9fff2c3e5bca066503c63a5ca54dd537a4b",
 		Parameters:  "14B",
 		Quant:       "Q4_K_M",
 		Context:     32768,
@@ -338,6 +379,19 @@ var catalog = []Model{
 		MemoryBytes: 16 * gb,
 		License:     "Apache-2.0",
 		Description: "Large local instruct model for high-memory Macs.",
+		Production: &ProductionSupport{
+			Status:               "linux-sliced-supported",
+			Platforms:            []string{"linux/amd64"},
+			SlicedExecution:      true,
+			StageRuntime:         "llama.cpp-b9704-linux-amd64-rpc-stage",
+			Layers:               48,
+			MinStages:            3,
+			RecommendedStages:    3,
+			MinWorkerMemoryBytes: 6 * gb,
+			MinWorkerDiskBytes:   20 * gb,
+			PlacementPolicy:      "memory_disk_weighted_layers",
+			Evidence:             "/tmp/cmesh-cdip-real-gguf-e2e-20260620124630",
+		},
 	},
 	{
 		ID:          "mistral-small-24b-instruct-2501-q4-k-m",
@@ -424,6 +478,22 @@ var catalog = []Model{
 func Catalog() []Model {
 	out := make([]Model, len(catalog))
 	copy(out, catalog)
+	return out
+}
+
+func LinuxProductionCatalog() []Model {
+	var out []Model
+	for _, model := range catalog {
+		if model.Production == nil {
+			continue
+		}
+		for _, platform := range model.Production.Platforms {
+			if platform == "linux/amd64" {
+				out = append(out, model)
+				break
+			}
+		}
+	}
 	return out
 }
 

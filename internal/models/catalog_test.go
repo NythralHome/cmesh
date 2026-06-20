@@ -45,3 +45,33 @@ func TestQualityPresetSpecializesCoderAndDeepSeek(t *testing.T) {
 		t.Fatalf("expected deepseek preset, got %#v", deepseek)
 	}
 }
+
+func TestLinuxProductionCatalogDeclaresSlicedModel(t *testing.T) {
+	production := LinuxProductionCatalog()
+	if len(production) != 1 {
+		t.Fatalf("expected exactly one Linux production model for this release, got %d", len(production))
+	}
+
+	model := production[0]
+	if model.ID != "qwen2.5-14b-instruct-q4-k-m" {
+		t.Fatalf("unexpected production model %q", model.ID)
+	}
+	if model.SHA256 != "d989c91de35f32c18bdb8bec96a4b9fff2c3e5bca066503c63a5ca54dd537a4b" {
+		t.Fatalf("missing or changed production model checksum: %q", model.SHA256)
+	}
+	if model.Production == nil {
+		t.Fatal("production model must declare production support metadata")
+	}
+	if !model.Production.SlicedExecution || model.Production.Layers != 48 {
+		t.Fatalf("production model must declare 48-layer sliced execution metadata: %#v", model.Production)
+	}
+	if model.Production.MinStages != 3 || model.Production.RecommendedStages != 3 {
+		t.Fatalf("expected 3-stage production support, got %#v", model.Production)
+	}
+	if model.Production.MinWorkerMemoryBytes < 6*gb || model.Production.PlacementPolicy != "memory_disk_weighted_layers" {
+		t.Fatalf("production placement metadata is not conservative enough: %#v", model.Production)
+	}
+	if !strings.Contains(model.Production.Evidence, "cmesh-cdip-real-gguf-e2e") {
+		t.Fatalf("production model must reference sliced E2E evidence, got %q", model.Production.Evidence)
+	}
+}
