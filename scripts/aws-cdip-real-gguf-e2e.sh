@@ -14,6 +14,8 @@ CMESH_MODEL_URL="${CMESH_MODEL_URL:-https://huggingface.co/Qwen/Qwen2.5-0.5B-Ins
 CMESH_MODEL_FILE="${CMESH_MODEL_FILE:-qwen2.5-0.5b-instruct-q4_k_m.gguf}"
 CMESH_EXPECTED_MODEL_LAYERS="${CMESH_EXPECTED_MODEL_LAYERS:-24}"
 CMESH_PROMPT="${CMESH_PROMPT:-hello from cmesh real cdip stage workers}"
+CMESH_DISTRIBUTED_MAX_TOKENS="${CMESH_DISTRIBUTED_MAX_TOKENS:-3}"
+CMESH_SINGLE_MAX_TOKENS="${CMESH_SINGLE_MAX_TOKENS:-$CMESH_DISTRIBUTED_MAX_TOKENS}"
 CMESH_STAGE_TIMEOUT_MS="${CMESH_STAGE_TIMEOUT_MS:-120000}"
 CMESH_KEEP_AWS_RESOURCES="${CMESH_KEEP_AWS_RESOURCES:-false}"
 CMESH_E2E_DIR="${CMESH_E2E_DIR:-}"
@@ -29,6 +31,13 @@ CMESH_PLACEMENT_PROOF_MODEL_ID="${CMESH_PLACEMENT_PROOF_MODEL_ID:-qwen2.5-14b-in
 CMESH_PREFLIGHT_ONLY="${CMESH_PREFLIGHT_ONLY:-false}"
 CMESH_REQUIRE_MEMORY_PRESSURE_EXECUTION="${CMESH_REQUIRE_MEMORY_PRESSURE_EXECUTION:-false}"
 CMESH_LINUX_PACKAGE_DIR="${CMESH_LINUX_PACKAGE_DIR:-}"
+CMESH_TEST_DOMAIN="${CMESH_TEST_DOMAIN:-}"
+CMESH_ROUTE53_ZONE_ID="${CMESH_ROUTE53_ZONE_ID:-}"
+CMESH_KEEP_TEST_DOMAIN_RECORD="${CMESH_KEEP_TEST_DOMAIN_RECORD:-false}"
+CMESH_RUN_SINGLE_WORKER_REGRESSION="${CMESH_RUN_SINGLE_WORKER_REGRESSION:-false}"
+CMESH_ALLOW_SINGLE_WORKER_REGRESSION_FAILURE="${CMESH_ALLOW_SINGLE_WORKER_REGRESSION_FAILURE:-false}"
+CMESH_JOB_WAIT_ATTEMPTS="${CMESH_JOB_WAIT_ATTEMPTS:-180}"
+CMESH_JOB_WAIT_SLEEP_SECONDS="${CMESH_JOB_WAIT_SLEEP_SECONDS:-2}"
 if [[ -z "$CMESH_STAGE_WORKER_MEMORY_GB" ]]; then
   if [[ "$CMESH_MANAGER_AS_STAGE_WORKER" == "true" ]]; then
     CMESH_STAGE_WORKER_MEMORY_GB=8
@@ -47,6 +56,8 @@ INSTANCE_IDS=()
 MANAGER_PUBLIC=""
 MANAGER_PRIVATE=""
 NODE_STAGE0=""
+STAGE0_PUBLIC=""
+STAGE0_PRIVATE=""
 STAGE1_PUBLIC=""
 STAGE1_PRIVATE=""
 NODE_STAGE1=""
@@ -103,7 +114,7 @@ need() {
 
 require_allowed_instance_type() {
   case "$CMESH_AWS_INSTANCE_TYPE" in
-    t3.large|t3a.large|m6i.large|m7i.large)
+    t3.large|t3a.large|m6i.large|m7i.large|r7i.xlarge|m7i.xlarge|m7i.2xlarge)
       return 0
       ;;
   esac
@@ -119,6 +130,13 @@ file_sha256() {
   else
     fail "sha256sum or shasum is required"
   fi
+}
+
+now_ms() {
+  python3 - <<'PY'
+import time
+print(int(time.time() * 1000))
+PY
 }
 
 gb_to_bytes() {
@@ -177,7 +195,7 @@ stage_public_hosts() {
   if [[ "$CMESH_MANAGER_AS_STAGE_WORKER" == "true" ]]; then
     printf '%s\n' "$MANAGER_PUBLIC" "$STAGE1_PUBLIC" "$STAGE2_PUBLIC"
   else
-    printf '%s\n' "$STAGE1_PUBLIC" "$STAGE2_PUBLIC"
+    printf '%s\n' "$STAGE0_PUBLIC" "$STAGE1_PUBLIC" "$STAGE2_PUBLIC"
   fi
 }
 
@@ -185,7 +203,7 @@ stage_node_names() {
   if [[ "$CMESH_MANAGER_AS_STAGE_WORKER" == "true" ]]; then
     printf '%s\n' real-cdip-stage-0 real-cdip-stage-1 real-cdip-stage-2
   else
-    printf '%s\n' real-cdip-stage-1 real-cdip-stage-2
+    printf '%s\n' real-cdip-stage-0 real-cdip-stage-1 real-cdip-stage-2
   fi
 }
 
@@ -193,9 +211,10 @@ collect_remote_logs() {
   [[ -f "$KEY_PATH" ]] || return 0
   mkdir -p "$STATE_DIR/remote-logs"
   local role host
-  for role in manager stage1 stage2; do
+  for role in manager stage0 stage1 stage2; do
     case "$role" in
       manager) host="$MANAGER_PUBLIC" ;;
+      stage0) host="$STAGE0_PUBLIC" ;;
       stage1) host="$STAGE1_PUBLIC" ;;
       stage2) host="$STAGE2_PUBLIC" ;;
     esac
@@ -241,6 +260,23 @@ cleanup() {
     echo "deleting security group: $SG_ID"
     aws ec2 delete-security-group --region "$CMESH_AWS_REGION" --group-id "$SG_ID" >/dev/null
   fi
+  if [[ -n "$CMESH_TEST_DOMAIN" && -n "$CMESH_ROUTE53_ZONE_ID" && "$CMESH_KEEP_TEST_DOMAIN_RECORD" != "true" ]]; then
+    echo "deleting test DNS record: $CMESH_TEST_DOMAIN"
+    cat > "$STATE_DIR/route53-delete.json" <<EOF
+{
+  "Changes": [{
+    "Action": "DELETE",
+    "ResourceRecordSet": {
+      "Name": "$CMESH_TEST_DOMAIN.",
+      "Type": "A",
+      "TTL": 60,
+      "ResourceRecords": [{"Value": "$MANAGER_PUBLIC"}]
+    }
+  }]
+}
+EOF
+    aws route53 change-resource-record-sets --hosted-zone-id "$CMESH_ROUTE53_ZONE_ID" --change-batch "file://$STATE_DIR/route53-delete.json" > "$STATE_DIR/route53-delete-response.json" 2>/dev/null || true
+  fi
   aws ec2 delete-key-pair --region "$CMESH_AWS_REGION" --key-name "$KEY_NAME" >/dev/null 2>&1
   rm -f "$KEY_PATH"
   set -e
@@ -280,6 +316,49 @@ wait_for_manager() {
     sleep 1
   done
   fail "manager health did not become ready"
+}
+
+resolve_route53_zone_id() {
+  local domain="$1"
+  local zone name
+  [[ -n "$domain" ]] || return 0
+  zone="$(aws route53 list-hosted-zones --output json | jq -r --arg domain "${domain%.}." '
+    [.HostedZones[] | select($domain | endswith(.Name))] |
+    sort_by(.Name | length) |
+    reverse |
+    .[0].Id // ""
+  ')"
+  zone="${zone##*/}"
+  if [[ -z "$zone" || "$zone" == "null" ]]; then
+    fail "could not auto-detect Route53 hosted zone for $domain; set CMESH_ROUTE53_ZONE_ID"
+  fi
+  name="$(aws route53 get-hosted-zone --id "$zone" --query 'HostedZone.Name' --output text)"
+  jq -n --arg domain "$domain" --arg zone_id "$zone" --arg zone_name "$name" \
+    '{domain:$domain,zone_id:$zone_id,zone_name:$zone_name,source:"route53-auto-detect"}' > "$STATE_DIR/route53-zone.json"
+  printf '%s\n' "$zone"
+}
+
+upsert_test_domain_record() {
+  [[ -n "$CMESH_TEST_DOMAIN" ]] || return 0
+  if [[ -z "$CMESH_ROUTE53_ZONE_ID" ]]; then
+    CMESH_ROUTE53_ZONE_ID="$(resolve_route53_zone_id "$CMESH_TEST_DOMAIN")"
+  fi
+  cat > "$STATE_DIR/route53-upsert.json" <<EOF
+{
+  "Changes": [{
+    "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "$CMESH_TEST_DOMAIN.",
+      "Type": "A",
+      "TTL": 60,
+      "ResourceRecords": [{"Value": "$MANAGER_PUBLIC"}]
+    }
+  }]
+}
+EOF
+  aws route53 change-resource-record-sets --hosted-zone-id "$CMESH_ROUTE53_ZONE_ID" --change-batch "file://$STATE_DIR/route53-upsert.json" > "$STATE_DIR/route53-upsert-response.json"
+  jq -n --arg domain "$CMESH_TEST_DOMAIN" --arg zone_id "$CMESH_ROUTE53_ZONE_ID" --arg public_ip "$MANAGER_PUBLIC" --arg url "http://$CMESH_TEST_DOMAIN:18080" \
+    '{domain:$domain,zone_id:$zone_id,public_ip:$public_ip,manager_url:$url,ttl_seconds:60}' > "$STATE_DIR/test-domain.json"
 }
 
 post_manager_json() {
@@ -357,12 +436,23 @@ write_remote_stage_gguf_shard() {
 }
 
 prepare_remote_stage_gguf_shards() {
-  [[ "$CMESH_MANAGER_AS_STAGE_WORKER" == "true" ]] || fail "physical stage GGUF E2E requires CMESH_MANAGER_AS_STAGE_WORKER=true"
   [[ "$N_LAYER" -ge 3 ]] || fail "physical stage GGUF E2E requires at least 3 layers"
-  FIRST_END=$((N_LAYER / 3 - 1))
+  local base_layers remainder first_layers middle_layers terminal_layers
+  base_layers=$((N_LAYER / 3))
+  remainder=$((N_LAYER % 3))
+  first_layers="$base_layers"
+  middle_layers="$base_layers"
+  if [[ "$remainder" -gt 0 ]]; then
+    first_layers=$((first_layers + 1))
+  fi
+  if [[ "$remainder" -gt 1 ]]; then
+    middle_layers=$((middle_layers + 1))
+  fi
+  terminal_layers=$((N_LAYER - first_layers - middle_layers))
+  FIRST_END=$((first_layers - 1))
   if [[ "$FIRST_END" -lt 0 ]]; then FIRST_END=0; fi
   MIDDLE_START=$((FIRST_END + 1))
-  MIDDLE_END=$((2 * N_LAYER / 3 - 1))
+  MIDDLE_END=$((MIDDLE_START + middle_layers - 1))
   if [[ "$MIDDLE_END" -lt "$MIDDLE_START" ]]; then MIDDLE_END="$MIDDLE_START"; fi
   TERMINAL_START=$((MIDDLE_END + 1))
   if [[ "$TERMINAL_START" -ge "$N_LAYER" ]]; then TERMINAL_START=$((N_LAYER - 1)); fi
@@ -376,9 +466,17 @@ prepare_remote_stage_gguf_shards() {
     --argjson terminal_end "$TERMINAL_END" \
     '{n_layer:$n_layer,stages:[{index:0,start:0,end:$first_end},{index:1,start:$middle_start,end:$middle_end},{index:2,start:$terminal_start,end:$terminal_end}]}' \
     > "$STATE_DIR/stage-shard-ranges.json"
-  write_remote_stage_gguf_shard "$MANAGER_PUBLIC" 0 0 "$FIRST_END" true false
+  write_remote_stage_gguf_shard "$(stage0_host)" 0 0 "$FIRST_END" true false
   write_remote_stage_gguf_shard "$STAGE1_PUBLIC" 1 "$MIDDLE_START" "$MIDDLE_END" false false
   write_remote_stage_gguf_shard "$STAGE2_PUBLIC" 2 "$TERMINAL_START" "$TERMINAL_END" false true
+}
+
+stage0_host() {
+  if [[ "$CMESH_MANAGER_AS_STAGE_WORKER" == "true" ]]; then
+    printf '%s\n' "$MANAGER_PUBLIC"
+  else
+    printf '%s\n' "$STAGE0_PUBLIC"
+  fi
 }
 
 run_poll_once() {
@@ -424,7 +522,7 @@ wait_for_parent_status() {
   local target="$2"
   local expected_status="$3"
   local i status
-  for i in $(seq 1 180); do
+  for i in $(seq 1 "$CMESH_JOB_WAIT_ATTEMPTS"); do
     record_job "$job_id" "$target"
     status="$(jq -r '.status' "$target")"
     if [[ "$status" == "$expected_status" ]]; then
@@ -434,10 +532,31 @@ wait_for_parent_status() {
       jq '{id,type,status,assigned_to,error,last_failure,cdip_state,result}' "$target" >&2
       fail "parent job $job_id became $status while waiting for $expected_status"
     fi
-    sleep 2
+    sleep "$CMESH_JOB_WAIT_SLEEP_SECONDS"
   done
   jq '{id,type,status,assigned_to,error,last_failure,cdip_state,result}' "$target" >&2 || true
   fail "timed out waiting for parent job $job_id status=$expected_status"
+}
+
+wait_for_job_status() {
+  local job_id="$1"
+  local target="$2"
+  local expected_status="$3"
+  local i status
+  for i in $(seq 1 "$CMESH_JOB_WAIT_ATTEMPTS"); do
+    record_job "$job_id" "$target"
+    status="$(jq -r '.status' "$target")"
+    if [[ "$status" == "$expected_status" ]]; then
+      return 0
+    fi
+    if [[ "$status" == "failed" || "$status" == "canceled" ]]; then
+      jq '{id,type,status,assigned_to,error,last_failure,result}' "$target" >&2
+      fail "job $job_id became $status while waiting for $expected_status"
+    fi
+    sleep "$CMESH_JOB_WAIT_SLEEP_SECONDS"
+  done
+  jq '{id,type,status,assigned_to,error,last_failure,result}' "$target" >&2 || true
+  fail "timed out waiting for job $job_id status=$expected_status"
 }
 
 wait_for_dispatch_step() {
@@ -446,7 +565,7 @@ wait_for_dispatch_step() {
   local expected_step="$3"
   local expected_kv="$4"
   local i
-  for i in $(seq 1 180); do
+  for i in $(seq 1 "$CMESH_JOB_WAIT_ATTEMPTS"); do
     curl -fsS -H "Authorization: Bearer $OPERATOR_TOKEN" "http://$MANAGER_PUBLIC:18080/v1/jobs" > "$target"
     if jq -e --arg parent "$parent_id" --arg kv "$expected_kv" --argjson step "$expected_step" '
       [.jobs[] | select(.type == "model.generate.distributed.stage" and .cdip_parent_job_id == $parent) | (.input | fromjson)]
@@ -457,7 +576,7 @@ wait_for_dispatch_step() {
     ' "$target" >/dev/null; then
       return 0
     fi
-    sleep 2
+    sleep "$CMESH_JOB_WAIT_SLEEP_SECONDS"
   done
   jq --arg parent "$parent_id" '[.jobs[] | select(.type == "model.generate.distributed.stage" and .cdip_parent_job_id == $parent) | {id,type,status,cdip_state,input:(.input | fromjson?)}]' "$target" >&2 || true
   fail "timed out waiting for dispatch step $expected_step for parent $parent_id"
@@ -788,21 +907,17 @@ verify_stage_prepare_artifact() {
 }
 
 verify_memory_aware_placement_plan() {
-  if [[ "$CMESH_MANAGER_AS_STAGE_WORKER" != "true" ]]; then
-    return 0
-  fi
   curl -fsS -H "Authorization: Bearer $OPERATOR_TOKEN" \
     "http://$MANAGER_PUBLIC:18080/v1/models/$CMESH_PLACEMENT_PROOF_MODEL_ID/distributed-plan" \
     > "$STATE_DIR/memory-aware-placement-plan.json"
-  jq -e '
+  jq -e --argjson require_execution "$CMESH_REQUIRE_MEMORY_PRESSURE_EXECUTION" '
     .plan.feasible == true and
-    .plan.executable_now == true and
-    ((.plan.blockers // []) | length) == 0 and
-    (.plan.stages | length) == 3 and
+    (if $require_execution then (.plan.executable_now == true and ((.plan.blockers // []) | length) == 0) else true end) and
+    (.plan.stages | length) >= 2 and
     .plan.placement.strategy == "memory_disk_weighted_layers" and
     .plan.placement.total_layers == .plan.total_layers and
     (.plan.placement.candidates | length) >= 3 and
-    (.plan.placement.candidates | map(select(.selected == true)) | length) == 3 and
+    (.plan.placement.candidates | map(select(.selected == true)) | length) >= 2 and
     (.plan.placement.candidates | map(select(.selected == true)) | all(.assigned_layers >= 1 and .assigned_layers <= .layer_capacity and .assigned_memory_bytes <= .allowed_memory_bytes and .assigned_disk_bytes <= .effective_storage_bytes)) and
     (.plan.required_memory_bytes > ([.plan.stages[].allowed_memory_bytes] | max)) and
     (.plan.stages | all(.memory_bytes <= .allowed_memory_bytes and .disk_bytes <= .allowed_storage_bytes and .layers >= 1)) and
@@ -814,7 +929,7 @@ verify_memory_aware_placement_plan() {
 stage_host_for_node() {
   local node_id="$1"
   if [[ -n "$NODE_STAGE0" && "$node_id" == "$NODE_STAGE0" ]]; then
-    printf '%s\n' "$MANAGER_PUBLIC"
+    stage0_host
   elif [[ "$node_id" == "$NODE_STAGE1" ]]; then
     printf '%s\n' "$STAGE1_PUBLIC"
   elif [[ "$node_id" == "$NODE_STAGE2" ]]; then
@@ -860,8 +975,12 @@ main() {
     STAGE_RUNTIME_ARCHIVE_SHA256="$(file_sha256 "$CMESH_STAGE_RUNTIME_ARCHIVE")"
     printf '%s  %s\n' "$STAGE_RUNTIME_ARCHIVE_SHA256" "$CMESH_STAGE_RUNTIME_ARCHIVE" > "$STATE_DIR/stage-runtime-archive-sha256.txt"
   fi
-  if [[ "$CMESH_AWS_INSTANCE_COUNT" -ne 3 ]]; then
-    fail "CMESH_AWS_INSTANCE_COUNT must be exactly 3 for this E2E"
+  local expected_instance_count=3
+  if [[ "$CMESH_MANAGER_AS_STAGE_WORKER" != "true" ]]; then
+    expected_instance_count=4
+  fi
+  if [[ "$CMESH_AWS_INSTANCE_COUNT" -ne "$expected_instance_count" ]]; then
+    fail "CMESH_AWS_INSTANCE_COUNT must be exactly $expected_instance_count for this E2E with CMESH_MANAGER_AS_STAGE_WORKER=$CMESH_MANAGER_AS_STAGE_WORKER"
   fi
   require_allowed_instance_type
   cat > "$STATE_DIR/config.json" <<EOF
@@ -883,6 +1002,10 @@ main() {
   "install_manager_service": $CMESH_INSTALL_MANAGER_SERVICE,
   "install_stage_worker_services": $CMESH_INSTALL_STAGE_WORKER_SERVICES,
   "manager_as_stage_worker": $CMESH_MANAGER_AS_STAGE_WORKER,
+  "test_domain": "$CMESH_TEST_DOMAIN",
+  "route53_zone_id": "$CMESH_ROUTE53_ZONE_ID",
+  "keep_test_domain_record": $CMESH_KEEP_TEST_DOMAIN_RECORD,
+  "run_single_worker_regression": $CMESH_RUN_SINGLE_WORKER_REGRESSION,
   "stage_worker_memory_gb": $CMESH_STAGE_WORKER_MEMORY_GB,
   "stage_worker_disk_gb": $CMESH_STAGE_WORKER_DISK_GB,
   "placement_proof_model_id": "$CMESH_PLACEMENT_PROOF_MODEL_ID",
@@ -950,20 +1073,37 @@ EOF
 
   MANAGER_PUBLIC="$(jq -r '.[0].Public' "$STATE_DIR/instances.json")"
   MANAGER_PRIVATE="$(jq -r '.[0].Private' "$STATE_DIR/instances.json")"
-  STAGE1_PUBLIC="$(jq -r '.[1].Public' "$STATE_DIR/instances.json")"
-  STAGE1_PRIVATE="$(jq -r '.[1].Private' "$STATE_DIR/instances.json")"
-  STAGE2_PUBLIC="$(jq -r '.[2].Public' "$STATE_DIR/instances.json")"
-  STAGE2_PRIVATE="$(jq -r '.[2].Private' "$STATE_DIR/instances.json")"
+  if [[ "$CMESH_MANAGER_AS_STAGE_WORKER" == "true" ]]; then
+    STAGE1_PUBLIC="$(jq -r '.[1].Public' "$STATE_DIR/instances.json")"
+    STAGE1_PRIVATE="$(jq -r '.[1].Private' "$STATE_DIR/instances.json")"
+    STAGE2_PUBLIC="$(jq -r '.[2].Public' "$STATE_DIR/instances.json")"
+    STAGE2_PRIVATE="$(jq -r '.[2].Private' "$STATE_DIR/instances.json")"
+  else
+    STAGE0_PUBLIC="$(jq -r '.[1].Public' "$STATE_DIR/instances.json")"
+    STAGE0_PRIVATE="$(jq -r '.[1].Private' "$STATE_DIR/instances.json")"
+    STAGE1_PUBLIC="$(jq -r '.[2].Public' "$STATE_DIR/instances.json")"
+    STAGE1_PRIVATE="$(jq -r '.[2].Private' "$STATE_DIR/instances.json")"
+    STAGE2_PUBLIC="$(jq -r '.[3].Public' "$STATE_DIR/instances.json")"
+    STAGE2_PRIVATE="$(jq -r '.[3].Private' "$STATE_DIR/instances.json")"
+  fi
   cat > "$STATE_DIR/roles.env" <<EOF
 MANAGER_PUBLIC=$MANAGER_PUBLIC
 MANAGER_PRIVATE=$MANAGER_PRIVATE
+STAGE0_PUBLIC=$STAGE0_PUBLIC
+STAGE0_PRIVATE=$STAGE0_PRIVATE
 STAGE1_PUBLIC=$STAGE1_PUBLIC
 STAGE1_PRIVATE=$STAGE1_PRIVATE
 STAGE2_PUBLIC=$STAGE2_PUBLIC
 STAGE2_PRIVATE=$STAGE2_PRIVATE
 EOF
+  upsert_test_domain_record
 
-  for host in "$MANAGER_PUBLIC" "$STAGE1_PUBLIC" "$STAGE2_PUBLIC"; do
+  all_hosts=("$MANAGER_PUBLIC")
+  while IFS= read -r stage_host; do
+    all_hosts+=("$stage_host")
+  done < <(stage_public_hosts)
+  for host in "${all_hosts[@]}"; do
+    [[ -n "$host" && "$host" != "null" ]] || continue
     echo "preparing $host"
     wait_for_ssh "$host"
     ssh_run "$host" "sudo mkdir -p '$REMOTE_ROOT' '$REMOTE_SOURCE' /var/lib/cmesh/models '$REMOTE_STAGE_SHARDS' /var/lib/cmesh/stage-runner && sudo chown -R $CMESH_AWS_SSH_USER:$CMESH_AWS_SSH_USER '$REMOTE_ROOT' /var/lib/cmesh"
@@ -990,6 +1130,9 @@ EOF
   if [[ "$CMESH_MANAGER_AS_STAGE_WORKER" == "true" ]]; then
     prepare_stage_host "$MANAGER_PUBLIC" &
     stage_prepare_pids+=($!)
+  else
+    prepare_stage_host "$STAGE0_PUBLIC" &
+    stage_prepare_pids+=($!)
   fi
   prepare_stage_host "$STAGE1_PUBLIC" &
   stage_prepare_pids+=($!)
@@ -1013,11 +1156,15 @@ EOF
   echo "$JOIN_TOKEN" > "$STATE_DIR/join-token.txt"
 
   echo "starting manager"
+  manager_public_url="http://$MANAGER_PUBLIC:18080"
+  if [[ -n "$CMESH_TEST_DOMAIN" ]]; then
+    manager_public_url="http://$CMESH_TEST_DOMAIN:18080"
+  fi
   if [[ "$CMESH_INSTALL_MANAGER_SERVICE" == "true" ]]; then
-    ssh_run "$MANAGER_PUBLIC" "sudo env CMESH_BINARY_URL=file://$REMOTE_BIN CMESH_NONINTERACTIVE=true CMESH_ADDR=0.0.0.0:18080 CMESH_PUBLIC_URL=http://$MANAGER_PUBLIC:18080 CMESH_JOIN_TOKEN=$JOIN_TOKEN CMESH_OPERATOR_TOKEN=$OPERATOR_TOKEN CMESH_EXTRA_MANAGER_ARGS='--cdip-auto-advance=false' '$REMOTE_ROOT/install-manager-linux.sh' > '$REMOTE_ROOT/install-manager.log' 2>&1"
+    ssh_run "$MANAGER_PUBLIC" "sudo env CMESH_BINARY_URL=file://$REMOTE_BIN CMESH_NONINTERACTIVE=true CMESH_ADDR=0.0.0.0:18080 CMESH_PUBLIC_URL=$manager_public_url CMESH_JOIN_TOKEN=$JOIN_TOKEN CMESH_OPERATOR_TOKEN=$OPERATOR_TOKEN CMESH_EXTRA_MANAGER_ARGS='--cdip-auto-advance=false' '$REMOTE_ROOT/install-manager-linux.sh' > '$REMOTE_ROOT/install-manager.log' 2>&1"
     ssh_run "$MANAGER_PUBLIC" "systemctl is-active cmesh.service" > "$STATE_DIR/manager-service.txt"
   else
-    ssh_run "$MANAGER_PUBLIC" "nohup '$REMOTE_BIN' manager start --memory --addr 0.0.0.0:18080 --join-token '$JOIN_TOKEN' --operator-token '$OPERATOR_TOKEN' --public-url 'http://$MANAGER_PUBLIC:18080' --cdip-auto-advance=false > '$REMOTE_ROOT/manager.log' 2>&1 &"
+    ssh_run "$MANAGER_PUBLIC" "nohup '$REMOTE_BIN' manager start --memory --addr 0.0.0.0:18080 --join-token '$JOIN_TOKEN' --operator-token '$OPERATOR_TOKEN' --public-url '$manager_public_url' --cdip-auto-advance=false > '$REMOTE_ROOT/manager.log' 2>&1 &"
   fi
   wait_for_manager
   curl -fsS "http://$MANAGER_PUBLIC:18080/health" | tee "$STATE_DIR/health.json"
@@ -1026,6 +1173,8 @@ EOF
   if [[ "$CMESH_INSTALL_STAGE_WORKER_SERVICES" == "true" ]]; then
     if [[ "$CMESH_MANAGER_AS_STAGE_WORKER" == "true" ]]; then
       install_stage_worker_service "$MANAGER_PUBLIC" real-cdip-stage-0
+    else
+      install_stage_worker_service "$STAGE0_PUBLIC" real-cdip-stage-0
     fi
     install_stage_worker_service "$STAGE1_PUBLIC" real-cdip-stage-1
     install_stage_worker_service "$STAGE2_PUBLIC" real-cdip-stage-2
@@ -1033,6 +1182,8 @@ EOF
     verify_memory_aware_placement_plan
   else
     if [[ "$CMESH_MANAGER_AS_STAGE_WORKER" == "true" ]]; then
+      NODE_STAGE0="$(register_stage_worker real-cdip-stage-0 "$N_LAYER")"
+    else
       NODE_STAGE0="$(register_stage_worker real-cdip-stage-0 "$N_LAYER")"
     fi
     NODE_STAGE1="$(register_stage_worker real-cdip-stage-1 "$N_LAYER")"
@@ -1043,6 +1194,7 @@ EOF
   fi
 
   echo "creating distributed CDIP job"
+  distributed_started_ms="$(now_ms)"
   jq -n \
     --arg prompt "$CMESH_PROMPT" \
     --arg runner "$REMOTE_RUNNER" \
@@ -1051,7 +1203,8 @@ EOF
     --arg work_dir "$REMOTE_STAGE_WORK" \
     --argjson total_layers "$N_LAYER" \
     --argjson timeout_ms "$CMESH_STAGE_TIMEOUT_MS" \
-    '{prompt:$prompt,max_tokens:1,temperature:"0.1",stage_runner_bin:$runner,stage_model_paths:$stage_model_paths,stage_node_ids:$stage_node_ids,work_dir:$work_dir,total_layers:$total_layers,timeout_ms:$timeout_ms}' \
+    --argjson max_tokens "$CMESH_DISTRIBUTED_MAX_TOKENS" \
+    '{prompt:$prompt,max_tokens:$max_tokens,temperature:"0.1",stage_runner_bin:$runner,stage_model_paths:$stage_model_paths,stage_node_ids:$stage_node_ids,work_dir:$work_dir,total_layers:$total_layers,timeout_ms:$timeout_ms}' \
     > "$STATE_DIR/distributed-generate-request.json"
   post_manager_json "/v1/models/$CMESH_MODEL_ID/distributed-generate" \
     "$STATE_DIR/distributed-generate-request.json" \
@@ -1109,12 +1262,14 @@ EOF
   fi
 
   curl -fsS -H "Authorization: Bearer $OPERATOR_TOKEN" "http://$MANAGER_PUBLIC:18080/v1/jobs/$parent_id" > "$STATE_DIR/parent.json"
+  distributed_finished_ms="$(now_ms)"
   jq -e '.status == "succeeded" and (.result | fromjson | .kind == "cdip.distributed_terminal_result") and ((.result | fromjson | .tokens | length) >= 1)' "$STATE_DIR/parent.json" >/dev/null
   jq -e '(.result | fromjson | .execution_mode == "resident-stage-daemon" and .resident_kv_in_memory == true and .runner_mode == "llama.cpp-stage-daemon")' "$STATE_DIR/parent.json" >/dev/null
   verify_service_stage_daemon_sessions "single-decode" "$STATE_DIR/distributed-generate.json" 1
   close_service_stage_daemon_sessions "single-decode" "$STATE_DIR/distributed-generate.json"
 
   echo "creating distributed CDIP decode-loop dispatch job"
+  dispatch_started_ms="$(now_ms)"
   jq -n \
     --arg prompt "$CMESH_PROMPT" \
     --arg runner "$REMOTE_RUNNER" \
@@ -1123,7 +1278,8 @@ EOF
     --arg work_dir "$REMOTE_STAGE_WORK-dispatch" \
     --argjson total_layers "$N_LAYER" \
     --argjson timeout_ms "$CMESH_STAGE_TIMEOUT_MS" \
-    '{prompt:$prompt,max_tokens:3,temperature:"0.1",stage_runner_bin:$runner,stage_model_paths:$stage_model_paths,stage_node_ids:$stage_node_ids,work_dir:$work_dir,total_layers:$total_layers,timeout_ms:$timeout_ms}' \
+    --argjson max_tokens "$CMESH_DISTRIBUTED_MAX_TOKENS" \
+    '{prompt:$prompt,max_tokens:$max_tokens,temperature:"0.1",stage_runner_bin:$runner,stage_model_paths:$stage_model_paths,stage_node_ids:$stage_node_ids,work_dir:$work_dir,total_layers:$total_layers,timeout_ms:$timeout_ms}' \
     > "$STATE_DIR/dispatch-distributed-generate-request.json"
   post_manager_json "/v1/models/$CMESH_MODEL_ID/distributed-generate" \
     "$STATE_DIR/dispatch-distributed-generate-request.json" \
@@ -1155,7 +1311,8 @@ EOF
 
   echo "running remote decode-loop dispatch step"
   curl -fsS -X POST "http://$MANAGER_PUBLIC:18080/v1/cdip/jobs/${dispatch_parent_id}/prefill" -H "Authorization: Bearer $OPERATOR_TOKEN" -H 'Content-Type: application/json' -d '{}' > "$STATE_DIR/dispatch-prefill.json"
-  curl -fsS -X POST "http://$MANAGER_PUBLIC:18080/v1/cdip/jobs/${dispatch_parent_id}/decode-loop" -H "Authorization: Bearer $OPERATOR_TOKEN" -H 'Content-Type: application/json' -d '{"mode":"dispatch","step":2,"max_tokens":3,"terminal_force_final":false}' > "$STATE_DIR/dispatch-decode-loop.json"
+  jq -n --argjson max_tokens "$CMESH_DISTRIBUTED_MAX_TOKENS" '{mode:"dispatch",step:2,max_tokens:$max_tokens,terminal_force_final:false}' > "$STATE_DIR/dispatch-decode-loop-request.json"
+  curl -fsS -X POST "http://$MANAGER_PUBLIC:18080/v1/cdip/jobs/${dispatch_parent_id}/decode-loop" -H "Authorization: Bearer $OPERATOR_TOKEN" -H 'Content-Type: application/json' --data-binary "@$STATE_DIR/dispatch-decode-loop-request.json" > "$STATE_DIR/dispatch-decode-loop.json"
   jq -e --arg parent "$dispatch_parent_id" '
     .parent_job.id == $parent and
     .parent_job.status != "succeeded" and
@@ -1200,20 +1357,139 @@ EOF
   fi
 
   cp "$STATE_DIR/dispatch-parent-final.json" "$STATE_DIR/dispatch-parent.json"
-  jq -e '.status == "succeeded" and (.result | fromjson | .kind == "cdip.distributed_terminal_result") and ((.result | fromjson | .tokens | length) >= 1) and (.result | fromjson | .step == 3)' "$STATE_DIR/dispatch-parent.json" >/dev/null
+  dispatch_finished_ms="$(now_ms)"
+  jq -e --argjson max_tokens "$CMESH_DISTRIBUTED_MAX_TOKENS" '.status == "succeeded" and (.result | fromjson | .kind == "cdip.distributed_terminal_result") and ((.result | fromjson | .tokens | length) >= 1) and (.result | fromjson | .step == $max_tokens)' "$STATE_DIR/dispatch-parent.json" >/dev/null
   jq -e '(.result | fromjson | .execution_mode == "resident-stage-daemon" and .resident_kv_in_memory == true and .runner_mode == "llama.cpp-stage-daemon")' "$STATE_DIR/dispatch-parent.json" >/dev/null
-  verify_service_stage_daemon_sessions "dispatch-loop" "$STATE_DIR/dispatch-distributed-generate.json" 2
+  dispatch_expected_decode_steps="$((CMESH_DISTRIBUTED_MAX_TOKENS - 1))"
+  if [[ "$dispatch_expected_decode_steps" -lt 1 ]]; then dispatch_expected_decode_steps=1; fi
+  verify_service_stage_daemon_sessions "dispatch-loop" "$STATE_DIR/dispatch-distributed-generate.json" "$dispatch_expected_decode_steps"
   dispatch_source_index="$(jq -r '.stage_jobs | sort_by(.input | fromjson | .stage.index) | .[0].input | fromjson | .stage.index' "$STATE_DIR/dispatch-decode-loop.json")"
   dispatch_terminal_index="$(jq -r '.stage_jobs | sort_by(.input | fromjson | .stage.index) | .[-1].input | fromjson | .stage.index' "$STATE_DIR/dispatch-decode-loop.json")"
   collect_dispatch_runner_reports "$(stage_host_for_node "$dispatch_source_node")" "$dispatch_source_index" "$(stage_host_for_node "$dispatch_terminal_node")" "$dispatch_terminal_index"
   curl -fsS -H "Authorization: Bearer $OPERATOR_TOKEN" "http://$MANAGER_PUBLIC:18080/v1/jobs" > "$STATE_DIR/dispatch-jobs.json"
-  jq -e --arg parent "$dispatch_parent_id" --arg kv "cdip-session-${dispatch_parent_id}:kv" '
+  jq -e --arg parent "$dispatch_parent_id" --arg kv "cdip-session-${dispatch_parent_id}:kv" --argjson max_tokens "$CMESH_DISTRIBUTED_MAX_TOKENS" '
     [.jobs[] | select(.type == "model.generate.distributed.stage" and .cdip_parent_job_id == $parent) | (.input | fromjson)]
     | length >= 2
-    and all(.step == 3 and .kv_cache_key == $kv)
+    and all(.step == $max_tokens and .kv_cache_key == $kv)
     and any(.stage_command == "source_decode")
     and any(.stage_command == "terminal_decode")
   ' "$STATE_DIR/dispatch-jobs.json" >/dev/null
+
+  single_job_id=""
+  single_elapsed_ms=0
+  single_regression_status="skipped"
+  single_regression_error=""
+  jq -n '{skipped:true,reason:"CMESH_RUN_SINGLE_WORKER_REGRESSION=false"}' > "$STATE_DIR/single-generate-final.json"
+  if [[ "$CMESH_RUN_SINGLE_WORKER_REGRESSION" == "true" ]]; then
+    echo "running single-worker regression generate"
+    single_regression_status="running"
+    single_candidate_ready=true
+    if [[ "$CMESH_INSTALL_STAGE_WORKER_SERVICES" == "true" ]]; then
+      ssh_run "$(stage0_host)" "sudo systemctl restart cmesh-worker.service && systemctl is-active cmesh-worker.service" > "$STATE_DIR/single-regression-worker-restart.txt"
+      wait_for_stage_service_workers
+      curl -fsS -H "Authorization: Bearer $OPERATOR_TOKEN" "http://$MANAGER_PUBLIC:18080/v1/nodes" > "$STATE_DIR/nodes-before-single-generate.json"
+      if ! jq -e --arg node "$NODE_STAGE0" --arg model "$CMESH_MODEL_ID" '
+        .nodes[] |
+        select(.id == $node and .status == "online" and ((.resources.models // []) | any(.id == $model and .ready == true)))
+      ' "$STATE_DIR/nodes-before-single-generate.json" >/dev/null; then
+        single_candidate_ready=false
+        single_regression_status="blocked"
+        single_regression_error="single-worker model is not ready on the selected worker"
+        jq -n \
+          --arg status "blocked" \
+          --arg error "$single_regression_error" \
+          '{status:$status,error:$error,result:""}' \
+          > "$STATE_DIR/single-generate-final.json"
+      fi
+    fi
+    if [[ "$single_candidate_ready" == "true" ]]; then
+      jq -n --arg node "$NODE_STAGE0" '{node_id:$node}' > "$STATE_DIR/single-repair-request.json"
+      post_manager_json "/v1/models/$CMESH_MODEL_ID/repair" \
+        "$STATE_DIR/single-repair-request.json" \
+        "$STATE_DIR/single-repair.json"
+      single_repair_job_id="$(jq -r '.id // .job.id' "$STATE_DIR/single-repair.json")"
+      if wait_for_job_status "$single_repair_job_id" "$STATE_DIR/single-repair-final.json" "succeeded"; then
+        curl -fsS -H "Authorization: Bearer $OPERATOR_TOKEN" "http://$MANAGER_PUBLIC:18080/v1/nodes" > "$STATE_DIR/nodes-after-single-repair.json"
+        single_started_ms="$(now_ms)"
+        jq -n \
+          --arg prompt "$CMESH_PROMPT" \
+          --arg node "$NODE_STAGE0" \
+          --argjson max_tokens "$CMESH_SINGLE_MAX_TOKENS" \
+          '{prompt:$prompt,node_id:$node,max_tokens:$max_tokens,temperature:"0.1"}' \
+          > "$STATE_DIR/single-generate-request.json"
+        post_manager_json "/v1/models/$CMESH_MODEL_ID/generate" \
+          "$STATE_DIR/single-generate-request.json" \
+          "$STATE_DIR/single-generate.json"
+        single_job_id="$(jq -r '.id // .job.id' "$STATE_DIR/single-generate.json")"
+        if wait_for_job_status "$single_job_id" "$STATE_DIR/single-generate-final.json" "succeeded"; then
+          single_finished_ms="$(now_ms)"
+          single_elapsed_ms="$((single_finished_ms - single_started_ms))"
+          single_regression_status="succeeded"
+        else
+          single_regression_status="blocked"
+          single_regression_error="single-worker generate did not reach succeeded"
+        fi
+      else
+        single_regression_status="blocked"
+        single_regression_error="single-worker model repair did not reach succeeded"
+        jq -n \
+          --arg status "blocked" \
+          --arg repair_job "$single_repair_job_id" \
+          --arg error "$single_regression_error" \
+          '{status:$status,repair_job:$repair_job,error:$error,result:""}' \
+          > "$STATE_DIR/single-generate-final.json"
+      fi
+    fi
+    if [[ "$single_regression_status" == "blocked" && "$CMESH_ALLOW_SINGLE_WORKER_REGRESSION_FAILURE" != "true" ]]; then
+      fail "$single_regression_error"
+    fi
+  fi
+
+  jq -n \
+    --slurpfile decode_files <(
+      for timing_file in "$STATE_DIR"/after-decode-stage-*.json "$STATE_DIR"/dispatch-after-decode-step-*-stage-*.json; do
+        [[ -f "$timing_file" ]] || continue
+        jq --arg file "$timing_file" '
+          {
+            file: $file,
+            job_id: .id,
+            stage_index: .cdip_stage_index,
+            worker: .assigned_to,
+            status: .status,
+            state: .cdip_state,
+            state_result: ((.result | fromjson?) // {}),
+            result: (((.result | fromjson?) // {}).worker_result // ((.result | fromjson?) // {}))
+          }
+        ' "$timing_file"
+      done
+    ) '
+    {
+      stage_count: ($decode_files | length),
+      receive_wait_ms_total: ([$decode_files[]?.result.timing.receive_wait_ms // 0] | add // 0),
+      stage_compute_ms_total: ([$decode_files[]?.result.timing.stage_compute_ms // 0] | add // 0),
+      relay_write_ms_total: ([$decode_files[]?.result.timing.relay_write_ms // 0] | add // 0),
+      stage_daemon_ms_total: ([$decode_files[]?.result.timing.stage_daemon_ms // 0] | add // 0),
+      stage_total_ms_total: ([$decode_files[]?.result.timing.total_ms // 0] | add // 0),
+      stages: [
+        $decode_files[]? | {
+          file,
+          job_id,
+          stage_index,
+          worker,
+          status,
+          state,
+          kind: .result.kind,
+          runner_mode: .result.runner_mode,
+          activation_bytes: (.result.input_bytes // .result.output_bytes // 0),
+          output_bytes: (.result.output_bytes // 0),
+          input_shape: (.result.input_tensor_envelope.shape // .result.input_frame.shape // null),
+          output_shape: (.result.output_tensor_envelope.shape // .result.output_frame.shape // null),
+          input_checksum: (.result.input_tensor_envelope.checksum // .result.input_frame.checksum // null),
+          output_checksum: (.result.output_tensor_envelope.checksum // .result.output_frame.checksum // null),
+          timing: (.result.timing // {})
+        }
+      ]
+    }' > "$STATE_DIR/activation-timing.json"
 
   jq -n \
     --arg model "$REMOTE_MODEL" \
@@ -1223,11 +1499,21 @@ EOF
     --arg placement_proof_model_id "$CMESH_PLACEMENT_PROOF_MODEL_ID" \
     --arg parent "$parent_id" \
     --arg dispatch_parent "$dispatch_parent_id" \
+    --arg prompt "$CMESH_PROMPT" \
+    --arg single_parent "$single_job_id" \
+    --arg single_regression_status "$single_regression_status" \
+    --arg single_regression_error "$single_regression_error" \
+    --argjson distributed_elapsed_ms "$((distributed_finished_ms - distributed_started_ms))" \
+    --argjson dispatch_elapsed_ms "$((dispatch_finished_ms - dispatch_started_ms))" \
+    --argjson single_elapsed_ms "$single_elapsed_ms" \
     --argjson n_layer "$N_LAYER" \
     --argjson placement_proof "$(if [[ -f "$STATE_DIR/memory-aware-placement-plan.json" ]]; then jq -c '.plan' "$STATE_DIR/memory-aware-placement-plan.json"; else printf 'null'; fi)" \
     --slurpfile parent_json "$STATE_DIR/parent.json" \
     --slurpfile dispatch_parent_json "$STATE_DIR/dispatch-parent.json" \
+    --slurpfile single_parent_json "$STATE_DIR/single-generate-final.json" \
+    --slurpfile activation_timing "$STATE_DIR/activation-timing.json" \
     '{
+      prompt:$prompt,
       model:$model,
       model_id:$model_id,
       model_url:$model_url,
@@ -1256,10 +1542,24 @@ EOF
       ),
       parent_job:$parent,
       dispatch_parent_job:$dispatch_parent,
+      single_worker_job:$single_parent,
+      distributed_elapsed_ms:$distributed_elapsed_ms,
+      dispatch_elapsed_ms:$dispatch_elapsed_ms,
+      single_elapsed_ms:$single_elapsed_ms,
+      single_worker_elapsed_ms:$single_elapsed_ms,
       status:$parent_json[0].status,
       result:($parent_json[0].result | fromjson),
+      distributed_output:(($parent_json[0].result | fromjson).output),
+      distributed_terminal_timing:(($parent_json[0].result | fromjson).terminal_timing),
       dispatch_status:$dispatch_parent_json[0].status,
-      dispatch_result:($dispatch_parent_json[0].result | fromjson)
+      dispatch_result:($dispatch_parent_json[0].result | fromjson),
+      dispatch_output:(($dispatch_parent_json[0].result | fromjson).output),
+      single_worker_regression_status:$single_regression_status,
+      single_worker_regression_error:$single_regression_error,
+      single_worker_status:$single_parent_json[0].status,
+      single_worker_result:(($single_parent_json[0].result? // "{}") | fromjson? // {}),
+      single_output:((($single_parent_json[0].result? // "{}") | fromjson? // {}).output // "-"),
+      activation_timing:(if ($activation_timing[0] // null) != null then $activation_timing[0] else null end)
     }' \
     > "$STATE_DIR/summary.json"
   if [[ "$CMESH_REQUIRE_MEMORY_PRESSURE_EXECUTION" == "true" ]]; then

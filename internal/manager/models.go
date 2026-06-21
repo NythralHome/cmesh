@@ -350,7 +350,7 @@ func modelPlacementPlan(summary ModelSummary) ModelPlacementPlan {
 		plan.Feasible = true
 		plan.RunnableNow = false
 		plan.Warnings = append(plan.Warnings,
-			"multi-worker layer sharding is a placement estimate; distributed execution is not implemented yet",
+			"multi-worker layer sharding is available when selected workers report ready CDIP stage runtimes",
 			"real latency will depend on network bandwidth, activation transfer size, and runtime support",
 		)
 		plan.Shards = buildModelPlanShards(summary.Model, selected)

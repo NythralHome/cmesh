@@ -506,6 +506,111 @@ esac
 	}
 }
 
+func TestLlamaCPPResidentBackendDoesNotFallbackToBlockedResidentDecode(t *testing.T) {
+	workDir := t.TempDir()
+	runner := filepath.Join(workDir, "cmesh-stage-runner")
+	if err := os.WriteFile(runner, []byte(`#!/bin/sh
+set -eu
+command=""
+stage_index=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --command) shift; command="$1" ;;
+    --stage-index) shift; stage_index="$1" ;;
+  esac
+  shift
+done
+case "$command" in
+  prepare)
+    printf '{"kind":"cmesh.llamacpp_stage_prepare","status":"metadata_ready","stage_index":%s}\n' "$stage_index"
+    ;;
+  resident-capabilities)
+    printf '{"kind":"cmesh.llamacpp_resident_capabilities","protocol":"cdip.llamacpp-resident-runner-v1","ready":true,"native_kv":true,"persistent_model":true,"persistent_kv_in_memory":true,"prepare_hook":true,"decode_hook":true}\n'
+    ;;
+  resident-loop)
+    sessions=0
+    while IFS= read -r line; do
+      case "$line" in
+        command=capabilities)
+          printf '{"kind":"cmesh.llamacpp_resident_loop_capabilities","protocol":"cdip.llamacpp-resident-loop-v1","runner_protocol":"cdip.llamacpp-resident-runner-v1","ready":true,"persistent_process":true,"native_kv":true,"persistent_model":true,"persistent_kv_in_memory":true,"prepare_hook":true,"decode_hook":true,"session_count":%s}\n' "$sessions"
+          ;;
+        command=prepare*)
+          sessions=1
+          printf '{"kind":"cmesh.llamacpp_resident_loop_prepare","protocol":"cdip.llamacpp-resident-loop-v1","status":"resident_ready","session_registered":true,"session_id":"stage-0-test","persistent_model":true,"persistent_kv_in_memory":true}\n'
+          ;;
+        command=decode*)
+          printf '{"kind":"cmesh.llamacpp_resident_loop_decode","protocol":"cdip.llamacpp-resident-loop-v1","status":"llama_decode_failed","session_id":"stage-0-test","session_found":true,"decode_steps":1,"persistent_model":true,"persistent_kv_in_memory":true,"decode_status":1,"error":"context too small"}\n'
+          ;;
+        command=shutdown)
+          printf '{"kind":"cmesh.llamacpp_resident_loop_shutdown","protocol":"cdip.llamacpp-resident-loop-v1","status":"closing","session_count":%s}\n' "$sessions"
+          exit 0
+          ;;
+      esac
+    done
+    ;;
+  resident-decode)
+    echo "resident-decode fallback must not be called" >&2
+    exit 9
+    ;;
+  *)
+    echo "unsupported command $command" >&2
+    exit 2
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	modelPath := filepath.Join(workDir, "model.gguf")
+	if err := os.WriteFile(modelPath, []byte("fake model"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := llamaCPPResidentStageBackend{runnerBin: runner}
+	session, err := backend.Prepare(context.Background(), runtimes.StageSession{
+		Protocol:   runtimes.StageSessionV1,
+		Mode:       runtimes.StageSessionModeDaemon,
+		SessionID:  "stage-0-test",
+		ModelID:    "qwen2.5-0.5b-instruct-q4-k-m",
+		ModelPath:  modelPath,
+		StageIndex: 0,
+		LayerStart: 0,
+		LayerEnd:   7,
+		Endpoint:   "http://127.0.0.1:19781",
+	}, stageDaemonSessionRequest{
+		ModelPath:  modelPath,
+		StageIndex: 0,
+		LayerStart: 0,
+		LayerEnd:   7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close(context.Background(), session)
+
+	_, err = backend.Decode(context.Background(), session, stageDaemonDecodeRequest{Step: 1, StageCommand: "source_decode"})
+	if err == nil {
+		t.Fatal("expected resident-loop decode error")
+	}
+	if !strings.Contains(err.Error(), "context too small") || strings.Contains(err.Error(), "resident-decode fallback") {
+		t.Fatalf("expected original resident-loop error without fallback, got %v", err)
+	}
+}
+
+func TestResidentLoopPrepareContextSizeDefaultFitsNormalPrompts(t *testing.T) {
+	t.Setenv("CMESH_RESIDENT_STAGE_CTX", "")
+	if got := residentLoopPrepareContextSize(); got != 2048 {
+		t.Fatalf("expected default resident stage ctx 2048, got %d", got)
+	}
+	t.Setenv("CMESH_RESIDENT_STAGE_CTX", "4096")
+	if got := residentLoopPrepareContextSize(); got != 4096 {
+		t.Fatalf("expected env resident stage ctx 4096, got %d", got)
+	}
+	t.Setenv("CMESH_RESIDENT_STAGE_CTX", "bad")
+	if got := residentLoopPrepareContextSize(); got != 2048 {
+		t.Fatalf("expected invalid env to fall back to 2048, got %d", got)
+	}
+}
+
 func TestLlamaCPPResidentBackendUsesResidentLoopWhenAvailable(t *testing.T) {
 	workDir := t.TempDir()
 	runner := filepath.Join(workDir, "cmesh-stage-runner")

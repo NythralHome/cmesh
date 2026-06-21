@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -26,6 +27,35 @@ import (
 	"github.com/cmesh/cmesh/internal/transport"
 	"github.com/cmesh/cmesh/internal/workerstatus"
 )
+
+type panicStageSessionBackend struct{}
+
+func (panicStageSessionBackend) Kind() string {
+	return "panic-test"
+}
+
+func (panicStageSessionBackend) NativeKV() bool {
+	return true
+}
+
+func (panicStageSessionBackend) Status() stageDaemonBackendStatus {
+	return stageDaemonBackendStatus{Kind: "panic-test", Ready: true, DecodeReady: true}
+}
+
+func (panicStageSessionBackend) Prepare(_ context.Context, session runtimes.StageSession, _ stageDaemonSessionRequest) (runtimes.StageSession, error) {
+	session.RuntimeBackend = "panic-test"
+	session.RuntimeStatus = "ready"
+	session.Ready = true
+	return session, nil
+}
+
+func (panicStageSessionBackend) Decode(context.Context, runtimes.StageSession, stageDaemonDecodeRequest) (stageDaemonBackendDecodeResult, error) {
+	panic("decode exploded")
+}
+
+func (panicStageSessionBackend) Close(context.Context, runtimes.StageSession) error {
+	return nil
+}
 
 func TestDistributedGenerateJobTypeIsKnownButNotExecutableYet(t *testing.T) {
 	if !isModelJobType(models.JobGenerateDistributed) {
@@ -1144,6 +1174,116 @@ JSON
 	}
 }
 
+func TestExecuteDistributedStageTerminalDecodeJobUsesPreviousOutputWithStageDaemon(t *testing.T) {
+	workDir := t.TempDir()
+	payload := []byte{0, 0, 0, 0}
+	sum := sha256.Sum256(payload)
+	checksum := "sha256:" + hex.EncodeToString(sum[:])
+	managerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", r.Method)
+		}
+		frame := transport.ActivationFrame{
+			Header: cdip.ActivationChunk{
+				Envelope:     cdip.NewEnvelope(cdip.MessageActivationChunk),
+				ParentJobID:  "job-parent",
+				StageJobID:   "job-stage-1",
+				Sequence:     3,
+				ContentType:  "application/vnd.cmesh.activation+binary",
+				Encoding:     "raw",
+				Shape:        []int{1, 1, 1},
+				DType:        "f32",
+				PayloadBytes: uint64(len(payload)),
+				Checksum:     checksum,
+			},
+			Payload: payload,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(frame); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer managerServer.Close()
+
+	daemonServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		var req stageDaemonDecodeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.PreviousTokenText != "C" {
+			t.Fatalf("expected previous output feedback, got %#v", req)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kind":                    "cmesh.stage_daemon_decode",
+			"session_id":              "stage-2-test",
+			"ready":                   true,
+			"persistent_model":        true,
+			"persistent_kv_in_memory": true,
+			"next_token_id":           14194,
+			"next_token_text":         "Mesh",
+			"final":                   true,
+		})
+	}))
+	defer daemonServer.Close()
+
+	input, err := json.Marshal(models.DistributedStageJobInput{
+		ParentJobID:       "job-parent",
+		StageJobID:        "job-stage-2",
+		StageCommand:      "terminal_decode",
+		ModelID:           "qwen2.5-3b-instruct-q4-k-m",
+		UpstreamStageID:   "job-stage-1",
+		StageDaemonURL:    daemonServer.URL,
+		StageSessionID:    "stage-2-test",
+		PreviousTokenText: " C",
+		ModelPath:         filepath.Join(workDir, "stage-2.gguf"),
+		WorkDir:           filepath.Join(workDir, "stage-work"),
+		Stage: models.DistributedStageInput{
+			Index:      2,
+			NodeID:     "node-c",
+			LayerStart: 24,
+			LayerEnd:   35,
+			Layers:     12,
+		},
+		Shard: cdip.ModelShard{
+			Stage:           cdip.Stage{Index: 2, NodeID: "node-c", LayerStart: 24, LayerEnd: 35},
+			Runtime:         string(models.RuntimeLlamaCPP),
+			Materialization: cdip.ShardLogicalLayers,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultBody, err := executeWorkerJob(jobs.Job{
+		ID:    "job-stage-2",
+		Type:  models.JobGenerateStage,
+		Input: string(input),
+	}, cluster.ResourceSnapshot{
+		Models: []cluster.ModelResource{{
+			ID:      "qwen2.5-3b-instruct-q4-k-m",
+			Runtime: string(models.RuntimeLlamaCPP),
+			Path:    filepath.Join(workDir, "stage-2.gguf"),
+			Ready:   true,
+		}},
+		Runtimes: []cluster.RuntimeResource{{
+			Name:  string(models.RuntimeLlamaCPP),
+			Ready: true,
+		}},
+	}, workDir, "node-c", time.Now().UTC(), managerServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result stageRunnerTerminalDecodeResult
+	if err := json.Unmarshal([]byte(resultBody), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Kind != "cdip.stage_terminal_decode" || result.NextTokenText != "Mesh" || result.Output != " CMesh" {
+		t.Fatalf("expected cumulative terminal output, got %#v", result)
+	}
+}
+
 func TestStageRunnerJSONReportIgnoresRuntimeLogs(t *testing.T) {
 	noisy := []byte(`ggml_metal_device_init: GPU name: MTL0
 llama_model_loader: tokenizer.chat_template str = {%- if tools %}
@@ -1767,8 +1907,47 @@ how are you?
 	if strings.Contains(got, "<|im_") || strings.Contains(got, "</|im_") {
 		t.Fatalf("expected chat template tokens to be removed, got %q", got)
 	}
-	if !strings.Contains(got, "how are you?") {
+	if strings.Contains(got, "how are you?") {
+		t.Fatalf("expected echoed prompt to be removed, got %q", got)
+	}
+	if !strings.Contains(got, "help") {
 		t.Fatalf("expected remaining text, got %q", got)
+	}
+}
+
+func TestCleanLlamaOutputRemovesFullQwenPromptEcho(t *testing.T) {
+	model, err := models.MustFind("qwen2.5-1.5b-instruct-q4-k-m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := modelPrompt(model, models.GenerateInput{
+		Prompt:       "Що тестує CMesh?",
+		SystemPrompt: "Answer in Ukrainian.",
+	})
+	output := prompt + "CMesh тестує локальну і розподілену генерацію Qwen."
+
+	got := cleanLlamaOutput(output, prompt)
+	want := "CMesh тестує локальну і розподілену генерацію Qwen."
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestCleanLlamaOutputRemovesDisplayedQwenPromptEcho(t *testing.T) {
+	model, err := models.MustFind("qwen2.5-3b-instruct-q4-k-m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := models.GenerateInput{
+		Prompt: "You are running inside CMesh. Answer in one concise Ukrainian sentence: what is CMesh testing right now?",
+	}
+	prompt := modelPrompt(model, req)
+	output := modelSystemPrompt(model) + "\n" + req.Prompt + "\nassist ... (truncated)\n\nCMesh тестує розподілений запуск Qwen.\n"
+
+	got := cleanLlamaOutput(output, prompt)
+	want := "CMesh тестує розподілений запуск Qwen."
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
 
@@ -2026,6 +2205,106 @@ func TestStageRunnerDaemonRejectsInvalidActivationPayloadChecksum(t *testing.T) 
 	handler.ServeHTTP(decodeRec, httptest.NewRequest(http.MethodPost, "/v1/sessions/"+created.SessionID+"/decode", strings.NewReader(string(decodeBody))))
 	if decodeRec.Code != http.StatusBadRequest || !strings.Contains(decodeRec.Body.String(), "checksum mismatch") {
 		t.Fatalf("expected payload checksum rejection, got %d: %s", decodeRec.Code, decodeRec.Body.String())
+	}
+}
+
+func TestPostStageDaemonDecodeReportsEmptySuccessBody(t *testing.T) {
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer daemon.Close()
+
+	_, err := postStageDaemonDecodeWithPayload(
+		context.Background(),
+		daemon.URL,
+		"stage-0-empty-body",
+		7,
+		"source_decode",
+		nil,
+		nil,
+		"",
+		nil,
+		"",
+		0,
+	)
+	if err == nil {
+		t.Fatal("expected empty stage daemon response error")
+	}
+	got := err.Error()
+	for _, want := range []string{"empty response body", "stage-0-empty-body", "source_decode", "step=7"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in error %q", want, got)
+		}
+	}
+}
+
+func TestPostStageDaemonDecodeAcceptsLargeActivationResponse(t *testing.T) {
+	largePayload := strings.Repeat("a", (2<<20)+128)
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeStageDaemonJSON(w, http.StatusOK, map[string]any{
+			"kind":                  "cmesh.stage_daemon_decode",
+			"session_id":            "stage-0-large-body",
+			"output_payload_base64": largePayload,
+			"output_bytes":          len(largePayload),
+			"ready":                 true,
+		})
+	}))
+	defer daemon.Close()
+
+	decoded, err := postStageDaemonDecodeWithPayload(
+		context.Background(),
+		daemon.URL,
+		"stage-0-large-body",
+		1,
+		"source_decode",
+		nil,
+		nil,
+		"",
+		nil,
+		"",
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded["output_payload_base64"] != largePayload {
+		t.Fatalf("large response payload was not preserved")
+	}
+}
+
+func TestStageDaemonDecodePanicReturnsJSONError(t *testing.T) {
+	handler := newStageRunnerDaemonHandlerWithBackend(t.TempDir(), panicStageSessionBackend{})
+
+	createRec := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/sessions", strings.NewReader(`{
+		"parent_job_id":"job-parent",
+		"stage_job_id":"job-stage-0",
+		"model_id":"qwen2.5-32b-instruct-q4-k-m",
+		"stage_index":0,
+		"layer_start":0,
+		"layer_end":21
+	}`))
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected session create 201, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created runtimes.StageSession
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	decodeRec := httptest.NewRecorder()
+	decodeReq := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+created.SessionID+"/decode", strings.NewReader(`{"step":1,"stage_command":"source_decode"}`))
+	handler.ServeHTTP(decodeRec, decodeReq)
+	if decodeRec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected panic to become 500, got %d: %s", decodeRec.Code, decodeRec.Body.String())
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(decodeRec.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("expected JSON panic error, got %q: %v", decodeRec.Body.String(), err)
+	}
+	if decoded["kind"] != "cmesh.stage_daemon_error" || !strings.Contains(fmt.Sprint(decoded["error"]), "decode exploded") {
+		t.Fatalf("unexpected panic response: %#v", decoded)
 	}
 }
 

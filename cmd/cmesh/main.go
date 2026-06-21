@@ -63,6 +63,8 @@ func run(args []string) error {
 		return runManager(args[1:])
 	case "worker":
 		return runWorker(args[1:])
+	case "model":
+		return runModel(args[1:])
 	case "job":
 		return runJob(args[1:])
 	case "stage-runner":
@@ -75,6 +77,62 @@ func run(args []string) error {
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 
+	return nil
+}
+
+func runModel(args []string) error {
+	if len(args) == 0 {
+		printModelUsage()
+		return nil
+	}
+	switch args[0] {
+	case "catalog":
+		fs := flag.NewFlagSet("model catalog", flag.ContinueOnError)
+		family := fs.String("family", "", "filter by model family")
+		jsonOut := fs.Bool("json", false, "print JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		catalog := models.Catalog()
+		filtered := make([]models.Model, 0, len(catalog))
+		for _, model := range catalog {
+			if strings.TrimSpace(*family) != "" && !strings.EqualFold(model.Family, strings.TrimSpace(*family)) {
+				continue
+			}
+			filtered = append(filtered, model)
+		}
+		if *jsonOut {
+			encoder := json.NewEncoder(os.Stdout)
+			encoder.SetIndent("", "  ")
+			return encoder.Encode(filtered)
+		}
+		for _, model := range filtered {
+			adapter := model.Adapter
+			if adapter == "" {
+				adapter = "-"
+			}
+			fmt.Printf("%s\t%s\t%s\t%s\t%s\n", model.ID, model.Name, model.Parameters, model.Quant, adapter)
+		}
+	case "adapters":
+		fs := flag.NewFlagSet("model adapters", flag.ContinueOnError)
+		jsonOut := fs.Bool("json", false, "print JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		adapters := models.AdapterSpecs()
+		if *jsonOut {
+			encoder := json.NewEncoder(os.Stdout)
+			encoder.SetIndent("", "  ")
+			return encoder.Encode(adapters)
+		}
+		for _, adapter := range adapters {
+			fmt.Printf("%s\t%s\t%s\n", adapter.ID, adapter.Family, adapter.PromptTemplate)
+		}
+	case "help", "--help", "-h":
+		printModelUsage()
+	default:
+		return fmt.Errorf("unknown model command %q", args[0])
+	}
 	return nil
 }
 
@@ -306,6 +364,8 @@ Usage:
   cmesh worker run          Join and keep a worker heartbeat running
   cmesh worker benchmark    Run worker benchmarks
   cmesh worker control      Start local worker control API
+  cmesh model catalog       Print model catalog metadata
+  cmesh model adapters      Print model adapter metadata
   cmesh job submit          Submit a job
   cmesh job list            List jobs
   cmesh stage-runner        Validate CDIP stage runtime adapter contracts
@@ -327,6 +387,12 @@ func printWorkerUsage() {
   cmesh worker run          Join and keep sending heartbeats
   cmesh worker benchmark    Run CPU, memory, disk, network, and AI benchmarks
   cmesh worker control      Start local worker control API for desktop apps`)
+}
+
+func printModelUsage() {
+	fmt.Println(`Usage:
+  cmesh model catalog [--family qwen] [--json]   Print model catalog metadata
+  cmesh model adapters [--json]                  Print model adapter metadata`)
 }
 
 func printStageRunnerUsage() {
@@ -1026,6 +1092,7 @@ type stageRunnerRelayDecodeResult struct {
 	OutputBytes       int                        `json:"output_bytes"`
 	WorkDir           string                     `json:"work_dir,omitempty"`
 	StageDaemonDecode map[string]any             `json:"stage_daemon_decode,omitempty"`
+	Timing            stageRunnerTiming          `json:"timing"`
 	Executable        bool                       `json:"executable"`
 }
 
@@ -1047,6 +1114,7 @@ type stageRunnerSourceDecodeResult struct {
 	OutputBytes       int                        `json:"output_bytes"`
 	WorkDir           string                     `json:"work_dir,omitempty"`
 	StageDaemonDecode map[string]any             `json:"stage_daemon_decode,omitempty"`
+	Timing            stageRunnerTiming          `json:"timing"`
 	Executable        bool                       `json:"executable"`
 	PreviousTokenID   *int                       `json:"previous_token_id,omitempty"`
 	PreviousTokenText string                     `json:"previous_token_text,omitempty"`
@@ -1074,7 +1142,16 @@ type stageRunnerTerminalDecodeResult struct {
 	Final             bool                         `json:"final"`
 	WorkDir           string                       `json:"work_dir,omitempty"`
 	StageDaemonDecode map[string]any               `json:"stage_daemon_decode,omitempty"`
+	Timing            stageRunnerTiming            `json:"timing"`
 	Executable        bool                         `json:"executable"`
+}
+
+type stageRunnerTiming struct {
+	ReceiveWaitMS  int64 `json:"receive_wait_ms,omitempty"`
+	StageComputeMS int64 `json:"stage_compute_ms,omitempty"`
+	RelayWriteMS   int64 `json:"relay_write_ms,omitempty"`
+	StageDaemonMS  int64 `json:"stage_daemon_ms,omitempty"`
+	TotalMS        int64 `json:"total_ms,omitempty"`
 }
 
 type llamaCPPStageDecodeReport struct {
@@ -1394,6 +1471,7 @@ func executeStageRunnerRelayDecode(options stageRunnerRelayDecodeOptions) (strin
 	if timeout <= 0 {
 		timeout = time.Second
 	}
+	totalStarted := time.Now()
 	activationTransport := transport.NewHTTPActivationTransport(managerURL, options.OperatorToken).
 		WithNodeID(nodeID).
 		WithPollTimeout(timeout)
@@ -1402,12 +1480,13 @@ func executeStageRunnerRelayDecode(options stageRunnerRelayDecodeOptions) (strin
 	if err != nil {
 		return "", err
 	}
-	started := time.Now()
+	receiveStarted := time.Now()
 	inputFrame, err := reader.Receive(context.Background())
 	if err != nil {
 		return "", err
 	}
-	inputEnvelope := runtimes.TensorEnvelopeFromActivation(inputFrame.Header, inputFrame.Payload, options.StageIndex, upstreamStageID, stageJobID, nodeID, time.Since(started).Milliseconds())
+	receiveWaitMS := time.Since(receiveStarted).Milliseconds()
+	inputEnvelope := runtimes.TensorEnvelopeFromActivation(inputFrame.Header, inputFrame.Payload, options.StageIndex, upstreamStageID, stageJobID, nodeID, receiveWaitMS)
 	inputEnvelope.KVCacheKey = strings.TrimSpace(options.KVCacheKey)
 	if err := inputEnvelope.ValidatePayload(inputFrame.Payload); err != nil {
 		return "", err
@@ -1448,7 +1527,9 @@ func executeStageRunnerRelayDecode(options stageRunnerRelayDecodeOptions) (strin
 	defer cancel()
 	cmd := exec.CommandContext(ctx, runnerBin, args...)
 	cmd.Env = stageRunnerCommandEnv(os.Environ(), options)
+	computeStarted := time.Now()
 	reportBytes, err := cmd.CombinedOutput()
+	stageComputeMS := time.Since(computeStarted).Milliseconds()
 	if writeErr := os.WriteFile(reportPath, reportBytes, 0o600); writeErr != nil && err == nil {
 		err = writeErr
 	}
@@ -1496,14 +1577,18 @@ func executeStageRunnerRelayDecode(options stageRunnerRelayDecodeOptions) (strin
 	if err != nil {
 		return "", err
 	}
+	relayWriteStarted := time.Now()
 	if err := writer.Send(context.Background(), outputFrame); err != nil {
 		return "", err
 	}
+	relayWriteMS := time.Since(relayWriteStarted).Milliseconds()
 	recoveryInput := stageRunnerRecoveryInput(options)
+	stageDaemonStarted := time.Now()
 	stageDaemonDecode, err := postStageDaemonDecodeForStageWithRecovery(context.Background(), recoveryInput, options.StageJobID, "relay_decode", &outputEnvelope, outputPayload, "", nil, "")
 	if err != nil {
 		return "", err
 	}
+	stageDaemonMS := time.Since(stageDaemonStarted).Milliseconds()
 	body, err := json.MarshalIndent(stageRunnerRelayDecodeResult{
 		Kind:              "cdip.stage_relay_decode",
 		RunnerMode:        "llama.cpp-stage",
@@ -1526,7 +1611,14 @@ func executeStageRunnerRelayDecode(options stageRunnerRelayDecodeOptions) (strin
 		OutputBytes:       len(outputPayload),
 		WorkDir:           workDir,
 		StageDaemonDecode: stageDaemonDecode,
-		Executable:        true,
+		Timing: stageRunnerTiming{
+			ReceiveWaitMS:  receiveWaitMS,
+			StageComputeMS: stageComputeMS,
+			RelayWriteMS:   relayWriteMS,
+			StageDaemonMS:  stageDaemonMS,
+			TotalMS:        time.Since(totalStarted).Milliseconds(),
+		},
+		Executable: true,
 	}, "", "  ")
 	if err != nil {
 		return "", err
@@ -1574,6 +1666,7 @@ func executeStageRunnerSourceDecode(options stageRunnerRelayDecodeOptions, promp
 	if timeout <= 0 {
 		timeout = time.Second
 	}
+	totalStarted := time.Now()
 	workDir := strings.TrimSpace(options.WorkDir)
 	var err error
 	if workDir == "" {
@@ -1602,7 +1695,9 @@ func executeStageRunnerSourceDecode(options stageRunnerRelayDecodeOptions, promp
 	defer cancel()
 	cmd := exec.CommandContext(ctx, runnerBin, args...)
 	cmd.Env = stageRunnerCommandEnv(os.Environ(), options)
+	computeStarted := time.Now()
 	reportBytes, err := cmd.CombinedOutput()
+	stageComputeMS := time.Since(computeStarted).Milliseconds()
 	if writeErr := os.WriteFile(reportPath, reportBytes, 0o600); writeErr != nil && err == nil {
 		err = writeErr
 	}
@@ -1652,14 +1747,18 @@ func executeStageRunnerSourceDecode(options stageRunnerRelayDecodeOptions, promp
 	if err != nil {
 		return "", err
 	}
+	relayWriteStarted := time.Now()
 	if err := writer.Send(context.Background(), outputFrame); err != nil {
 		return "", err
 	}
+	relayWriteMS := time.Since(relayWriteStarted).Milliseconds()
 	recoveryInput := stageRunnerRecoveryInput(options)
+	stageDaemonStarted := time.Now()
 	stageDaemonDecode, err := postStageDaemonDecodeForStageWithRecovery(context.Background(), recoveryInput, options.StageJobID, "source_decode", &outputEnvelope, outputPayload, prompt, options.PreviousTokenID, options.PreviousTokenText)
 	if err != nil {
 		return "", err
 	}
+	stageDaemonMS := time.Since(stageDaemonStarted).Milliseconds()
 	body, err := json.MarshalIndent(stageRunnerSourceDecodeResult{
 		Kind:              "cdip.stage_source_decode",
 		RunnerMode:        "llama.cpp-stage",
@@ -1678,6 +1777,12 @@ func executeStageRunnerSourceDecode(options stageRunnerRelayDecodeOptions, promp
 		OutputBytes:       len(outputPayload),
 		WorkDir:           workDir,
 		StageDaemonDecode: stageDaemonDecode,
+		Timing: stageRunnerTiming{
+			StageComputeMS: stageComputeMS,
+			RelayWriteMS:   relayWriteMS,
+			StageDaemonMS:  stageDaemonMS,
+			TotalMS:        time.Since(totalStarted).Milliseconds(),
+		},
 		Executable:        true,
 		PreviousTokenID:   options.PreviousTokenID,
 		PreviousTokenText: strings.TrimSpace(options.PreviousTokenText),
@@ -1722,6 +1827,7 @@ func executeStageRunnerTerminalDecode(options stageRunnerRelayDecodeOptions) (st
 	if timeout <= 0 {
 		timeout = time.Second
 	}
+	totalStarted := time.Now()
 	activationTransport := transport.NewHTTPActivationTransport(managerURL, options.OperatorToken).
 		WithNodeID(nodeID).
 		WithPollTimeout(timeout)
@@ -1729,12 +1835,13 @@ func executeStageRunnerTerminalDecode(options stageRunnerRelayDecodeOptions) (st
 	if err != nil {
 		return "", err
 	}
-	started := time.Now()
+	receiveStarted := time.Now()
 	inputFrame, err := reader.Receive(context.Background())
 	if err != nil {
 		return "", err
 	}
-	inputEnvelope := runtimes.TensorEnvelopeFromActivation(inputFrame.Header, inputFrame.Payload, options.StageIndex, upstreamStageID, stageJobID, nodeID, time.Since(started).Milliseconds())
+	receiveWaitMS := time.Since(receiveStarted).Milliseconds()
+	inputEnvelope := runtimes.TensorEnvelopeFromActivation(inputFrame.Header, inputFrame.Payload, options.StageIndex, upstreamStageID, stageJobID, nodeID, receiveWaitMS)
 	inputEnvelope.KVCacheKey = strings.TrimSpace(options.KVCacheKey)
 	if err := inputEnvelope.ValidatePayload(inputFrame.Payload); err != nil {
 		return "", err
@@ -1758,15 +1865,21 @@ func executeStageRunnerTerminalDecode(options stageRunnerRelayDecodeOptions) (st
 		return "", err
 	}
 	recoveryInput := stageRunnerRecoveryInput(options)
-	stageDaemonDecode, err := postStageDaemonDecodeForStageWithRecovery(context.Background(), recoveryInput, options.StageJobID, "terminal_decode", &inputEnvelope, inputFrame.Payload, "", nil, "")
+	stageDaemonStarted := time.Now()
+	stageDaemonDecode, err := postStageDaemonDecodeForStageWithRecovery(context.Background(), recoveryInput, options.StageJobID, "terminal_decode", &inputEnvelope, inputFrame.Payload, "", nil, options.PreviousTokenText)
 	if err != nil {
 		return "", err
 	}
+	stageDaemonMS := time.Since(stageDaemonStarted).Milliseconds()
 	if tokenID, ok := stageDaemonDecodeInt(stageDaemonDecode, "next_token_id"); ok {
 		tokenText, _ := stageDaemonDecodeString(stageDaemonDecode, "next_token_text")
 		final, _ := stageDaemonDecodeBool(stageDaemonDecode, "final")
 		if options.TerminalForceFinal != nil {
 			final = *options.TerminalForceFinal
+		}
+		outputText := options.PreviousTokenText + tokenText
+		if outputText == "" {
+			outputText = tokenText
 		}
 		body, err := json.MarshalIndent(stageRunnerTerminalDecodeResult{
 			Kind:              "cdip.stage_terminal_decode",
@@ -1785,11 +1898,16 @@ func executeStageRunnerTerminalDecode(options stageRunnerRelayDecodeOptions) (st
 			NextTokenID:       tokenID,
 			NextTokenText:     tokenText,
 			Tokens:            []int{tokenID},
-			Output:            tokenText,
+			Output:            outputText,
 			Final:             final,
 			WorkDir:           workDir,
 			StageDaemonDecode: stageDaemonDecode,
-			Executable:        true,
+			Timing: stageRunnerTiming{
+				ReceiveWaitMS: receiveWaitMS,
+				StageDaemonMS: stageDaemonMS,
+				TotalMS:       time.Since(totalStarted).Milliseconds(),
+			},
+			Executable: true,
 		}, "", "  ")
 		if err != nil {
 			return "", err
@@ -1810,7 +1928,9 @@ func executeStageRunnerTerminalDecode(options stageRunnerRelayDecodeOptions) (st
 	defer cancel()
 	cmd := exec.CommandContext(ctx, runnerBin, args...)
 	cmd.Env = stageRunnerCommandEnv(os.Environ(), options)
+	computeStarted := time.Now()
 	reportBytes, err := cmd.CombinedOutput()
+	stageComputeMS := time.Since(computeStarted).Milliseconds()
 	if writeErr := os.WriteFile(reportPath, reportBytes, 0o600); writeErr != nil && err == nil {
 		err = writeErr
 	}
@@ -1846,7 +1966,13 @@ func executeStageRunnerTerminalDecode(options stageRunnerRelayDecodeOptions) (st
 		Final:             terminalReportFinal(report),
 		WorkDir:           workDir,
 		StageDaemonDecode: stageDaemonDecode,
-		Executable:        true,
+		Timing: stageRunnerTiming{
+			ReceiveWaitMS:  receiveWaitMS,
+			StageComputeMS: stageComputeMS,
+			StageDaemonMS:  stageDaemonMS,
+			TotalMS:        time.Since(totalStarted).Milliseconds(),
+		},
+		Executable: true,
 	}, "", "  ")
 	if err != nil {
 		return "", err
@@ -3393,16 +3519,23 @@ func postStageDaemonDecodeWithPayload(ctx context.Context, daemonURL string, ses
 		return nil, fmt.Errorf("stage daemon decode failed: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	responseLimit := stageDaemonDecodeResponseLimitBytes()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, responseLimit+1))
+	if int64(len(respBody)) > responseLimit {
+		return nil, fmt.Errorf("stage daemon decode response exceeded %d byte limit for session=%s command=%s step=%d", responseLimit, sessionID, strings.TrimSpace(command), stageCommandStep(step))
+	}
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("%w: %s", errStageDaemonSessionMissing, strings.TrimSpace(string(respBody)))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("stage daemon decode returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
+	if len(bytes.TrimSpace(respBody)) == 0 {
+		return nil, fmt.Errorf("stage daemon decode returned %d with empty response body for session=%s command=%s step=%d", resp.StatusCode, sessionID, strings.TrimSpace(command), stageCommandStep(step))
+	}
 	var decoded map[string]any
 	if err := json.Unmarshal(respBody, &decoded); err != nil {
-		return nil, fmt.Errorf("decode stage daemon response: %w", err)
+		return nil, fmt.Errorf("decode stage daemon response status=%d session=%s command=%s step=%d: %w: %s", resp.StatusCode, sessionID, strings.TrimSpace(command), stageCommandStep(step), err, strings.TrimSpace(string(respBody)))
 	}
 	return decoded, nil
 }
@@ -3416,6 +3549,23 @@ func stageDaemonHTTPTimeout(timeoutMS int) time.Duration {
 		return timeout
 	}
 	return 2 * time.Minute
+}
+
+func stageDaemonDecodeResponseLimitBytes() int64 {
+	const defaultLimit = int64(256 << 20)
+	raw := strings.TrimSpace(os.Getenv("CMESH_STAGE_DAEMON_DECODE_RESPONSE_LIMIT_BYTES"))
+	if raw == "" {
+		return defaultLimit
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || parsed <= 0 {
+		return defaultLimit
+	}
+	const minLimit = int64(1 << 20)
+	if parsed < minLimit {
+		return minLimit
+	}
+	return parsed
 }
 
 var errStageDaemonSessionMissing = errors.New("stage daemon session is missing")
@@ -3822,9 +3972,14 @@ func (b *llamaCPPResidentStageBackend) Decode(ctx context.Context, session runti
 	if !session.Ready && strings.TrimSpace(req.StageCommand) != "source_decode" && strings.TrimSpace(req.StageCommand) != "relay_decode" && strings.TrimSpace(req.StageCommand) != "terminal_decode" {
 		return stageDaemonBackendDecodeResult{}, fmt.Errorf("llama.cpp resident stage backend is only source/relay/terminal-decode ready")
 	}
-	if result, err := b.decodeResidentLoop(ctx, session, req); err == nil {
-		return result, nil
+	result, err := b.decodeResidentLoop(ctx, session, req)
+	if err != nil {
+		return stageDaemonBackendDecodeResult{}, fmt.Errorf("llama.cpp resident-loop decode failed: %w", err)
 	}
+	return result, nil
+}
+
+func (b *llamaCPPResidentStageBackend) decodeResidentCommand(ctx context.Context, session runtimes.StageSession, req stageDaemonDecodeRequest) (stageDaemonBackendDecodeResult, error) {
 	args := []string{
 		"--command", "resident-decode",
 		"--session-id", session.SessionID,
@@ -4008,11 +4163,11 @@ func (b *llamaCPPResidentStageBackend) prepareResidentLoop(ctx context.Context, 
 func residentLoopPrepareContextSize() int {
 	raw := strings.TrimSpace(os.Getenv("CMESH_RESIDENT_STAGE_CTX"))
 	if raw == "" {
-		return 64
+		return 2048
 	}
 	value, err := strconv.Atoi(raw)
 	if err != nil || value <= 0 {
-		return 64
+		return 2048
 	}
 	return value
 }
@@ -4389,6 +4544,16 @@ func (s *stageDaemonState) handleSession(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *stageDaemonState) handleSessionDecode(w http.ResponseWriter, r *http.Request, id string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			fmt.Fprintf(os.Stderr, "stage daemon decode panic session=%s: %v\n", id, recovered)
+			writeStageDaemonJSON(w, http.StatusInternalServerError, map[string]any{
+				"kind":       "cmesh.stage_daemon_error",
+				"session_id": id,
+				"error":      fmt.Sprintf("stage daemon decode panic: %v", recovered),
+			})
+		}
+	}()
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -4428,11 +4593,14 @@ func (s *stageDaemonState) handleSessionDecode(w http.ResponseWriter, r *http.Re
 		http.NotFound(w, r)
 		return
 	}
+	fmt.Fprintf(os.Stderr, "stage daemon decode start session=%s command=%s step=%d\n", id, strings.TrimSpace(req.StageCommand), step)
 	backendResult, err := s.backend.Decode(r.Context(), record.Session, req)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "stage daemon decode failed session=%s command=%s step=%d: %v\n", id, strings.TrimSpace(req.StageCommand), step, err)
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	fmt.Fprintf(os.Stderr, "stage daemon decode ok session=%s command=%s step=%d output_bytes=%d final=%v\n", id, strings.TrimSpace(req.StageCommand), step, backendResult.OutputBytes, backendResult.Final)
 	s.mu.Lock()
 	record.DecodeSteps++
 	record.LastStep = step
@@ -4661,6 +4829,7 @@ func executeDistributedStageTerminalDecodeJob(job jobs.Job, req models.Distribut
 		StageDaemonURL:     req.StageDaemonURL,
 		StageSessionID:     stageJobSessionID(req, stageJobID),
 		TerminalForceFinal: req.TerminalForceFinal,
+		PreviousTokenText:  req.PreviousTokenText,
 	})
 }
 
@@ -5329,9 +5498,10 @@ func executeModelGenerate(req models.GenerateInput, cacheDir string, rpcEndpoint
 	timeout := modelGenerateTimeout(maxTokens)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	prompt := modelPrompt(model, req)
 	args := []string{
 		"-m", path,
-		"-p", modelPrompt(model, req),
+		"-p", prompt,
 		"-n", strconv.Itoa(maxTokens),
 		"--temp", temperature,
 		"--threads", "1",
@@ -5367,7 +5537,10 @@ func executeModelGenerate(req models.GenerateInput, cacheDir string, rpcEndpoint
 	if err != nil {
 		return "", fmt.Errorf("%s failed: %w: %s", model.Runtime, err, strings.TrimSpace(stderr.String()))
 	}
-	text := cleanLlamaOutput(stdout.String(), req.Prompt)
+	text := cleanLlamaOutput(stdout.String(), prompt)
+	if text == "" {
+		text = cleanLlamaOutput(stdout.String(), req.Prompt)
+	}
 	if text == "" {
 		text = sanitizeModelText(stdout.String())
 	}
@@ -5806,9 +5979,10 @@ func modelStopSequences(model models.Model) []string {
 }
 
 func cleanLlamaOutput(output string, prompt string) string {
+	output, strippedPrompt := stripPromptEcho(output, prompt)
 	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
 	collected := make([]string, 0, len(lines))
-	afterPrompt := false
+	afterPrompt := strippedPrompt
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		switch {
@@ -5847,13 +6021,34 @@ func cleanLlamaOutput(output string, prompt string) string {
 	}
 	text := strings.TrimSpace(strings.Join(collected, "\n"))
 	if text == "" {
-		return sanitizeModelText(output)
+		return removePromptEchoLines(sanitizeModelText(output), prompt)
 	}
 	text = sanitizeModelText(text)
+	text = removePromptEchoLines(text, prompt)
 	if len([]byte(text)) > 8192 {
 		return string([]byte(text)[:8192])
 	}
 	return text
+}
+
+func stripPromptEcho(output string, prompt string) (string, bool) {
+	text := strings.ReplaceAll(output, "\r\n", "\n")
+	prompt = strings.TrimSpace(strings.ReplaceAll(prompt, "\r\n", "\n"))
+	if prompt == "" {
+		return text, false
+	}
+	if index := strings.LastIndex(text, prompt); index >= 0 {
+		return text[index+len(prompt):], true
+	}
+	sanitizedPrompt := strings.TrimSpace(removeChatTemplateTokens(prompt))
+	if sanitizedPrompt == "" {
+		return text, false
+	}
+	sanitizedText := strings.TrimSpace(removeChatTemplateTokens(text))
+	if strings.HasPrefix(sanitizedText, sanitizedPrompt) {
+		return strings.TrimSpace(strings.TrimPrefix(sanitizedText, sanitizedPrompt)), true
+	}
+	return text, false
 }
 
 func sanitizeModelText(text string) string {
@@ -5877,6 +6072,9 @@ func sanitizeModelText(text string) string {
 		if isRoleEcho(lower) {
 			continue
 		}
+		if isPromptEchoNoise(lower) {
+			continue
+		}
 		if !seenContent && strings.HasPrefix(lower, "you will answer the user's question") {
 			continue
 		}
@@ -5884,6 +6082,41 @@ func sanitizeModelText(text string) string {
 		cleaned = append(cleaned, line)
 	}
 	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
+func removePromptEchoLines(text string, prompt string) string {
+	prompt = strings.TrimSpace(removeChatTemplateTokens(prompt))
+	if prompt == "" || strings.TrimSpace(text) == "" {
+		return strings.TrimSpace(text)
+	}
+	echoLines := map[string]bool{}
+	for _, line := range strings.Split(strings.ReplaceAll(prompt, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if isChatTemplateNoise(lower) || isRoleEcho(lower) || isPromptEchoNoise(lower) {
+			continue
+		}
+		echoLines[line] = true
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			if len(out) > 0 && out[len(out)-1] != "" {
+				out = append(out, "")
+			}
+			continue
+		}
+		if echoLines[trimmed] {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 func isChatTemplateNoise(lower string) bool {
@@ -5913,6 +6146,11 @@ func isRoleEcho(lower string) bool {
 	default:
 		return false
 	}
+}
+
+func isPromptEchoNoise(lower string) bool {
+	lower = strings.TrimSpace(lower)
+	return lower == "assist ... (truncated)" || lower == "assistant ... (truncated)" || lower == "assistant"
 }
 
 func removeReasoningText(text string) string {

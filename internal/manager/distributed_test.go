@@ -1778,8 +1778,8 @@ func TestCDIPTerminalDecodePartialDispatchesNextLoopStep(t *testing.T) {
 	if sourceInput.StageCommand != "source_decode" || sourceInput.DownstreamStageID != stageIDs[1] {
 		t.Fatalf("unexpected next source input: %#v", sourceInput)
 	}
-	if sourceInput.PreviousTokenID == nil || *sourceInput.PreviousTokenID != 42 || sourceInput.PreviousTokenText != " hello" {
-		t.Fatalf("expected next source step to receive terminal token feedback, got %#v", sourceInput)
+	if sourceInput.PreviousTokenID == nil || *sourceInput.PreviousTokenID != 42 || sourceInput.PreviousTokenText != " hi hello" {
+		t.Fatalf("expected next source step to receive cumulative terminal feedback, got %#v", sourceInput)
 	}
 	terminal, _ := state.Job(stageIDs[1])
 	var terminalInput models.DistributedStageJobInput
@@ -1789,8 +1789,8 @@ func TestCDIPTerminalDecodePartialDispatchesNextLoopStep(t *testing.T) {
 	if terminalInput.StageCommand != "terminal_decode" || terminalInput.UpstreamStageID != stageIDs[0] {
 		t.Fatalf("unexpected next terminal input: %#v", terminalInput)
 	}
-	if terminalInput.PreviousTokenID != nil || terminalInput.PreviousTokenText != "" {
-		t.Fatalf("terminal input must not receive source token feedback: %#v", terminalInput)
+	if terminalInput.PreviousTokenID != nil || terminalInput.PreviousTokenText != " hi hello" {
+		t.Fatalf("terminal input must receive cumulative output without source token id feedback: %#v", terminalInput)
 	}
 }
 

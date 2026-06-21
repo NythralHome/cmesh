@@ -46,6 +46,39 @@ func TestQualityPresetSpecializesCoderAndDeepSeek(t *testing.T) {
 	}
 }
 
+func TestQwenCatalogDeclaresAdaptersAndPinnedSources(t *testing.T) {
+	qwen := QwenCatalog()
+	if len(qwen) < 8 {
+		t.Fatalf("expected qwen validation catalog to include 1.5B, 3B, and existing larger Qwen models, got %d", len(qwen))
+	}
+
+	seen := map[string]bool{}
+	for _, model := range qwen {
+		seen[model.ID] = true
+		if model.Adapter == "" {
+			t.Fatalf("qwen model %q must declare adapter", model.ID)
+		}
+		if _, ok := AdapterForModel(model); !ok {
+			t.Fatalf("qwen model %q references unknown adapter %q", model.ID, model.Adapter)
+		}
+		if model.RepoSHA == "" {
+			t.Fatalf("qwen model %q must pin upstream repo sha for update detection", model.ID)
+		}
+		if model.Layers <= 0 {
+			t.Fatalf("qwen model %q must declare layer count for distributed planning", model.ID)
+		}
+	}
+
+	for _, id := range []string{
+		"qwen2.5-1.5b-instruct-q4-k-m",
+		"qwen2.5-3b-instruct-q4-k-m",
+	} {
+		if !seen[id] {
+			t.Fatalf("expected Qwen validation target %q in catalog", id)
+		}
+	}
+}
+
 func TestLinuxProductionCatalogDeclaresSlicedModel(t *testing.T) {
 	production := LinuxProductionCatalog()
 	if len(production) != 1 {

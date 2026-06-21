@@ -1693,7 +1693,7 @@ func (s *Server) handleModelDistributedGenerate(w http.ResponseWriter, r *http.R
 	}
 	plan := distributedModelPlanWithTotalLayers(model, s.state.Nodes(), req.TotalLayers)
 	if len(cleanStringList(req.StageNodeIDs)) > 0 {
-		pinned, err := pinDistributedPlanStageNodes(plan, cleanStringList(req.StageNodeIDs))
+		pinned, err := distributedModelPlanWithPinnedStageNodes(model, s.state.Nodes(), req.TotalLayers, cleanStringList(req.StageNodeIDs))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -2824,6 +2824,7 @@ type cdipStageTerminalWorkerResult struct {
 	Output            string         `json:"output,omitempty"`
 	Final             *bool          `json:"final,omitempty"`
 	StageDaemonDecode map[string]any `json:"stage_daemon_decode,omitempty"`
+	Timing            map[string]any `json:"timing,omitempty"`
 }
 
 func (s *Server) handleCDIPStageComplete(req jobs.CompleteRequest, jobID string) (jobs.Job, bool, bool) {
@@ -2931,7 +2932,11 @@ func (s *Server) dispatchNextCDIPDecodeLoopStep(raw string, stage jobs.Job) (CDI
 		return CDIPCommandResult{}, false
 	}
 	tokenID := terminal.NextTokenID
-	result, err := dispatchCDIPDecodeLoopStepWithTokenFeedback(s.state, parentID, nextStep, maxTokens, &tokenID, terminal.NextTokenText)
+	previousOutput := terminal.Output
+	if previousOutput == "" {
+		previousOutput = terminal.NextTokenText
+	}
+	result, err := dispatchCDIPDecodeLoopStepWithTokenFeedback(s.state, parentID, nextStep, maxTokens, &tokenID, previousOutput)
 	return result, err == nil
 }
 
@@ -2971,7 +2976,11 @@ func (s *Server) dispatchNextCDIPDecodeLoopStepIfReady(parentID string) (CDIPCom
 		return CDIPCommandResult{}, false
 	}
 	tokenID := terminal.NextTokenID
-	result, err := dispatchCDIPDecodeLoopStepWithTokenFeedback(s.state, parentID, nextStep, maxTokens, &tokenID, terminal.NextTokenText)
+	previousOutput := terminal.Output
+	if previousOutput == "" {
+		previousOutput = terminal.NextTokenText
+	}
+	result, err := dispatchCDIPDecodeLoopStepWithTokenFeedback(s.state, parentID, nextStep, maxTokens, &tokenID, previousOutput)
 	return result, err == nil
 }
 
@@ -3071,6 +3080,7 @@ func cdipTerminalParentResult(raw string, stage jobs.Job) (string, error) {
 		"runner_mode":           strings.TrimSpace(terminal.RunnerMode),
 		"execution_mode":        executionMode,
 		"resident_kv_in_memory": residentKV,
+		"terminal_timing":       terminal.Timing,
 		"guardrail":             guardrail,
 	})
 	if err != nil {
@@ -4466,6 +4476,20 @@ func generatableModelCount(in []ModelSummary) int {
 	return count
 }
 
+func chatRunnableModelCount(in []ModelSummary) int {
+	count := 0
+	for _, summary := range in {
+		if summary.Status == "deleting" {
+			continue
+		}
+		placement := modelPlacementPlan(summary)
+		if len(summary.GeneratableOn) > 0 || placement.Feasible {
+			count++
+		}
+	}
+	return count
+}
+
 func modelFailureHint(summary ModelSummary) string {
 	if strings.TrimSpace(summary.LastError) != "" && !strings.Contains(summary.LastError, "unsupported job type") {
 		return "Last model job failed: " + summary.LastError
@@ -4505,7 +4529,7 @@ func modelPlacementLabel(plan ModelPlacementPlan) string {
 	case "single_worker":
 		return "Single-worker ready"
 	case "sharded_estimate":
-		return "Sharded estimate"
+		return "Distributed sliced candidate"
 	default:
 		return "Blocked"
 	}
@@ -4519,7 +4543,7 @@ func modelPlacementHint(plan ModelPlacementPlan) string {
 		}
 		return fmt.Sprintf("Can run on %d online workers.", len(plan.SingleNodeCandidates))
 	case plan.Feasible:
-		return fmt.Sprintf("Aggregate resources fit across %d workers, but distributed model execution is not implemented yet.", len(plan.Shards))
+		return fmt.Sprintf("Aggregate resources fit across %d workers for distributed sliced execution.", len(plan.Shards))
 	case len(plan.Blockers) > 0:
 		return strings.Join(plan.Blockers, " | ")
 	default:
@@ -5145,6 +5169,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 	"installedModelCount":    installedModelCount,
 	"installedInstanceCount": installedModelInstanceCount,
 	"generatableCount":       generatableModelCount,
+	"chatRunnableCount":      chatRunnableModelCount,
 	"modelFailureHint":       modelFailureHint,
 	"modelPlacement":         modelPlacementPlan,
 	"modelPlacementClass":    modelPlacementClass,
@@ -5189,6 +5214,13 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 	},
 	"modelCanGenerate": func(summary ModelSummary) bool {
 		return len(summary.GeneratableOn) > 0 && summary.Status != "deleting"
+	},
+	"modelCanChat": func(summary ModelSummary) bool {
+		return summary.Status != "deleting" && (len(summary.GeneratableOn) > 0 || modelPlacementPlan(summary).Feasible)
+	},
+	"modelCanDistributedSliced": func(summary ModelSummary) bool {
+		placement := modelPlacementPlan(summary)
+		return summary.Status != "deleting" && placement.Feasible && placement.Mode == "sharded_estimate"
 	},
 	"modelPreset": func(model models.Model) models.QualityPreset {
 		return models.QualityPresetFor(model)
@@ -6397,6 +6429,12 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .model-placement-card code {
       white-space: normal;
     }
+    .mode-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
     .model-actions {
       display: flex;
       gap: 8px;
@@ -6850,7 +6888,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         <div class="readiness-status">
           <span class="pill pill-muted">capacity</span>
           <strong>Cluster model capacity</strong>
-          <p class="sub">This shows the usable model capacity reported by online workers. Sharded estimates prove aggregate capacity, but distributed model execution is not implemented yet.</p>
+          <p class="sub">This shows the usable model capacity reported by online workers, separated into single-worker and distributed sliced candidates.</p>
           <div class="readiness-grid">
             <div class="first-test-stat"><span>Allowed CPU</span><strong>{{.Capacity.AllowedCPUCores}}</strong></div>
             <div class="first-test-stat"><span>Allowed RAM</span><strong>{{printf "%.1f" (gb .Capacity.AllowedMemoryBytes)}} GB</strong></div>
@@ -6874,11 +6912,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <button class="button" type="button" data-tab-shortcut="models">Models</button>
           </div>
           <div class="readiness-check">
-            <strong>Sharded estimate</strong>
+            <strong>Distributed sliced</strong>
             <div>
-              <p>{{.Capacity.ShardedEstimateModels}} catalog model(s) fit only as aggregate multi-worker estimates.</p>
+              <p>{{.Capacity.ShardedEstimateModels}} catalog model(s) fit as aggregate multi-worker sliced candidates.</p>
               {{if .Capacity.LargestShardedModel.ID}}
-              <p class="sub">Largest estimate: {{.Capacity.LargestShardedModel.Name}} · {{.Capacity.LargestShardedModel.ShardWorkers}} worker shards · {{printf "%.1f" (gb .Capacity.LargestShardedModel.RequiredMemory)}} GB RAM.</p>
+              <p class="sub">Largest candidate: {{.Capacity.LargestShardedModel.Name}} · {{.Capacity.LargestShardedModel.ShardWorkers}} worker shards · {{printf "%.1f" (gb .Capacity.LargestShardedModel.RequiredMemory)}} GB RAM.</p>
               {{else}}
               <p class="sub">No aggregate-only model placement is currently feasible.</p>
               {{end}}
@@ -7281,7 +7319,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     <section id="chat">
       <div class="section-head">
         <h2>Model Chat</h2>
-        <code>{{generatableCount .Models}} ready models</code>
+        <code>{{chatRunnableCount .Models}} runnable models</code>
       </div>
       <div class="chat-shell">
         <form class="chat-main" id="model-chat-form">
@@ -7294,8 +7332,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <div class="field">
                 <label for="chat-model">Model</label>
                 <select id="chat-model" name="model_id">
-                  {{if eq (generatableCount .Models) 0}}<option value="">Install a model first</option>{{end}}
-                  {{range .Models}}{{if modelCanGenerate .}}{{$preset := modelPreset .Model}}<option value="{{.Model.ID}}" data-temperature="{{$preset.Temperature}}" data-max-tokens="{{$preset.MaxTokens}}" data-system-prompt="{{$preset.SystemPrompt}}">{{.Model.Name}}</option>{{end}}{{end}}
+                  {{if eq (chatRunnableCount .Models) 0}}<option value="">Install a model first</option>{{end}}
+                  {{range .Models}}{{if modelCanChat .}}{{$preset := modelPreset .Model}}<option value="{{.Model.ID}}" data-temperature="{{$preset.Temperature}}" data-max-tokens="{{$preset.MaxTokens}}" data-system-prompt="{{$preset.SystemPrompt}}" data-single-ready="{{if modelCanGenerate .}}true{{else}}false{{end}}" data-distributed-sliced-ready="{{if modelCanDistributedSliced .}}true{{else}}false{{end}}">{{.Model.Name}}</option>{{end}}{{end}}
                 </select>
               </div>
               <div class="field">
@@ -7305,11 +7343,15 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                   {{range .Models}}{{$chatModelID := .Model.ID}}{{range modelReadyNodeOptions $.NodesByID .}}<option value="{{.ID}}" data-model-id="{{$chatModelID}}">{{.Name}}</option>{{end}}{{end}}
                 </select>
               </div>
-              <label class="inline-toggle" title="Use active llama.cpp RPC endpoints from this cluster for distributed inference.">
-                <input id="chat-use-rpc" name="use_rpc" type="checkbox" {{if lt .RPCPool.Endpoints 2}}disabled{{end}}>
-                <span>RPC pool</span>
-                <code>{{.RPCPool.Endpoints}} endpoint{{if ne .RPCPool.Endpoints 1}}s{{end}}</code>
-              </label>
+              <div class="field">
+                <label for="chat-execution-mode">Execution mode</label>
+                <select id="chat-execution-mode" name="execution_mode">
+                  <option value="automatic">Automatic</option>
+                  <option value="single_worker">Single worker</option>
+                  <option value="distributed_rpc" {{if lt .RPCPool.Endpoints 2}}disabled{{end}}>Distributed RPC · {{.RPCPool.Endpoints}} endpoint{{if ne .RPCPool.Endpoints 1}}s{{end}}</option>
+                  <option value="distributed_sliced">Distributed sliced</option>
+                </select>
+              </div>
               <div class="chat-settings">
                 <div class="field">
                   <label for="chat-system-prompt">System prompt</label>
@@ -7327,7 +7369,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             </div>
           </div>
           <div class="chat-thread" id="chat-thread">
-            {{if eq (generatableCount .Models) 0}}
+            {{if eq (chatRunnableCount .Models) 0}}
             <div class="chat-empty">
               <h3>No model is ready yet</h3>
               <p>Install a model from the Models tab before chatting.</p>
@@ -7343,8 +7385,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           <div class="chat-composer">
             <textarea id="chat-prompt" name="prompt" placeholder="Message the selected local model"></textarea>
             <div class="chat-composer-actions">
-              <div class="runner-status" id="model-status">{{if eq (generatableCount .Models) 0}}Install a model first, then submit a prompt.{{else}}Ready.{{end}}</div>
-              <button class="button primary" type="submit" {{if or (not .OnlineNodes) (eq (generatableCount .Models) 0)}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Generate</button>
+              <div class="runner-status" id="model-status">{{if eq (chatRunnableCount .Models) 0}}Install a model first, then submit a prompt.{{else}}Ready.{{end}}</div>
+              <button class="button primary" type="submit" {{if or (not .OnlineNodes) (eq (chatRunnableCount .Models) 0)}}disabled{{end}}><svg class="icon"><use href="#icon-send"></use></svg>Generate</button>
             </div>
           </div>
         </form>
@@ -7601,6 +7643,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <strong>{{modelPlacementLabel $placement}}</strong>
               <span>{{modelPlacementHint $placement}}</span>
               <code>RAM {{printf "%.1f" (gb $placement.RequiredMemoryBytes)}} GB · disk {{printf "%.1f" (gb $placement.RequiredDiskBytes)}} GB</code>
+            </div>
+            <div class="mode-badges">
+              {{if modelCanGenerate .}}<span class="pill">single worker</span>{{else}}<span class="pill pill-muted">single blocked</span>{{end}}
+              {{if modelCanDistributedSliced .}}<span class="pill">distributed sliced</span>{{else}}<span class="pill pill-muted">distributed blocked</span>{{end}}
             </div>
             <p class="sub">Runtime {{.Model.Runtime}} · context {{.Model.Context}} · {{.CapableNodes}} capable online workers</p>
             {{if modelFailureHint .}}<div class="hint">{{modelFailureHint .}}</div>{{end}}
@@ -8807,14 +8853,14 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         parts.push(conflict.placement.blockers.join("; "));
       }
       if (conflict.placement && conflict.placement.mode === "sharded_estimate") {
-        parts.push("multi-worker placement is only an estimate; distributed execution is not implemented yet");
+        parts.push("multi-worker placement requires ready CDIP stage runtimes before execution");
       }
       return parts.join(": ");
     }
     function placementLabel(plan) {
       if (!plan) return "Blocked";
       if (plan.mode === "single_worker") return "Single-worker ready";
-      if (plan.mode === "sharded_estimate") return "Sharded estimate";
+      if (plan.mode === "sharded_estimate") return "Distributed sliced candidate";
       return "Blocked";
     }
     function placementClass(plan) {
@@ -8829,7 +8875,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         return candidates === 1 ? "Can run on 1 online worker." : "Can run on " + candidates + " online workers.";
       }
       if (plan.feasible) {
-        return "Aggregate resources fit across " + ((plan.shards || []).length) + " workers, but distributed model execution is not implemented yet.";
+        return "Aggregate resources fit across " + ((plan.shards || []).length) + " workers for distributed sliced execution.";
       }
       if (plan.blockers && plan.blockers.length) return plan.blockers.join(" | ");
       return "No viable placement found.";
@@ -9262,7 +9308,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     var chatTemperature = document.getElementById("chat-temperature");
     var chatMaxTokens = document.getElementById("chat-max-tokens");
     var chatPrompt = document.getElementById("chat-prompt");
-    var chatUseRPC = document.getElementById("chat-use-rpc");
+    var chatExecutionMode = document.getElementById("chat-execution-mode");
     var chatSubmitButton = chatForm ? chatForm.querySelector('button[type="submit"]') : null;
     var chatConversationKey = "cmesh.chat.conversation";
     var chatConversationID = "";
@@ -9274,12 +9320,63 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     function setChatSubmitting(isSubmitting) {
       chatSubmitting = isSubmitting;
       if (chatSubmitButton) {
-        chatSubmitButton.disabled = isSubmitting || !chatModel || !chatNode || !chatModel.value || !chatNode.value;
-        setButtonText(chatSubmitButton, isSubmitting ? "Generating..." : (chatUseRPC && chatUseRPC.checked ? "Generate RPC" : "Generate"));
+        chatSubmitButton.disabled = isSubmitting || !chatModel || !chatModel.value || (chatModeNeedsWorker() && (!chatNode || !chatNode.value));
+        setButtonText(chatSubmitButton, isSubmitting ? "Generating..." : chatButtonLabel());
       }
       if (chatPrompt) chatPrompt.disabled = isSubmitting;
       if (chatModel) chatModel.disabled = isSubmitting;
-      if (chatNode) chatNode.disabled = isSubmitting;
+      if (chatNode) chatNode.disabled = isSubmitting || !chatModeNeedsWorker();
+      if (chatExecutionMode) chatExecutionMode.disabled = isSubmitting;
+    }
+    function currentChatExecutionMode() {
+      var mode = chatExecutionMode ? String(chatExecutionMode.value || "automatic") : "automatic";
+      if (mode === "automatic") {
+        var selected = chatModel && chatModel.selectedOptions && chatModel.selectedOptions.length ? chatModel.selectedOptions[0] : null;
+        if (selected && selected.dataset.singleReady === "true") return "single_worker";
+        if (selected && selected.dataset.distributedSlicedReady === "true") return "distributed_sliced";
+        return "single_worker";
+      }
+      return mode;
+    }
+    function chatModeNeedsWorker() {
+      var mode = currentChatExecutionMode();
+      return mode === "single_worker" || mode === "distributed_rpc";
+    }
+    function chatButtonLabel() {
+      var mode = currentChatExecutionMode();
+      if (mode === "distributed_rpc") return "Generate RPC";
+      if (mode === "distributed_sliced") return "Generate sliced";
+      return "Generate";
+    }
+    function syncChatExecutionMode() {
+      if (!chatModel) return;
+      var selected = chatModel.selectedOptions && chatModel.selectedOptions.length ? chatModel.selectedOptions[0] : null;
+      var singleReady = selected ? selected.dataset.singleReady === "true" : false;
+      var slicedReady = selected ? selected.dataset.distributedSlicedReady === "true" : false;
+      if (chatExecutionMode) {
+        Array.prototype.forEach.call(chatExecutionMode.options, function(option) {
+          if (option.value === "single_worker") option.disabled = !singleReady;
+          if (option.value === "distributed_sliced") option.disabled = !slicedReady;
+        });
+        if (chatExecutionMode.selectedOptions.length && chatExecutionMode.selectedOptions[0].disabled) {
+          chatExecutionMode.value = singleReady ? "single_worker" : (slicedReady ? "distributed_sliced" : "automatic");
+        }
+      }
+      if (chatNode) chatNode.disabled = !chatModeNeedsWorker();
+      if (chatSubmitButton && !chatSubmitting) {
+        chatSubmitButton.disabled = !chatModel.value || (chatModeNeedsWorker() && (!chatNode || !chatNode.value));
+        setButtonText(chatSubmitButton, chatButtonLabel());
+      }
+      if (modelStatus) {
+        var mode = currentChatExecutionMode();
+        if (mode === "distributed_sliced") {
+          modelStatus.innerText = "Ready. This will submit a CDIP distributed sliced job.";
+        } else if (mode === "distributed_rpc") {
+          modelStatus.innerText = "Ready. RPC pool will be used for the next prompt.";
+        } else {
+          modelStatus.innerText = "Ready.";
+        }
+      }
     }
     function syncChatNodes() {
       if (!chatModel || !chatNode) return;
@@ -9748,20 +9845,27 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         setRPCPromptSmokeSubmitting(false);
       });
     }
-    function submitChatGenerate(modelID, nodeID, prompt, useRPC, maxTokens) {
-      var generatePath = useRPC ? "/distributed-rpc-generate" : "/generate";
-      if (modelStatus) modelStatus.innerText = useRPC ? "Submitting distributed RPC model job..." : "Submitting model job...";
+    function submitChatGenerate(modelID, nodeID, prompt, executionMode, maxTokens) {
+      var generatePath = "/generate";
+      if (executionMode === "distributed_rpc") generatePath = "/distributed-rpc-generate";
+      if (executionMode === "distributed_sliced") generatePath = "/distributed-generate";
+      if (modelStatus) {
+        if (executionMode === "distributed_rpc") modelStatus.innerText = "Submitting distributed RPC model job...";
+        else if (executionMode === "distributed_sliced") modelStatus.innerText = "Submitting distributed sliced model job...";
+        else modelStatus.innerText = "Submitting single-worker model job...";
+      }
+      var body = {
+        conversation_id: chatConversationID,
+        system_prompt: chatSystemPrompt ? chatSystemPrompt.value : "",
+        prompt: prompt,
+        max_tokens: maxTokens,
+        temperature: chatTemperature && chatTemperature.value ? chatTemperature.value : "0.7"
+      };
+      if (executionMode !== "distributed_sliced") body.node_id = nodeID;
       return fetch("/v1/models/" + encodeURIComponent(modelID) + generatePath, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          node_id: nodeID,
-          conversation_id: chatConversationID,
-          system_prompt: chatSystemPrompt ? chatSystemPrompt.value : "",
-          prompt: prompt,
-          max_tokens: maxTokens,
-          temperature: chatTemperature && chatTemperature.value ? chatTemperature.value : "0.7"
-        })
+        body: JSON.stringify(body)
       });
     }
     if (rpcPromptSmokeModel) {
@@ -9827,15 +9931,20 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     if (chatModel) {
       chatModel.addEventListener("change", function() {
         syncChatNodes();
+        syncChatExecutionMode();
         syncAuxModelSelects(currentChatModelID());
         applyChatModelPreset(true);
         loadModelMemory();
         updateMemoryPreview();
       });
       syncChatNodes();
+      syncChatExecutionMode();
       syncAuxModelSelects(currentChatModelID());
       applyChatModelPreset(false);
       loadModelMemory();
+    }
+    if (chatExecutionMode) {
+      chatExecutionMode.addEventListener("change", syncChatExecutionMode);
     }
     if (memoryModelSelect) {
       memoryModelSelect.addEventListener("change", function() {
@@ -9906,14 +10015,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     if (chatMaxTokens) {
       chatMaxTokens.addEventListener("change", updateMemoryPreview);
       chatMaxTokens.addEventListener("input", updateMemoryPreview);
-    }
-    if (chatUseRPC) {
-      chatUseRPC.addEventListener("change", function() {
-        if (chatSubmitButton && !chatSubmitting) setButtonText(chatSubmitButton, chatUseRPC.checked ? "Generate RPC" : "Generate");
-        if (modelStatus) {
-          modelStatus.innerText = chatUseRPC.checked ? "Ready. RPC pool will be used for the next prompt." : "Ready.";
-        }
-      });
     }
     if (memoryList) {
       memoryList.addEventListener("click", function(event) {
@@ -10035,15 +10136,16 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     if (chatForm) {
       chatForm.addEventListener("submit", function(event) {
         event.preventDefault();
-        if (!chatModel || !chatNode) return;
+        if (!chatModel) return;
         if (chatSubmitting) {
           if (modelStatus) modelStatus.innerText = "A generate job is already running for this chat.";
           return;
         }
         var modelID = chatModel.value;
         var nodeID = chatNode.value;
+        var executionMode = currentChatExecutionMode();
         var prompt = String(chatForm.elements.prompt.value || "").trim();
-        if (!modelID || !nodeID) {
+        if (!modelID || (chatModeNeedsWorker() && !nodeID)) {
           modelStatus.innerText = "Install a model before generating.";
           return;
         }
@@ -10052,14 +10154,13 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
           return;
         }
         setChatSubmitting(true);
-        var useRPC = Boolean(chatUseRPC && chatUseRPC.checked && !chatUseRPC.disabled);
         var maxTokens = parseInt(chatMaxTokens && chatMaxTokens.value ? chatMaxTokens.value : "512", 10);
         if (!Number.isFinite(maxTokens) || maxTokens < 16) maxTokens = 512;
         if (maxTokens > 2048) maxTokens = 2048;
-        (useRPC ? smokeRPCPoolForChat(modelID, nodeID) : Promise.resolve(null)).then(function() {
+        (executionMode === "distributed_rpc" ? smokeRPCPoolForChat(modelID, nodeID) : Promise.resolve(null)).then(function() {
           appendChatMessage("user", prompt);
           chatForm.elements.prompt.value = "";
-          return submitChatGenerate(modelID, nodeID, prompt, useRPC, maxTokens);
+          return submitChatGenerate(modelID, nodeID, prompt, executionMode, maxTokens);
         }).then(function(response) {
           if (!response.ok) {
             return response.text().then(function(text) { throw new Error(text || response.statusText); });
@@ -10073,7 +10174,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             }
           } catch (error) {}
           loadModelMemory();
-          modelStatus.innerText = (useRPC ? "Distributed RPC job " : "Generate job ") + job.id + " submitted.";
+          var prefix = executionMode === "distributed_rpc" ? "Distributed RPC job " : (executionMode === "distributed_sliced" ? "Distributed sliced job " : "Generate job ");
+          modelStatus.innerText = prefix + job.id + " submitted.";
           pollModelJob(job.id, 0);
         }).catch(function(error) {
           setChatSubmitting(false);

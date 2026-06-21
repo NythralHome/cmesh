@@ -716,6 +716,9 @@ func dispatchCDIPDecodeLoopStepWithTokenFeedback(store Store, parentJobID string
 		input.TerminalForceFinal = nil
 		input.PreviousTokenID = nil
 		input.PreviousTokenText = ""
+		if strings.TrimSpace(previousTokenText) != "" {
+			input.PreviousTokenText = previousTokenText
+		}
 		if index > 0 {
 			input.UpstreamStageID = stages[index-1].ID
 			input.UpstreamNodeID = stages[index-1].AssignedTo
@@ -731,7 +734,6 @@ func dispatchCDIPDecodeLoopStepWithTokenFeedback(store Store, parentJobID string
 			if previousTokenID != nil {
 				token := *previousTokenID
 				input.PreviousTokenID = &token
-				input.PreviousTokenText = previousTokenText
 			}
 		case index < len(stages)-1:
 			input.StageCommand = "relay_decode"
@@ -992,6 +994,68 @@ func distributedModelPlanWithTotalLayers(model models.Model, nodes []cluster.Nod
 	plan.Blockers = append(plan.Blockers, distributedExecutionBlockers(plan.Stages)...)
 	plan.ExecutableNow = len(plan.Blockers) == 0
 	return plan
+}
+
+func distributedModelPlanWithPinnedStageNodes(model models.Model, nodes []cluster.Node, totalLayers int, stageNodeIDs []string) (DistributedModelPlan, error) {
+	plan := distributedModelPlanWithTotalLayers(model, nodes, totalLayers)
+	cleaned := make([]string, 0, len(stageNodeIDs))
+	seen := map[string]bool{}
+	for _, nodeID := range stageNodeIDs {
+		nodeID = strings.TrimSpace(nodeID)
+		if nodeID == "" {
+			continue
+		}
+		if seen[nodeID] {
+			return plan, fmt.Errorf("distributed generate stage_node_ids contains duplicate node %q", nodeID)
+		}
+		seen[nodeID] = true
+		cleaned = append(cleaned, nodeID)
+	}
+	if len(cleaned) == 0 {
+		return plan, nil
+	}
+	if len(cleaned) < 2 {
+		return plan, fmt.Errorf("distributed generate requires at least 2 stage_node_ids")
+	}
+	candidates := distributedCandidates(model, nodes)
+	byNodeID := make(map[string]cluster.Node, len(candidates))
+	for _, candidate := range candidates {
+		byNodeID[candidate.ID] = candidate
+	}
+	selected := make([]cluster.Node, 0, len(cleaned))
+	for index, nodeID := range cleaned {
+		node, ok := byNodeID[nodeID]
+		if !ok {
+			return plan, fmt.Errorf("distributed generate stage_node_ids[%d] node %q is not an online distributed candidate", index, nodeID)
+		}
+		selected = append(selected, node)
+	}
+	layerCounts, ok := allocateDistributedLayers(model, selected, plan.TotalLayers)
+	plan.Placement = buildDistributedPlacement(model, candidates, selected, layerCounts, plan.TotalLayers)
+	if !ok {
+		plan.Stages = nil
+		plan.Feasible = false
+		plan.ExecutableNow = false
+		plan.Blockers = []string{"pinned stage_node_ids cannot satisfy per-worker RAM and disk limits"}
+		return plan, nil
+	}
+	plan.Stages = buildDistributedStages(model, selected, plan.TotalLayers, layerCounts)
+	plan.Feasible = len(plan.Stages) >= 2
+	plan.Network.InterStageHops = maxInt(0, len(plan.Stages)-1)
+	plan.EstimatedLatency = estimateDistributedLatency(model, len(plan.Stages), plan.Network.AssumedInterStageLatencyMS)
+	plan.Warnings = nil
+	if !allStagesRuntimeReady(plan.Stages) {
+		plan.Warnings = append(plan.Warnings, "one or more selected workers do not report a ready runtime")
+	}
+	if !allStagesStageRuntimeReady(plan.Stages) {
+		plan.Warnings = append(plan.Warnings, "one or more selected workers do not report distributed stage runtime capability")
+	}
+	if !allStagesInstalled(plan.Stages) {
+		plan.Warnings = append(plan.Warnings, "model shards are not installed on all selected workers")
+	}
+	plan.Blockers = distributedExecutionBlockers(plan.Stages)
+	plan.ExecutableNow = len(plan.Blockers) == 0
+	return plan, nil
 }
 
 func distributedCandidates(model models.Model, nodes []cluster.Node) []cluster.Node {
@@ -1357,6 +1421,12 @@ func stageRuntimeDiagnosticsFromPlan(stages []DistributedPlanStage) DistributedR
 }
 
 func estimatedModelLayers(model models.Model) int {
+	if model.Layers > 0 {
+		return model.Layers
+	}
+	if model.Production != nil && model.Production.Layers > 0 {
+		return model.Production.Layers
+	}
 	params := strings.ToUpper(strings.TrimSpace(model.Parameters))
 	params = strings.TrimSuffix(params, "B")
 	value, err := strconv.ParseFloat(params, 64)
